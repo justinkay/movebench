@@ -21,6 +21,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 
 import pandas as pd
 import zipfile
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,11 @@ COMMON_NAME_MAPPING = {
     "Grus grus": "Common Crane",
     "Chelonia mydas": "Green Sea Turtle",
 }
+
+try:
+    import taxoniq  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    taxoniq = None
 
 
 class MetadataExtractionError(RuntimeError):
@@ -126,6 +132,27 @@ def get_continent_from_coords(lat: float, lon: float) -> str:
     return "Unknown"
 
 
+@lru_cache(maxsize=2048)
+def _taxoniq_lookup(scientific_name: str) -> Optional[str]:
+    if not taxoniq:
+        return None
+    try:
+        taxon = taxoniq.Taxon(scientific_name=scientific_name)
+    except Exception:
+        return None
+    try:
+        common = getattr(taxon, "common_name", None)
+    except Exception:
+        common = None
+    if not common and hasattr(taxon, "common_names"):
+        names = getattr(taxon, "common_names")
+        if isinstance(names, (list, tuple)):
+            common = names[0] if names else None
+    if isinstance(common, str) and common.strip():
+        return common.strip()
+    return None
+
+
 def get_common_names(scientific_names_str: str) -> str:
     """Map scientific species names to user-friendly common names."""
     if not scientific_names_str or scientific_names_str == "Unknown":
@@ -134,7 +161,10 @@ def get_common_names(scientific_names_str: str) -> str:
     for sci_name in (name.strip() for name in scientific_names_str.split(";")):
         if not sci_name:
             continue
-        names.append(COMMON_NAME_MAPPING.get(sci_name, sci_name))
+        common = COMMON_NAME_MAPPING.get(sci_name)
+        if not common:
+            common = _taxoniq_lookup(sci_name)
+        names.append(common or sci_name)
     return "; ".join(names) if names else "Unknown"
 
 
