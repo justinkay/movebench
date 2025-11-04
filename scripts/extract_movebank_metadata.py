@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Destination CSV for extracted metadata (default: %(default)s).",
     )
     parser.add_argument(
+        "--report",
+        default=None,
+        help="Optional JSON file to store the extraction summary.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -82,6 +87,11 @@ def main() -> None:
         output_csv=Path(args.output),
         redownload_callback=redownload,
     )
+
+    if args.report:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print(json.dumps(summary, indent=2))
 

@@ -145,10 +145,11 @@ def main() -> None:
             timeout,
             "all" if remaining_ids is None else len(remaining_ids),
         )
+        skip_existing = args.skip_existing and remaining_ids is None
         downloader = MovebankStudyDownloader(
             base_dir=Path(args.output_dir),
             extraction_enabled=not args.no_extract,
-            skip_existing=args.skip_existing,
+            skip_existing=skip_existing,
             request_timeout=timeout,
             delay_between_requests=args.delay,
         )
@@ -214,4 +215,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
