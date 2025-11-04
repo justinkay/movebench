@@ -265,14 +265,31 @@ class MovebankStudyDownloader:
         return links
 
     # ---- file handling ---------------------------------------------------
+    def _attempt_download(self, url: str, destination: Path) -> None:
+        try:
+            self._download_to_path(url, destination)
+            return
+        except RuntimeError as exc:
+            fallback_url = self._bitstream_fallback_url(url)
+            if not fallback_url:
+                raise
+            logger.info("Retrying download via API endpoint: %s", fallback_url)
+            self._download_to_path(fallback_url, destination)
+
     def _download_to_path(self, url: str, destination: Path) -> None:
         temp_path = destination.with_suffix(destination.suffix + ".part")
         response = self._get(url, stream=True)
         bytes_downloaded = 0
+        first_chunk_checked = False
         with open(temp_path, "wb") as handle:
             for chunk in response.iter_content(chunk_size=8192):
                 if not chunk:
                     continue
+                if not first_chunk_checked:
+                    first_chunk_checked = True
+                    if self._chunk_looks_like_html(chunk, response.headers):
+                        temp_path.unlink(missing_ok=True)
+                        raise RuntimeError("Received HTML instead of dataset content")
                 handle.write(chunk)
                 bytes_downloaded += len(chunk)
         temp_path.replace(destination)
@@ -292,6 +309,38 @@ class MovebankStudyDownloader:
         with zipfile.ZipFile(archive_path, "r") as zf:
             zf.extractall(extract_dir)
         logger.info("Extracted %s to %s", archive_path.name, extract_dir)
+
+    @staticmethod
+    def _looks_like_html(path: Path) -> bool:
+        try:
+            with path.open("rb") as handle:
+                prefix = handle.read(1024).lstrip().lower()
+        except OSError:
+            return False
+        return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
+
+    @staticmethod
+    def _chunk_looks_like_html(chunk: bytes, headers: Dict[str, str]) -> bool:
+        if not chunk:
+            return False
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        if content_type and "text/html" in content_type.lower():
+            return True
+        stripped = chunk.lstrip().lower()
+        return stripped.startswith(b"<!doctype html") or stripped.startswith(b"<html")
+
+    @staticmethod
+    def _bitstream_fallback_url(url: str) -> Optional[str]:
+        parsed = urlparse(url)
+        if "bitstreams" not in parsed.path:
+            return None
+        parts = parsed.path.strip("/").split("/")
+        try:
+            idx = parts.index("bitstreams")
+            bitstream_id = parts[idx + 1]
+        except (ValueError, IndexError):
+            return None
+        return f"https://datarepository.movebank.org/server/api/core/bitstreams/{bitstream_id}/content"
 
     # ---- public API ------------------------------------------------------
     def download_study(self, record: StudyRecord) -> Dict[str, object]:
@@ -322,10 +371,16 @@ class MovebankStudyDownloader:
         for link in download_links:
             filepath = study_dir / link.filename
             try:
+                needs_download = True
                 if filepath.exists():
-                    logger.info("File already exists, skipping: %s", filepath.name)
-                else:
-                    self._download_to_path(link.url, filepath)
+                    if self._looks_like_html(filepath):
+                        logger.warning("Existing file looks like HTML, re-downloading: %s", filepath.name)
+                        filepath.unlink()
+                    elif self.skip_existing:
+                        logger.info("File already exists, skipping: %s", filepath.name)
+                        needs_download = False
+                if needs_download:
+                    self._attempt_download(link.url, filepath)
                     time.sleep(self.delay_between_requests)
                 self._extract_archive(filepath, study_dir)
                 manifest[link.filename] = {
