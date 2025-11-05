@@ -31,6 +31,13 @@ from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
+DOI_PATTERNS = (
+    r"https?://(?:www\.)?doi\.org/[\w./-]+",
+    r"https?://dx\.doi\.org/[\w./-]+",
+    r"doi:\s*([\w./-]+)",
+    r"DOI:\s*([\w./-]+)",
+)
+
 
 def _build_retry() -> Retry:
     return Retry(
@@ -69,6 +76,35 @@ def sanitize_filename(filename: str) -> str:
     if len(clean) > 200:
         clean = clean[:200].rstrip()
     return clean or "unnamed"
+
+
+def _normalize_doi(content: str) -> Optional[str]:
+    if not content:
+        return None
+    doi = content.strip().strip(' ,.;')
+    if not doi:
+        return None
+    if doi.lower().startswith("doi:"):
+        doi = doi.split(":", 1)[1].strip()
+    if doi.startswith("http"):
+        if "doi.org" in doi:
+            return doi.rstrip(' .,;')
+        return None
+    return f"https://doi.org/{doi.rstrip(' .,;')}"
+
+
+def _extract_doi_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for pattern in DOI_PATTERNS:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        group = match.group(0 if "http" in pattern else 1)
+        doi_url = _normalize_doi(group)
+        if doi_url:
+            return doi_url
+    return None
 
 
 def extract_first_author_lastname(author_string: str) -> str:
@@ -180,6 +216,7 @@ class MovebankStudyDownloader:
         title = ""
         creators: List[str] = []
         citation_text = ""
+        doi_url = None
 
         title_tag = soup.find("h1")
         if title_tag:
@@ -198,6 +235,23 @@ class MovebankStudyDownloader:
                 content = meta.get("content")
                 if content:
                     citation_text = content.strip()
+            if name in {"citation_doi", "dc.identifier"}:
+                content = meta.get("content")
+                candidate = _normalize_doi(content) if content else None
+                if candidate:
+                    doi_url = candidate
+
+        if not doi_url and citation_text:
+            doi_url = _extract_doi_from_text(citation_text)
+
+        if not doi_url:
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if "doi.org" in href:
+                    candidate = _normalize_doi(href)
+                    if candidate:
+                        doi_url = candidate
+                        break
 
         # Fallback: authors listed in page content
         if not creators:
@@ -212,6 +266,7 @@ class MovebankStudyDownloader:
             "title": title,
             "author_list": author_list,
             "citation": citation_text,
+            "doi_url": doi_url,
         }
 
     @staticmethod
@@ -404,6 +459,11 @@ class MovebankStudyDownloader:
             "raw_row": record.csv_row,
             "files": manifest,
         }
+        if metadata.get("citation"):
+            metadata_payload["citation"] = metadata.get("citation")
+        if metadata.get("doi_url"):
+            metadata_payload["doi_url"] = metadata.get("doi_url")
+        metadata_payload["paper_url"] = metadata.get("doi_url") or record.url
         metadata_path.write_text(json.dumps(metadata_payload, indent=2), encoding="utf-8")
 
         return {

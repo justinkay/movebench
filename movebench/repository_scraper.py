@@ -46,6 +46,9 @@ class StudyLink:
     title: str
     page: int
     raw_text: str
+    paper_title: str = ""
+    doi_url: str = ""
+    citation: str = ""
 
 
 def _default_retry() -> Retry:
@@ -90,16 +93,20 @@ class MovebankRepositoryScraper:
         session: Optional[requests.Session] = None,
         request_timeout: float = 30.0,
         page_delay: float = 1.0,
+        detail_delay: float = 0.5,
         max_pages: int = 50,
         consecutive_empty_limit: int = 2,
+        fetch_details: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.search_template = search_template
         self.session = session or _build_session()
         self.request_timeout = request_timeout
         self.page_delay = page_delay
+        self.detail_delay = detail_delay
         self.max_pages = max_pages
         self.consecutive_empty_limit = consecutive_empty_limit
+        self.fetch_details = fetch_details
 
     def _fetch_page(self, page_number: int) -> str:
         url = self.search_template.format(page=page_number)
@@ -150,6 +157,79 @@ class MovebankRepositoryScraper:
 
         return links
 
+    def _normalize_doi(self, candidate: str) -> Optional[str]:
+        if not candidate:
+            return None
+        value = candidate.strip().strip(" .,;")
+        if not value:
+            return None
+        if value.lower().startswith("doi:"):
+            value = value.split(":", 1)[1].strip()
+        if value.startswith("http"):
+            if "doi.org" in value:
+                return value.rstrip(" .,;")
+            return None
+        return f"https://doi.org/{value.rstrip(' .,;')}"
+
+    def _extract_details(self, soup: BeautifulSoup) -> Tuple[str, str, str]:
+        title = ""
+        citation_texts: List[str] = []
+        doi_url: Optional[str] = None
+
+        h1 = soup.find("h1")
+        if h1:
+            title = self._normalise_title(h1.get_text(strip=True))
+
+        for meta in soup.find_all("meta"):
+            name = (meta.get("name") or meta.get("property") or "").lower()
+            content = meta.get("content") or meta.get("value") or ""
+            if not content:
+                continue
+            if name in {"citation_title", "dc.title", "dcterms.title"} and not title:
+                title = self._normalise_title(content)
+            if name in {"dcterms.bibliographiccitation", "citation_reference", "dc.citation"}:
+                citation_texts.append(content)
+                if not doi_url:
+                    doi_url = self._normalize_doi(content)
+            if name in {"citation_doi", "dc.identifier", "dc.identifier.doi", "dcterms.identifier"}:
+                candidate = self._normalize_doi(content)
+                if candidate:
+                    doi_url = candidate
+
+        if not doi_url:
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if "doi.org" in href:
+                    candidate = self._normalize_doi(href)
+                    if candidate:
+                        doi_url = candidate
+                        break
+
+        citation = "\n".join(dict.fromkeys([c for c in citation_texts if c]))
+        return title, citation, doi_url or ""
+
+    def _enrich_link(self, link: StudyLink) -> None:
+        try:
+            response = self.session.get(link.url, timeout=self.request_timeout)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            paper_title, citation, doi_url = self._extract_details(soup)
+            if paper_title:
+                link.paper_title = paper_title
+            if citation:
+                link.citation = citation
+            if doi_url:
+                link.doi_url = doi_url
+        except requests.RequestException as exc:
+            logger.warning("Failed to fetch details for %s: %s", link.url, exc)
+
+    def _enrich_links(self, links: List[StudyLink]) -> None:
+        if not self.fetch_details:
+            return
+        for link in links:
+            self._enrich_link(link)
+            time.sleep(self.detail_delay)
+
     def scrape(self) -> List[StudyLink]:
         """Scrape search pages until exhaustion or max_pages is reached."""
         results: List[StudyLink] = []
@@ -194,6 +274,7 @@ class MovebankRepositoryScraper:
 
             time.sleep(self.page_delay)
 
+        self._enrich_links(results)
         return results
 
     @staticmethod
@@ -204,7 +285,16 @@ class MovebankRepositoryScraper:
         include_header: bool = True,
     ) -> None:
         """Persist scraped links to CSV."""
-        fieldnames = ["study_id", "url", "title", "raw_text", "page"]
+        fieldnames = [
+            "study_id",
+            "url",
+            "title",
+            "raw_text",
+            "page",
+            "paper_title",
+            "doi_url",
+            "citation",
+        ]
         with open(dest_path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             if include_header:
@@ -217,6 +307,9 @@ class MovebankRepositoryScraper:
                         "title": link.title,
                         "raw_text": link.raw_text,
                         "page": link.page,
+                        "paper_title": link.paper_title,
+                        "doi_url": link.doi_url,
+                        "citation": link.citation,
                     }
                 )
 
@@ -231,4 +324,3 @@ def scrape_to_csv(
     links = scraper.scrape()
     scraper.write_csv(links, dest_path)
     return links, dest_path
-

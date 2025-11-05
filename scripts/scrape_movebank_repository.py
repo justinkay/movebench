@@ -37,6 +37,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay between page requests in seconds.",
     )
     parser.add_argument(
+        "--detail-delay",
+        type=float,
+        default=0.5,
+        help="Delay between detail page requests in seconds (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--no-details",
+        action="store_true",
+        help="Skip fetching per-study detail pages (title/DOI).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -56,7 +67,9 @@ def main() -> None:
 
     scraper = MovebankRepositoryScraper(
         page_delay=args.page_delay,
+        detail_delay=args.detail_delay,
         max_pages=args.max_pages,
+        fetch_details=not args.no_details,
     )
 
     links, dest = scrape_to_csv(str(output_path), scraper=scraper)

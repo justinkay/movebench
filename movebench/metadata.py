@@ -188,6 +188,19 @@ def extract_doi_url(citation_text: str) -> str:
     return ""
 
 
+def _normalize_doi_candidate(value: str) -> Optional[str]:
+    if not value:
+        return None
+    candidate = value.strip().strip(".,; ")
+    if not candidate:
+        return None
+    if candidate.lower().startswith("doi:"):
+        candidate = candidate.split(":", 1)[1].strip()
+    if candidate.startswith("http"):
+        return candidate if "doi.org" in candidate else None
+    return f"https://doi.org/{candidate}"
+
+
 def _is_html_document(path: Path) -> bool:
     try:
         with path.open("rb") as handle:
@@ -456,11 +469,34 @@ class StudyMetadataExtractor:
         return "Unknown"
 
     def _derive_paper_url(self, citation_texts: List[str], download_meta: Dict[str, object]) -> str:
-        for citation in citation_texts:
+        texts = list(citation_texts)
+        download_citation = str(download_meta.get("citation", "") or "")
+        if download_citation:
+            texts.append(download_citation)
+
+        for citation in texts:
             doi_url = extract_doi_url(citation)
             if doi_url:
                 return doi_url
-        return str(download_meta.get("paper_url", "")) or extract_doi_url(str(download_meta.get("citation", "")))
+
+        doi_candidate = download_meta.get("doi_url")
+        if isinstance(doi_candidate, str):
+            doi_url = extract_doi_url(doi_candidate) or _normalize_doi_candidate(doi_candidate)
+            if doi_url:
+                return doi_url
+
+        for key in ("paper_url", "source_url"):
+            value = download_meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        raw_row = download_meta.get("raw_row", {})
+        if isinstance(raw_row, dict):
+            raw_url = raw_row.get("url")
+            if isinstance(raw_url, str) and raw_url.strip():
+                return raw_url.strip()
+
+        return ""
 
     def _extract_study_metadata(self, study_dir: Path) -> StudyMetadata:
         download_meta = self._read_download_metadata(study_dir)
