@@ -33,7 +33,18 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_USER_PROMPT = """\
-Visit this url and read the paper in its entirety {publication_url}  The goal of reading the text of the publication (if accessible) is to find which environmental covariates, if any,  were used to analyze the data points in the study. This needs to be 100% precise:  you must be absolutely certain that that environmental feature was used in the study in order to report it to me.   Return the following: one row per covariate used, with comma separated values: covariate_name,spatial_resolution,temporal_resolution. DO NOT make any assumptions or hallucinate variables that were not used. Each variable must be backed  up by explicit text in the manuscript saying it was used.  If you cannot access the publication, say so. If you read the paper exhaustively and find no covariates were used, say so.
+Visit this url and read the paper in its entirety: {publication_url}
+
+Goal: extract every environmental covariate that the authors explicitly state they used alongside the movement data for this study.
+
+Rules:
+1. Only report variables that the manuscript clearly confirms were used; never infer or guess.
+2. For each covariate, output a single CSV row with the format covariate_name,spatial_resolution,temporal_resolution.
+3. If a field is not reported, use N/A for that position.
+4. If you cannot access the publication, respond with "ACCESS_DENIED".
+5. If you truly find no qualifying covariates after reading the full text, respond with "NO_COVARIATES".
+
+Do not add commentary outside the CSV rows or the explicit status phrases above.
 """
 
 
@@ -138,7 +149,10 @@ def load_prompt_template(path: Path | None) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def build_chat_request(
+DEFAULT_TOOLS: List[Dict[str, str]] = [{"type": "web_search"}]
+
+
+def build_response_request(
     *,
     model: str,
     system_prompt: str,
@@ -148,7 +162,7 @@ def build_chat_request(
     study_id: str,
     study_title: str,
     publication: PublicationLink,
-    temperature: float,
+    tools: List[Dict[str, str]] | None = None,
 ) -> Dict[str, object]:
     try:
         user_prompt = user_prompt_template.format(
@@ -165,6 +179,8 @@ def build_chat_request(
             "Update the template or supply the correct placeholder."
         ) from exc
 
+    tools_to_use = tools if tools is not None else [dict(tool) for tool in DEFAULT_TOOLS]
+
     return {
         "row_index": row_index,
         "study_id": study_id,
@@ -174,11 +190,21 @@ def build_chat_request(
         "publication_label": publication.text,
         "chat_request": {
             "model": model,
-            "temperature": temperature,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+            "input": [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_prompt}],
+                },
             ],
+            "tools": tools_to_use,
+            "metadata": {
+                "study_id": study_id,
+                "publication_url": publication.url,
+            },
         },
     }
 
@@ -210,12 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-jsonl",
         default="papers/chatgpt_requests.jsonl",
-        help="Destination JSONL file with chat completion payloads (default: %(default)s).",
+        help="Destination JSONL file with Responses API payloads (default: %(default)s).",
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o",
-        help="ChatGPT model name to include in each payload (default: %(default)s).",
+        default="gpt-5",
+        help="Model name to include in each Responses API payload (default: %(default)s).",
     )
     parser.add_argument(
         "--system-prompt",
@@ -228,12 +254,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a text file containing the user prompt template. "
         "Available placeholders: {dataset_url}, {study_id}, {study_title}, "
         "{publication_url}, {publication_label}.",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.2,
-        help="Temperature value to include with each chat request (default: %(default)s).",
     )
     parser.add_argument(
         "--log-level",
@@ -254,8 +274,6 @@ def main() -> None:
     if not links_csv.exists():
         parser.error(f"CSV file not found: {links_csv}")
 
-    session = _build_session()
-
     prompt_path = Path(args.prompt_template) if args.prompt_template else None
     if prompt_path and not prompt_path.exists():
         parser.error(f"Prompt template file not found: {prompt_path}")
@@ -264,61 +282,81 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     records: List[str] = []
+    session = _build_session()
 
-    with open(links_csv, newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if "paper_url" not in reader.fieldnames:
-            parser.error("Input CSV must include a 'paper_url' column.")
+    try:
+        with open(links_csv, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if "paper_url" not in reader.fieldnames:
+                parser.error("Input CSV must include a 'paper_url' column.")
 
-        for idx, row in enumerate(reader, start=1):
-            dataset_url = (row.get("paper_url") or "").strip()
-            if not dataset_url:
-                logger.debug("Row %s missing paper_url; skipping.", idx)
-                continue
+            for idx, row in enumerate(reader, start=1):
+                dataset_url = (row.get("paper_url") or "").strip()
+                if not dataset_url:
+                    logger.debug("Row %s missing paper_url; skipping.", idx)
+                    continue
 
-            study_id = (row.get("study_id") or "").strip()
-            label = study_id or f"row-{idx}"
+                study_id = (row.get("study_id") or "").strip()
+                label = study_id or f"row-{idx}"
+                study_title = (row.get("title") or row.get("study_name") or "").strip()
 
-            try:
-                links = fetch_publication_urls(
-                    session,
-                    dataset_url,
-                    timeout=args.request_timeout,
-                )
-            except requests.RequestException as exc:
-                logger.warning("Failed to load dataset page %s: %s", dataset_url, exc)
-                continue
+                try:
+                    links = fetch_publication_urls(
+                        session,
+                        dataset_url,
+                        timeout=args.request_timeout,
+                    )
+                except requests.RequestException as exc:
+                    logger.warning(
+                        "Failed to load dataset page %s (%s): %s",
+                        label,
+                        dataset_url,
+                        exc,
+                    )
+                    continue
 
-            if not links:
-                logger.info("No related publication links found for %s", dataset_url)
-                continue
+                if not links:
+                    logger.info("No related publication links found for %s", dataset_url)
+                    continue
 
-            for link in links:
-                print(f"{label}\t{dataset_url}\t{link.url}\t{link.text}")
-                request_payload = build_chat_request(
-                    model=args.model,
-                    system_prompt=args.system_prompt,
-                    user_prompt_template=user_prompt_template,
-                    row_index=idx,
-                    dataset_url=dataset_url,
-                    study_id=study_id,
-                    study_title=(row.get("title") or row.get("study_name") or "").strip(),
-                    publication=link,
-                    temperature=args.temperature,
-                )
-                records.append(json.dumps(request_payload))
-                print("Payload for", link)
-                print(request_payload)
+                for link in links:
+                    logger.debug(
+                        "Prepared publication link for %s: %s (%s)",
+                        label,
+                        link.url,
+                        link.text,
+                    )
+                    request_payload = build_response_request(
+                        model=args.model,
+                        system_prompt=args.system_prompt,
+                        user_prompt_template=user_prompt_template,
+                        row_index=idx,
+                        dataset_url=dataset_url,
+                        study_id=study_id,
+                        study_title=study_title,
+                        publication=link,
+                    )
+                    records.append(json.dumps(request_payload, ensure_ascii=False))
+                    logger.info(
+                        "Queued Responses API payload for %s (%s)",
+                        label,
+                        link.url,
+                    )
 
-                output_path.write_text("\n".join(records) + "\n", encoding="utf-8")
-
-            time.sleep(args.dataset_delay)
+                if args.dataset_delay > 0:
+                    time.sleep(args.dataset_delay)
+    finally:
+        session.close()
 
     if records:
         output_path.write_text("\n".join(records) + "\n", encoding="utf-8")
-        logger.info("Wrote %s requests to %s", len(records), output_path)
+        logger.info(
+            "Wrote %s Responses API payloads to %s",
+            len(records),
+            output_path,
+        )
     else:
-        logger.info("No chat requests generated.")
+        logger.info("No response payloads generated.")
 
 
 if __name__ == "__main__":
