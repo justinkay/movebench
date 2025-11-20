@@ -211,7 +211,14 @@ def build_figure_from_df(
         raise RuntimeError("Expected a 'timestamp' column in the data.")
 
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['timestamp'] = pd.to_datetime(
+        df['timestamp'],
+            format='mixed',   # let pandas infer per element
+            errors='coerce'   # bad parses become NaT instead of raising
+        )
+    df = df[df['timestamp'].notna()].copy()
+    df['individual-local-identifier'] = df['individual-local-identifier'].astype(str)
 
     duration = df['timestamp'].max() - df['timestamp'].min()
     num_individuals = df['individual-local-identifier'].nunique()
