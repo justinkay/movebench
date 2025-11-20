@@ -14,18 +14,20 @@ Features
     - mbr_studies_2year/bad_individuals.txt
       (lines of the form: "<csv_basename>,<individual-id>")
 - For each unreviewed CSV:
-    - Applies trajectory processing & visualization
-    - Excludes any individuals listed as bad for that file
+    - Saves ONE original PNG (no bad individuals removed) in pngs/
+      named "<study_name>_summary_plots.png" at dpi=150
+      and never overwrites it.
+    - Applies trajectory processing & visualization for the *current* view,
+      excluding any individuals listed as bad for that file.
     - Shows metadata, per-individual counts, and plots
     - Lets you:
-        - Mark individual(s) as bad (removes them from plots next rerun)
+        - Mark individual(s) as bad (removes them from plots on rerun)
         - Mark study as "Okay" or "Not okay"
 - Only shows files not already in ok_files/not_ok_files
 """
 
 import os
 import glob
-from pathlib import Path
 from datetime import timedelta
 
 import numpy as np
@@ -33,7 +35,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.dates as mdates
-from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 
@@ -138,38 +139,22 @@ def _append_bad_individual(filename_basename: str, individual_id: str) -> None:
 
 
 # -------------------------------------------------------------------
-# Core logic: build figure for a single file
+# Core logic: processing & plotting from a DataFrame
 # -------------------------------------------------------------------
 
-def create_trajectory_figure(csv_path: str, save_png: bool = True):
+def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
+                         save_path=None):
     """
-    Given a CSV path, run the full processing pipeline and return:
+    Given a DataFrame for a single CSV, run the full processing pipeline and return:
         fig, metadata_dict, individual_counts (Series)
 
-    - Filters out any individuals listed in BAD_INDIVIDUALS_PATH for this file.
-    - Optionally also saves a PDF in PDF_DIR.
+    If save_path is provided, saves the figure as a PNG there (dpi=150)
+    and also returns the figure.
     """
-    df = pd.read_csv(csv_path)
-    basename = os.path.basename(csv_path)
-
-    # Remove already-bad individuals for this file
-    bad_indivs = _read_bad_individuals()
-    bad_here = {ind for (fname, ind) in bad_indivs if fname == basename}
-    if bad_here:
-        df = df[~df['individual-local-identifier'].isin(bad_here)].copy()
-
-    if df.empty:
-        raise RuntimeError(
-            "All individuals in this file are marked bad (or no data left); nothing to plot."
-        )
-
-    # Study metadata
-    study_id = basename.split('_')[0]
-    study_name = basename.replace("_2year.csv", "")
-
     if 'timestamp' not in df.columns:
         raise RuntimeError("Expected a 'timestamp' column in the data.")
 
+    df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
     duration = df['timestamp'].max() - df['timestamp'].min()
@@ -183,7 +168,7 @@ def create_trajectory_figure(csv_path: str, save_png: bool = True):
         species_str = "N/A (column 'individual-taxon-canonical-name' missing)"
 
     metadata = {
-        "Study ID": study_id,
+        "Study ID": basename.split('_')[0],
         "Filename": basename,
         "Species": species_str,
         "Number of individuals": f"{num_individuals:,}",
@@ -193,7 +178,7 @@ def create_trajectory_figure(csv_path: str, save_png: bool = True):
         "Duration (days)": duration.days,
     }
 
-    # For the UI: counts (after removing previously bad individuals)
+    # For the UI: counts
     individual_counts = df['individual-local-identifier'].value_counts().sort_index()
 
     # -------------------------------------------------------------------
@@ -489,7 +474,7 @@ def create_trajectory_figure(csv_path: str, save_png: bool = True):
     ax_timeline.grid(True, axis='x', alpha=0.3)
 
     legend_patches_tl = [
-        Patch(facecolor=train_color, edgecolor='black', alpha=0.7, label='Train (first half)'),
+        Patch(facecolor=train_color, edgecolor='black', alpha=0.7, label='Train (firsthalf)'),
         Patch(facecolor=test_color, edgecolor='black', alpha=0.7, label='Test (second half)')
     ]
     ax_timeline.legend(handles=legend_patches_tl, loc='lower right')
@@ -565,14 +550,50 @@ def create_trajectory_figure(csv_path: str, save_png: bool = True):
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
-    # Save to single-page PDF (optional)
-    # if save_png:
-    #     pdf_name = os.path.join(PDF_DIR, f"{study_name}_summary_plots.pdf")
-    #     with PdfPages(pdf_name) as pdf:
-    #         pdf.savefig(fig)
-    if save_png:
-        plt.savefig(os.path.join(PNG_DIR, f"{study_name}_summary_plots.png"), dpi=150)
+    # Save PNG if requested (original or alternative view)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
 
+    return fig, metadata, individual_counts
+
+
+# -------------------------------------------------------------------
+# Wrapper: create figure for current file (handles originals vs filtered)
+# -------------------------------------------------------------------
+
+def create_trajectory_figure(csv_path: str):
+    """
+    For a given CSV file:
+    - If original PNG does not yet exist, create it from the FULL data (no bad individuals removed).
+    - Then create & return a figure based on the data with bad individuals removed.
+    """
+    df_full = pd.read_csv(csv_path)
+    basename = os.path.basename(csv_path)
+    study_name = basename.replace("_2year.csv", "")
+
+    # 1) Ensure ORIGINAL PNG exists (no bad-individual filtering)
+    png_name = os.path.join(PNG_DIR, f"{study_name}_summary_plots.png")
+    if not os.path.exists(png_name):
+        fig_orig, _, _ = build_figure_from_df(df_full, basename, study_name, save_path=png_name)
+        plt.close(fig_orig)
+
+    # 2) Apply bad-individual filtering for the current view
+    bad_indivs = _read_bad_individuals()
+    bad_here = {ind for (fname, ind) in bad_indivs if fname == basename}
+    if bad_here:
+        df_filtered = df_full[~df_full['individual-local-identifier'].isin(bad_here)].copy()
+    else:
+        df_filtered = df_full.copy()
+
+    if df_filtered.empty:
+        raise RuntimeError(
+            "All individuals in this file are marked bad (or no data left); nothing to plot."
+        )
+
+    # 3) Build the figure for the filtered data (no PNG save here)
+    fig, metadata, individual_counts = build_figure_from_df(
+        df_filtered, basename, study_name, save_path=None
+    )
     return fig, metadata, individual_counts
 
 
@@ -614,7 +635,7 @@ def main():
 
     # Build figure and metadata for current file
     try:
-        fig, metadata, individual_counts = create_trajectory_figure(current_file, save_png=True)
+        fig, metadata, individual_counts = create_trajectory_figure(current_file)
     except Exception as e:
         st.error(f"Error processing file {current_basename}: {e}")
         return
