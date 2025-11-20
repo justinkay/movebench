@@ -4,14 +4,23 @@
 """
 Streamlit Trajectory Visualization and Review App
 
+Features
+--------
 - Finds all CSVs in mbr_studies_2year/*_2year.csv
-- Skips any file whose basename is already listed in ok_files.txt or not_ok_files.txt
-- For the current CSV:
-    - Runs your original trajectory processing + visualization (single-page figure)
-    - Shows the figure in the browser
-- Lets you click "Okay" or "Not okay":
-    - Appends the CSV basename to the corresponding text file
-    - Moves on to the next unreviewed file
+- Tracks per-study review status in:
+    - mbr_studies_2year/ok_files.txt
+    - mbr_studies_2year/not_ok_files.txt
+- Tracks per-individual exclusions in:
+    - mbr_studies_2year/bad_individuals.txt
+      (lines of the form: "<csv_basename>,<individual-id>")
+- For each unreviewed CSV:
+    - Applies trajectory processing & visualization
+    - Excludes any individuals listed as bad for that file
+    - Shows metadata, per-individual counts, and plots
+    - Lets you:
+        - Mark individual(s) as bad (removes them from plots next rerun)
+        - Mark study as "Okay" or "Not okay"
+- Only shows files not already in ok_files/not_ok_files
 """
 
 import os
@@ -24,8 +33,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.dates as mdates
-from matplotlib.patches import Patch
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -38,12 +48,24 @@ import streamlit as st
 # -------------------------------------------------------------------
 
 OUTPUT_DIR = "mbr_studies_2year"
-PDF_DIR = "pdfs"
+PNG_DIR = "pngs"
 OK_LIST_PATH = os.path.join(OUTPUT_DIR, "ok_files.txt")
 NOT_OK_LIST_PATH = os.path.join(OUTPUT_DIR, "not_ok_files.txt")
+BAD_INDIVIDUALS_PATH = os.path.join(OUTPUT_DIR, "bad_individuals.txt")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(PDF_DIR, exist_ok=True)
+os.makedirs(PNG_DIR, exist_ok=True)
+
+
+# -------------------------------------------------------------------
+# Streamlit rerun helper (compatible with older/newer versions)
+# -------------------------------------------------------------------
+
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
 
 
 # -------------------------------------------------------------------
@@ -83,22 +105,67 @@ def get_remaining_files():
 
 
 # -------------------------------------------------------------------
-# Core logic: build figure for a single file
-# (mostly your original script, wrapped in a function)
+# Helper functions: bad individuals I/O
 # -------------------------------------------------------------------
 
-def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
+def _read_bad_individuals() -> set:
+    """
+    Read bad individuals from BAD_INDIVIDUALS_PATH.
+
+    Each line: <csv_basename>,<individual-local-identifier>
+    Returns a set of (filename, individual_id) tuples.
+    """
+    if not os.path.exists(BAD_INDIVIDUALS_PATH):
+        return set()
+
+    bad = set()
+    with open(BAD_INDIVIDUALS_PATH, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split(",", 1)
+            if len(parts) == 2:
+                fname, indiv = parts
+                bad.add((fname, indiv))
+    return bad
+
+
+def _append_bad_individual(filename_basename: str, individual_id: str) -> None:
+    """Append one bad individual entry to BAD_INDIVIDUALS_PATH."""
+    with open(BAD_INDIVIDUALS_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{filename_basename},{individual_id}\n")
+
+
+# -------------------------------------------------------------------
+# Core logic: build figure for a single file
+# -------------------------------------------------------------------
+
+def create_trajectory_figure(csv_path: str, save_png: bool = True):
     """
     Given a CSV path, run the full processing pipeline and return:
-        fig, metadata_dict
+        fig, metadata_dict, individual_counts (Series)
 
-    Optionally also save a PDF in PDF_DIR.
+    - Filters out any individuals listed in BAD_INDIVIDUALS_PATH for this file.
+    - Optionally also saves a PDF in PDF_DIR.
     """
     df = pd.read_csv(csv_path)
+    basename = os.path.basename(csv_path)
+
+    # Remove already-bad individuals for this file
+    bad_indivs = _read_bad_individuals()
+    bad_here = {ind for (fname, ind) in bad_indivs if fname == basename}
+    if bad_here:
+        df = df[~df['individual-local-identifier'].isin(bad_here)].copy()
+
+    if df.empty:
+        raise RuntimeError(
+            "All individuals in this file are marked bad (or no data left); nothing to plot."
+        )
 
     # Study metadata
-    study_id = os.path.basename(csv_path).split('_')[0]
-    study_name = os.path.basename(csv_path).replace("_2year.csv", "")
+    study_id = basename.split('_')[0]
+    study_name = basename.replace("_2year.csv", "")
 
     if 'timestamp' not in df.columns:
         raise RuntimeError("Expected a 'timestamp' column in the data.")
@@ -117,7 +184,7 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
 
     metadata = {
         "Study ID": study_id,
-        "Filename": os.path.basename(csv_path),
+        "Filename": basename,
         "Species": species_str,
         "Number of individuals": f"{num_individuals:,}",
         "Number of data points": f"{num_points:,}",
@@ -126,7 +193,13 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
         "Duration (days)": duration.days,
     }
 
+    # For the UI: counts (after removing previously bad individuals)
+    individual_counts = df['individual-local-identifier'].value_counts().sort_index()
+
+    # -------------------------------------------------------------------
     # 1) Compute and filter by time gap (per-individual quantile)
+    # -------------------------------------------------------------------
+
     df = df.sort_values(['individual-local-identifier', 'timestamp'])
     df['time_since_last'] = df.groupby('individual-local-identifier')['timestamp'].diff()
 
@@ -141,7 +214,10 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
         (df['time_since_last'] <= per_indiv_cutoff)
     ].copy()
 
-    # 2) Step lengths (Haversine) and filtering
+    # -------------------------------------------------------------------
+    # 2) Compute and filter by step length (Haversine)
+    # -------------------------------------------------------------------
+
     lat_rad = np.radians(df_filtered['location-lat'])
     lon_rad = np.radians(df_filtered['location-long'])
 
@@ -165,7 +241,10 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
 
     df_filtered2 = df_filtered[df_filtered['step_length'] <= step_multiplier * q_vals].copy()
 
+    # -------------------------------------------------------------------
     # 3) Turn angles
+    # -------------------------------------------------------------------
+
     df_filtered3 = df_filtered2.sort_values(
         ['individual-local-identifier', 'timestamp']
     ).copy()
@@ -192,7 +271,10 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
 
     df_filtered3 = df_filtered3[df_filtered3['turn_angle'].notna()].copy()
 
+    # -------------------------------------------------------------------
     # Prepare common pieces for plots
+    # -------------------------------------------------------------------
+
     step_lengths_filtered = df_filtered3['step_length']
     turn_angles_filtered = df_filtered3['turn_angle']
 
@@ -244,21 +326,31 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
 
     proj = ccrs.PlateCarree()
 
-    # Build figure with 3 stacked regions
+    # -------------------------------------------------------------------
+    # Build one tall figure with 3 stacked regions
+    # -------------------------------------------------------------------
+
     fig = plt.figure(figsize=(16, 20))
     gs = fig.add_gridspec(
         3, 2,  # 3 rows, 2 columns
         height_ratios=[1.0, 1.0, 1.4]
     )
 
-    # Axes
+    # Top row: histograms
     ax1 = fig.add_subplot(gs[0, 0])
     ax2 = fig.add_subplot(gs[0, 1])
+
+    # Middle row: timeline
     ax_timeline = fig.add_subplot(gs[1, :])
+
+    # Bottom row: maps
     ax_train = fig.add_subplot(gs[2, 0], projection=proj)
     ax_test = fig.add_subplot(gs[2, 1], projection=proj)
 
-    # 1) Histograms
+    # -------------------------------------------------------------------
+    # 1) Histograms (top row)
+    # -------------------------------------------------------------------
+
     ax1.hist(step_lengths_filtered, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
     ax1.set_xlabel('Step Length (meters)')
     ax1.set_ylabel('Frequency (log)')
@@ -283,7 +375,10 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
     ax2.axvline(mean_turn, color='red', linestyle='--', label=f'Mean: {mean_turn:.1f}°')
     ax2.legend()
 
-    # 2) Timeline
+    # -------------------------------------------------------------------
+    # 2) Timeline (middle row)
+    # -------------------------------------------------------------------
+
     train_color = 'skyblue'
     test_color = 'lightcoral'
     bar_height = 0.75
@@ -370,6 +465,16 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
                     color='white', fontsize=11, fontweight='bold'
                 )
 
+        # Color-coded marker at the mid-time for each individual
+        ax_timeline.scatter(
+            span_time.loc[individual, 'mid'],
+            i,
+            s=40,
+            color=color_map.get(individual, 'black'),
+            edgecolor='black',
+            zorder=5,
+        )
+
     ax_timeline.set_yticks(range(len(individuals_timeline)))
     ax_timeline.set_yticklabels(individuals_timeline)
 
@@ -389,14 +494,17 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
     ]
     ax_timeline.legend(handles=legend_patches_tl, loc='lower right')
 
-    # 3) Maps
+    # -------------------------------------------------------------------
+    # 3) Maps (bottom row)
+    # -------------------------------------------------------------------
+
     def setup_map_axis(ax, title):
         ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
         ax.add_feature(cfeature.LAND, facecolor='lightgray', zorder=0)
         ax.add_feature(cfeature.OCEAN, facecolor='lightblue', zorder=0)
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
         ax.add_feature(cfeature.BORDERS, linewidth=0.3)
-        gl = ax.gridlines(draw_labels=True, linewidth=0.2, alpha=0.5)
+        ax.gridlines(draw_labels=True, linewidth=0.2, alpha=0.5)
         ax.set_title(f"{title}\n{study_name}", fontsize=12)
 
     def plot_tracks(ax, subset_df):
@@ -448,15 +556,24 @@ def create_trajectory_figure(csv_path: str, save_pdf: bool = True):
     setup_map_axis(ax_test, "Test Tracks")
     plot_tracks(ax_test, test_df)
 
+    # Legend: color → individual (on train map)
+    legend_elements = [
+        Line2D([0], [0], color=color_map[ind], lw=2.5, label=str(ind))
+        for ind in individuals_tracks
+    ]
+    ax_train.legend(handles=legend_elements, title="Individuals", loc="lower left")
+
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     # Save to single-page PDF (optional)
-    if save_pdf:
-        pdf_name = os.path.join(PDF_DIR, f"{study_name}_summary_plots.pdf")
-        with PdfPages(pdf_name) as pdf:
-            pdf.savefig(fig)
+    # if save_png:
+    #     pdf_name = os.path.join(PDF_DIR, f"{study_name}_summary_plots.pdf")
+    #     with PdfPages(pdf_name) as pdf:
+    #         pdf.savefig(fig)
+    if save_png:
+        plt.savefig(os.path.join(PNG_DIR, f"{study_name}_summary_plots.png"), dpi=150)
 
-    return fig, metadata
+    return fig, metadata, individual_counts
 
 
 # -------------------------------------------------------------------
@@ -497,34 +614,68 @@ def main():
 
     # Build figure and metadata for current file
     try:
-        fig, metadata = create_trajectory_figure(current_file, save_pdf=True)
+        fig, metadata, individual_counts = create_trajectory_figure(current_file, save_png=True)
     except Exception as e:
         st.error(f"Error processing file {current_basename}: {e}")
         return
 
-    # Show metadata
+    # Metadata
     with st.expander("Study metadata", expanded=True):
         for k, v in metadata.items():
             st.write(f"**{k}:** {v}")
+
+    # Per-individual controls
+    with st.expander("Individuals in this study (mark bad ones)", expanded=False):
+        bad_all = _read_bad_individuals()
+        bad_here = {ind for (fname, ind) in bad_all if fname == current_basename}
+
+        if bad_here:
+            st.write("Already marked bad in this file:")
+            st.write(", ".join(sorted(bad_here)))
+
+        st.write("Mark any additional individuals as bad. "
+                 "They’ll be excluded for this file on the next rerun and logged in `bad_individuals.txt`.")
+
+        # individual_counts is a Series: index = id, value = count
+        for indiv, count in individual_counts.items():
+            cols = st.columns([3, 2, 2])
+            with cols[0]:
+                st.write(f"**{indiv}**")
+            with cols[1]:
+                st.write(f"{count} points")
+            with cols[2]:
+                already_bad = indiv in bad_here
+                if already_bad:
+                    st.button(
+                        "Marked bad",
+                        key=f"bad_{current_basename}_{indiv}",
+                        disabled=True
+                    )
+                else:
+                    if st.button(
+                        "Mark bad",
+                        key=f"bad_{current_basename}_{indiv}"
+                    ):
+                        _append_bad_individual(current_basename, str(indiv))
+                        _rerun()
 
     # Show the figure
     st.pyplot(fig)
     plt.close(fig)
 
-    # Buttons for classification
+    # Buttons for study-level classification
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Okay", type="primary", use_container_width=True):
             _append_to_list(OK_LIST_PATH, current_basename)
-            # Reset index so we always start at first remaining file after filtering
             st.session_state.current_index = 0
-            st.experimental_rerun()
+            _rerun()
 
     with col2:
         if st.button("Not okay", use_container_width=True):
             _append_to_list(NOT_OK_LIST_PATH, current_basename)
             st.session_state.current_index = 0
-            st.experimental_rerun()
+            _rerun()
 
     # Optional: navigation in remaining set (without changing lists)
     with st.expander("Navigation", expanded=False):
@@ -533,11 +684,11 @@ def main():
         with nav_col1:
             if st.button("Previous unreviewed file"):
                 st.session_state.current_index = (st.session_state.current_index - 1) % len(remaining_files)
-                st.experimental_rerun()
+                _rerun()
         with nav_col2:
             if st.button("Next unreviewed file"):
                 st.session_state.current_index = (st.session_state.current_index + 1) % len(remaining_files)
-                st.experimental_rerun()
+                _rerun()
 
 
 if __name__ == "__main__":
