@@ -21,6 +21,8 @@ Features
       in pngs/ named "<study_name>_summary_plots.png" at dpi=150, never overwritten.
     - Applies trajectory processing & visualization for the *current* view,
       excluding any individuals listed as bad and using any stored split overrides.
+    - If there are >20 individuals, creates multiple map rows, each showing
+      at most 20 individuals (train/test maps per row).
     - Shows metadata, per-individual counts, and plots.
     - Lets you:
         - Mark individual(s) as bad (removes them from plots on rerun)
@@ -194,7 +196,7 @@ def build_figure_from_df(
     basename: str,
     study_name: str,
     save_path=None,
-    split_times=None,
+    split_times= None,
 ):
     """
     Given a DataFrame for a single CSV, run the full processing pipeline and return:
@@ -256,6 +258,10 @@ def build_figure_from_df(
     # -------------------------------------------------------------------
     # 2) Compute and filter by step length (Haversine)
     # -------------------------------------------------------------------
+
+    zeros = df_filtered['location-lat'].values < 1.0
+    if zeros.any():
+        print('Possible 0 latitude problem with', df_filtered['individual-local-identifier'].values[zeros])
 
     lat_rad = np.radians(df_filtered['location-lat'])
     lon_rad = np.radians(df_filtered['location-long'])
@@ -393,13 +399,28 @@ def build_figure_from_df(
     proj = ccrs.PlateCarree()
 
     # -------------------------------------------------------------------
-    # Build one tall figure with 3 stacked regions
+    # Build one tall figure with 3+ stacked regions
+    #   Row 0: histograms (2 columns)
+    #   Row 1: timeline (full width)
+    #   Rows 2..: one row per map group (train/test per row)
     # -------------------------------------------------------------------
 
-    fig = plt.figure(figsize=(16, 20))
+    # Group individuals for maps in chunks of at most 20
+    indiv_list = list(individuals_tracks)
+    if len(indiv_list) == 0:
+        raise RuntimeError("No individuals left after filtering; nothing to plot.")
+
+    group_size = 20
+    map_groups = [indiv_list[i:i + group_size] for i in range(0, len(indiv_list), group_size)]
+    n_map_groups = len(map_groups)
+
+    total_rows = 2 + n_map_groups  # 1 hist row, 1 timeline row, rest maps
+    height_ratios = [1.0, 1.0] + [1.4] * n_map_groups
+
+    fig = plt.figure(figsize=(16, 8 + 6 * n_map_groups))
     gs = fig.add_gridspec(
-        3, 2,  # 3 rows, 2 columns
-        height_ratios=[1.0, 1.0, 1.4]
+        total_rows, 2,
+        height_ratios=height_ratios
     )
 
     # Top row: histograms
@@ -408,10 +429,6 @@ def build_figure_from_df(
 
     # Middle row: timeline
     ax_timeline = fig.add_subplot(gs[1, :])
-
-    # Bottom row: maps
-    ax_train = fig.add_subplot(gs[2, 0], projection=proj)
-    ax_test = fig.add_subplot(gs[2, 1], projection=proj)
 
     # -------------------------------------------------------------------
     # 1) Histograms (top row)
@@ -478,7 +495,7 @@ def build_figure_from_df(
                     i,
                     count_lbl,
                     ha='center', va='center',
-                    color='white', fontsize=11, fontweight='bold'
+                    color='black', fontsize=11, fontweight='bold'
                 )
 
             elif seg_start >= split_time:
@@ -493,7 +510,7 @@ def build_figure_from_df(
                     i,
                     count_lbl,
                     ha='center', va='center',
-                    color='white', fontsize=11, fontweight='bold'
+                    color='black', fontsize=11, fontweight='bold'
                 )
 
             else:
@@ -514,7 +531,7 @@ def build_figure_from_df(
                     i,
                     lbl_before,
                     ha='center', va='center',
-                    color='white', fontsize=11, fontweight='bold'
+                    color='black', fontsize=11, fontweight='bold'
                 )
 
                 # Second part (test)
@@ -528,7 +545,7 @@ def build_figure_from_df(
                     i,
                     lbl_after,
                     ha='center', va='center',
-                    color='white', fontsize=11, fontweight='bold'
+                    color='black', fontsize=11, fontweight='bold'
                 )
 
         # Color-coded marker at the split time for each individual
@@ -561,7 +578,7 @@ def build_figure_from_df(
     ax_timeline.legend(handles=legend_patches_tl, loc='lower right')
 
     # -------------------------------------------------------------------
-    # 3) Maps (bottom row)
+    # 3) Maps (rows 2..)
     # -------------------------------------------------------------------
 
     def setup_map_axis(ax, title):
@@ -616,18 +633,26 @@ def build_figure_from_df(
     train_df = df_tracks[df_tracks['set'] == 'train']
     test_df = df_tracks[df_tracks['set'] == 'test']
 
-    setup_map_axis(ax_train, "Train Tracks")
-    plot_tracks(ax_train, train_df)
+    for group_idx, group_indivs in enumerate(map_groups):
+        row = 2 + group_idx
+        ax_train = fig.add_subplot(gs[row, 0], projection=proj)
+        ax_test = fig.add_subplot(gs[row, 1], projection=proj)
 
-    setup_map_axis(ax_test, "Test Tracks")
-    plot_tracks(ax_test, test_df)
+        setup_map_axis(ax_train, f"Train Tracks (individuals {group_idx + 1}/{n_map_groups})")
+        setup_map_axis(ax_test, f"Test Tracks (individuals {group_idx + 1}/{n_map_groups})")
 
-    # Legend: color → individual (on train map)
-    legend_elements = [
-        Line2D([0], [0], color=color_map[ind], lw=2.5, label=str(ind))
-        for ind in individuals_tracks
-    ]
-    ax_train.legend(handles=legend_elements, title="Individuals", loc="lower left")
+        subset_train = train_df[train_df['individual-local-identifier'].isin(group_indivs)]
+        subset_test = test_df[test_df['individual-local-identifier'].isin(group_indivs)]
+
+        plot_tracks(ax_train, subset_train)
+        plot_tracks(ax_test, subset_test)
+
+        # Legend only for this group's individuals (on train map)
+        legend_elements = [
+            Line2D([0], [0], color=color_map[ind], lw=2.5, label=str(ind))
+            for ind in group_indivs
+        ]
+        ax_train.legend(handles=legend_elements, title="Individuals", loc="lower left")
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
@@ -664,9 +689,10 @@ def create_trajectory_figure(csv_path: str):
 
     # 2) Apply bad-individual filtering for the current view
     bad_indivs = _read_bad_individuals()
-    bad_here = {ind for (fname, ind) in bad_indivs if fname == basename}
+    bad_here = [ ind for (fname, ind) in bad_indivs if fname == basename ]
+    print("Bad here?", bad_here, df_full[df_full['individual-local-identifier'].astype(str).isin(bad_here)])
     if bad_here:
-        df_filtered = df_full[~df_full['individual-local-identifier'].isin(bad_here)].copy()
+        df_filtered = df_full[~df_full['individual-local-identifier'].astype(str).isin(bad_here)].copy()
     else:
         df_filtered = df_full.copy()
 
@@ -795,7 +821,7 @@ def main():
                         _append_split_override(current_basename, str(indiv), split_date)
                     _rerun()
 
-                # Mark bad (separate button row could be nicer, but reuse column)
+                # Mark bad
                 already_bad = indiv in bad_here
                 if already_bad:
                     st.button(
