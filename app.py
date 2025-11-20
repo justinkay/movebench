@@ -13,15 +13,18 @@ Features
 - Tracks per-individual exclusions in:
     - mbr_studies_2year/bad_individuals.txt
       (lines of the form: "<csv_basename>,<individual-id>")
+- Tracks per-individual train/test split overrides in:
+    - mbr_studies_2year/split_overrides.txt
+      (lines of the form: "<csv_basename>,<individual-id>,YYYY-MM-DD")
 - For each unreviewed CSV:
-    - Saves ONE original PNG (no bad individuals removed) in pngs/
-      named "<study_name>_summary_plots.png" at dpi=150
-      and never overwrites it.
+    - Saves ONE original PNG (no bad individuals removed, default mid-time split)
+      in pngs/ named "<study_name>_summary_plots.png" at dpi=150, never overwritten.
     - Applies trajectory processing & visualization for the *current* view,
-      excluding any individuals listed as bad for that file.
-    - Shows metadata, per-individual counts, and plots
+      excluding any individuals listed as bad and using any stored split overrides.
+    - Shows metadata, per-individual counts, and plots.
     - Lets you:
         - Mark individual(s) as bad (removes them from plots on rerun)
+        - Override train/test split date per individual (optional)
         - Mark study as "Okay" or "Not okay"
 - Only shows files not already in ok_files/not_ok_files
 """
@@ -53,6 +56,7 @@ PNG_DIR = "pngs"
 OK_LIST_PATH = os.path.join(OUTPUT_DIR, "ok_files.txt")
 NOT_OK_LIST_PATH = os.path.join(OUTPUT_DIR, "not_ok_files.txt")
 BAD_INDIVIDUALS_PATH = os.path.join(OUTPUT_DIR, "bad_individuals.txt")
+SPLIT_OVERRIDES_PATH = os.path.join(OUTPUT_DIR, "split_overrides.txt")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
@@ -139,17 +143,67 @@ def _append_bad_individual(filename_basename: str, individual_id: str) -> None:
 
 
 # -------------------------------------------------------------------
+# Helper functions: split overrides I/O
+# -------------------------------------------------------------------
+
+def _read_split_overrides() -> dict:
+    """
+    Read split overrides from SPLIT_OVERRIDES_PATH.
+
+    Each line: <csv_basename>,<individual-local-identifier>,YYYY-MM-DD
+    Returns a dict mapping (filename, individual_id) -> pd.Timestamp
+    (date at midnight).
+    """
+    overrides: dict[tuple[str, str], pd.Timestamp] = {}
+    if not os.path.exists(SPLIT_OVERRIDES_PATH):
+        return overrides
+
+    with open(SPLIT_OVERRIDES_PATH, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            parts = ln.split(",", 2)
+            if len(parts) != 3:
+                continue
+            fname, indiv, date_str = parts
+            try:
+                ts = pd.to_datetime(date_str)
+            except Exception:
+                continue
+            overrides[(fname, indiv)] = ts
+    return overrides
+
+
+def _append_split_override(filename_basename: str, individual_id: str, split_date) -> None:
+    """
+    Append one split override entry to SPLIT_OVERRIDES_PATH.
+
+    split_date is expected to be a datetime.date (from st.date_input).
+    """
+    with open(SPLIT_OVERRIDES_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{filename_basename},{individual_id},{split_date.isoformat()}\n")
+
+
+# -------------------------------------------------------------------
 # Core logic: processing & plotting from a DataFrame
 # -------------------------------------------------------------------
 
-def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
-                         save_path=None):
+def build_figure_from_df(
+    df: pd.DataFrame,
+    basename: str,
+    study_name: str,
+    save_path=None,
+    split_times=None,
+):
     """
     Given a DataFrame for a single CSV, run the full processing pipeline and return:
         fig, metadata_dict, individual_counts (Series)
 
-    If save_path is provided, saves the figure as a PNG there (dpi=150)
-    and also returns the figure.
+    If save_path is provided, saves the figure as a PNG there (dpi=150).
+
+    split_times: optional dict mapping individual_id -> pd.Timestamp
+                 for train/test split. If None, use mid-time per individual.
     """
     if 'timestamp' not in df.columns:
         raise RuntimeError("Expected a 'timestamp' column in the data.")
@@ -272,8 +326,7 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
         df_timeline.groupby('individual-local-identifier')['timestamp']
         .agg(start='min', end='max')
     )
-    span_time['mid'] = span_time['start'] + (span_time['end'] - span_time['start']) / 2
-    individuals_timeline = span_time.index.tolist()
+    span_time['default_mid'] = span_time['start'] + (span_time['end'] - span_time['start']) / 2
 
     # Tracks & maps prep
     df_tracks = df_filtered2.copy()
@@ -283,11 +336,39 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
         df_tracks.groupby('individual-local-identifier')['timestamp']
         .agg(start='min', end='max')
     )
-    span_tracks['mid'] = span_tracks['start'] + (span_tracks['end'] - span_tracks['start']) / 2
+    span_tracks['default_mid'] = span_tracks['start'] + (span_tracks['end'] - span_tracks['start']) / 2
 
-    df_tracks['mid_time'] = df_tracks['individual-local-identifier'].map(span_tracks['mid'])
+    # -------------------------------------------------------------------
+    # Apply split overrides
+    # -------------------------------------------------------------------
+    # Default: use mid-time
+    split_time_series = span_time['default_mid'].copy()
+    split_time_tracks = span_tracks['default_mid'].copy()
+
+    if split_times is not None:
+        for indiv, ts in split_times.items():
+            if indiv not in span_time.index:
+                continue
+            # Clip to individual range (timeline)
+            start = span_time.loc[indiv, 'start']
+            end = span_time.loc[indiv, 'end']
+            clipped = min(max(ts, start), end)
+            split_time_series.loc[indiv] = clipped
+
+            if indiv in span_tracks.index:
+                start_t = span_tracks.loc[indiv, 'start']
+                end_t = span_tracks.loc[indiv, 'end']
+                clipped_t = min(max(ts, start_t), end_t)
+                split_time_tracks.loc[indiv] = clipped_t
+
+    span_time['split'] = split_time_series
+    span_tracks['split'] = split_time_tracks
+
+    individuals_timeline = span_time.index.tolist()
+
+    df_tracks['split_time'] = df_tracks['individual-local-identifier'].map(span_tracks['split'])
     df_tracks['set'] = np.where(
-        df_tracks['timestamp'] <= df_tracks['mid_time'],
+        df_tracks['timestamp'] <= df_tracks['split_time'],
         'train',
         'test'
     )
@@ -374,7 +455,7 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
 
         start = span_time.loc[individual, 'start']
         end = span_time.loc[individual, 'end']
-        mid = span_time.loc[individual, 'mid']
+        split_time = span_time.loc[individual, 'split']
 
         gaps = ts.diff() > gap_threshold
         segment_id = gaps.cumsum()
@@ -385,7 +466,7 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
             count_pts = len(seg_ts)
             count_lbl = f"{count_pts:,}"
 
-            if seg_end <= mid:
+            if seg_end <= split_time:
                 seg_color = train_color
                 ax_timeline.barh(
                     i, seg_end - seg_start, left=seg_start,
@@ -400,7 +481,7 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
                     color='white', fontsize=11, fontweight='bold'
                 )
 
-            elif seg_start >= mid:
+            elif seg_start >= split_time:
                 seg_color = test_color
                 ax_timeline.barh(
                     i, seg_end - seg_start, left=seg_start,
@@ -416,43 +497,43 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
                 )
 
             else:
-                # Segment crosses midpoint → split
-                pts_before_mid = len(seg_ts[seg_ts <= mid])
-                pts_after_mid = count_pts - pts_before_mid
-                lbl_before = f"{pts_before_mid:,}"
-                lbl_after = f"{pts_after_mid:,}"
+                # Segment crosses split → split into two
+                pts_before = len(seg_ts[seg_ts <= split_time])
+                pts_after = count_pts - pts_before
+                lbl_before = f"{pts_before:,}"
+                lbl_after = f"{pts_after:,}"
 
-                # First half (train)
+                # First part (train)
                 ax_timeline.barh(
-                    i, mid - seg_start, left=seg_start,
+                    i, split_time - seg_start, left=seg_start,
                     height=bar_height, color=train_color,
                     alpha=0.7, edgecolor='black'
                 )
                 ax_timeline.text(
-                    seg_start + (mid - seg_start) / 2,
+                    seg_start + (split_time - seg_start) / 2,
                     i,
                     lbl_before,
                     ha='center', va='center',
                     color='white', fontsize=11, fontweight='bold'
                 )
 
-                # Second half (test)
+                # Second part (test)
                 ax_timeline.barh(
-                    i, seg_end - mid, left=mid,
+                    i, seg_end - split_time, left=split_time,
                     height=bar_height, color=test_color,
                     alpha=0.7, edgecolor='black'
                 )
                 ax_timeline.text(
-                    mid + (seg_end - mid) / 2,
+                    split_time + (seg_end - split_time) / 2,
                     i,
                     lbl_after,
                     ha='center', va='center',
                     color='white', fontsize=11, fontweight='bold'
                 )
 
-        # Color-coded marker at the mid-time for each individual
+        # Color-coded marker at the split time for each individual
         ax_timeline.scatter(
-            span_time.loc[individual, 'mid'],
+            split_time,
             i,
             s=40,
             color=color_map.get(individual, 'black'),
@@ -474,8 +555,8 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
     ax_timeline.grid(True, axis='x', alpha=0.3)
 
     legend_patches_tl = [
-        Patch(facecolor=train_color, edgecolor='black', alpha=0.7, label='Train (firsthalf)'),
-        Patch(facecolor=test_color, edgecolor='black', alpha=0.7, label='Test (second half)')
+        Patch(facecolor=train_color, edgecolor='black', alpha=0.7, label='Train (before split)'),
+        Patch(facecolor=test_color, edgecolor='black', alpha=0.7, label='Test (after split)')
     ]
     ax_timeline.legend(handles=legend_patches_tl, loc='lower right')
 
@@ -564,17 +645,21 @@ def build_figure_from_df(df: pd.DataFrame, basename: str, study_name: str,
 def create_trajectory_figure(csv_path: str):
     """
     For a given CSV file:
-    - If original PNG does not yet exist, create it from the FULL data (no bad individuals removed).
-    - Then create & return a figure based on the data with bad individuals removed.
+    - If original PNG does not yet exist, create it from the FULL data
+      (no bad-individual filtering, default mid-time split).
+    - Then create & return a figure based on the data with bad individuals
+      removed and any per-individual split overrides applied.
     """
     df_full = pd.read_csv(csv_path)
     basename = os.path.basename(csv_path)
     study_name = basename.replace("_2year.csv", "")
 
-    # 1) Ensure ORIGINAL PNG exists (no bad-individual filtering)
+    # 1) Ensure ORIGINAL PNG exists (full data, default mid split)
     png_name = os.path.join(PNG_DIR, f"{study_name}_summary_plots.png")
     if not os.path.exists(png_name):
-        fig_orig, _, _ = build_figure_from_df(df_full, basename, study_name, save_path=png_name)
+        fig_orig, _, _ = build_figure_from_df(
+            df_full, basename, study_name, save_path=png_name, split_times=None
+        )
         plt.close(fig_orig)
 
     # 2) Apply bad-individual filtering for the current view
@@ -590,9 +675,20 @@ def create_trajectory_figure(csv_path: str):
             "All individuals in this file are marked bad (or no data left); nothing to plot."
         )
 
-    # 3) Build the figure for the filtered data (no PNG save here)
+    # 3) Apply split overrides for this file
+    all_split_overrides = _read_split_overrides()
+    overrides_here: dict[str, pd.Timestamp] = {
+        indiv: ts
+        for (fname, indiv), ts in all_split_overrides.items()
+        if fname == basename
+    }
+
     fig, metadata, individual_counts = build_figure_from_df(
-        df_filtered, basename, study_name, save_path=None
+        df_filtered,
+        basename,
+        study_name,
+        save_path=None,
+        split_times=overrides_here if overrides_here else None,
     )
     return fig, metadata, individual_counts
 
@@ -645,26 +741,61 @@ def main():
         for k, v in metadata.items():
             st.write(f"**{k}:** {v}")
 
-    # Per-individual controls
-    with st.expander("Individuals in this study (mark bad ones)", expanded=False):
+    # Per-individual controls (bad flags + split overrides)
+    with st.expander("Individuals in this study (mark bad / override split)", expanded=False):
         bad_all = _read_bad_individuals()
         bad_here = {ind for (fname, ind) in bad_all if fname == current_basename}
+
+        split_all = _read_split_overrides()
+        split_here: dict[str, pd.Timestamp] = {
+            indiv: ts
+            for (fname, indiv), ts in split_all.items()
+            if fname == current_basename
+        }
 
         if bad_here:
             st.write("Already marked bad in this file:")
             st.write(", ".join(sorted(bad_here)))
 
-        st.write("Mark any additional individuals as bad. "
-                 "They’ll be excluded for this file on the next rerun and logged in `bad_individuals.txt`.")
+        if split_here:
+            st.write("Existing train/test split overrides in this file:")
+            st.write(", ".join(f"{ind} → {ts.date().isoformat()}" for ind, ts in split_here.items()))
+
+        st.write(
+            "You can mark individuals as bad (excluded from this file), "
+            "and optionally override their train/test split date."
+        )
 
         # individual_counts is a Series: index = id, value = count
         for indiv, count in individual_counts.items():
-            cols = st.columns([3, 2, 2])
+            cols = st.columns([3, 2, 3, 2])
             with cols[0]:
                 st.write(f"**{indiv}**")
             with cols[1]:
                 st.write(f"{count} points")
+
+            # Split date override
             with cols[2]:
+                existing_ts = split_here.get(indiv)
+                default_date = existing_ts.date() if existing_ts is not None else None
+                split_date = st.date_input(
+                    "Split date",
+                    value=default_date,
+                    key=f"split_{current_basename}_{indiv}"
+                )
+
+            # Buttons (save split / mark bad)
+            with cols[3]:
+                # Save split override
+                if st.button(
+                    "Save split",
+                    key=f"save_split_{current_basename}_{indiv}"
+                ):
+                    if split_date is not None:
+                        _append_split_override(current_basename, str(indiv), split_date)
+                    _rerun()
+
+                # Mark bad (separate button row could be nicer, but reuse column)
                 already_bad = indiv in bad_here
                 if already_bad:
                     st.button(
