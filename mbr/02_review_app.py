@@ -53,8 +53,8 @@ import streamlit as st
 # Configuration: directories and list files
 # -------------------------------------------------------------------
 
-OUTPUT_DIR = "mbr_studies_2year"
-PNG_DIR = "pngs"
+OUTPUT_DIR = "../mbr_studies_2year"
+PNG_DIR = "../pngs"
 OK_LIST_PATH = os.path.join(OUTPUT_DIR, "ok_files.txt")
 NOT_OK_LIST_PATH = os.path.join(OUTPUT_DIR, "not_ok_files.txt")
 BAD_INDIVIDUALS_PATH = os.path.join(OUTPUT_DIR, "bad_individuals.txt")
