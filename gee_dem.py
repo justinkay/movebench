@@ -48,7 +48,7 @@ def make_dem_image():
 # STUDY PROCESSING
 # -------------------------------------------------------------------------
 
-def process_study_dem(df, study_id, px_per_side=1000, crs='EPSG:4326'):
+def process_study_dem(df, study_id, px_per_side=500, crs='EPSG:4326'):
     """
     Process a study to create DEM download regions.
     Instead of downloading individual chips, create union region(s) for DEM.
@@ -82,26 +82,14 @@ def process_study_dem(df, study_id, px_per_side=1000, crs='EPSG:4326'):
     print(f"[INFO] Creating union of {len(regions)} regions...")
     union_region = union_regions(regions)
 
-    # get a grid of 1000x1000 px over the whole region 
+    # get a grid of px_per_side**2 over the whole region 
     grid_size_m = dem_scale * px_per_side
     bounds = union_region.bounds(**{
-    'proj': crs, 'maxError': 100
+        'proj': crs, 'maxError': 10
     })
     grid = bounds.coveringGrid(**{
-    'proj':crs, 'scale': grid_size_m
+        'proj':crs, 'scale': grid_size_m
     })
-
-    # compute the CRS transform
-    # TODO I'm not sure why; see https://spatialthoughts.com/2024/10/23/large-image-exports-gee/
-    bounds = grid.geometry().bounds(**{
-    'proj': crs, 'maxError': 1
-    })
-    coordList = ee.Array.cat(bounds.coordinates(), 1)
-    xCoords = coordList.slice(1, 0, 1)
-    yCoords = coordList.slice(1, 1, 2)
-    xMin = xCoords.reduce('min', [0]).get([0,0])
-    yMax = yCoords.reduce('max', [0]).get([0,0])
-    transform = ee.List([dem_scale, 0, xMin, 0, -dem_scale, yMax]).getInfo()
     filtered_grid = grid.filter(ee.Filter.intersects('.geo', union_region))
     tile_ids = filtered_grid.aggregate_array('system:index').getInfo()
     download_regions = [ ee.Feature(filtered_grid.toList(1, i).get(0)).geometry() for i, _ in enumerate(tile_ids) ]
@@ -112,7 +100,6 @@ def process_study_dem(df, study_id, px_per_side=1000, crs='EPSG:4326'):
         "dem_scale": dem_scale,
         "num_chunks": len(download_regions),
         "download_regions": download_regions,
-        "transform": transform
     }
 
 
@@ -129,7 +116,6 @@ def download_dem_for_study(study_info):
     study_id = study_info["study_id"]
     dem_scale = study_info["dem_scale"]
     download_regions = study_info["download_regions"]
-    crs_transform = study_info["transform"]
 
     study_output_dir = OUTPUT_DIR / study_id
     study_output_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +178,6 @@ def download_dem_for_study(study_info):
                 "region": region,
                 "format": "GEO_TIFF",
                 "crs": "EPSG:4326",
-                "crsTransform": crs_transform,
             }
             dem_url = dem_img.getDownloadURL(dem_params)
             download_tiff(dem_url, chunk_path)
