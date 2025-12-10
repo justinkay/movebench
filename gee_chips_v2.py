@@ -218,8 +218,8 @@ def getRequests(df: pd.DataFrame, study_id):
     for i, row in df.iterrows():
         lon = float(row[LON_COL])
         lat = float(row[LAT_COL])
-
         ts = row[TIME_COL]
+        
         if hasattr(ts, "isoformat"):
             ts_iso = ts.isoformat()
         else:
