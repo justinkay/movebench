@@ -1,3 +1,6 @@
+# known issue
+# compute_group_scale different for train and test
+
 import os
 import json
 from pathlib import Path
@@ -32,6 +35,17 @@ N_PROCS = 16
 BIG_GROUP_SCALE_M    = 11132.0   # Big: ERA5-Land (~11km), ERA5 (~28km upsampled a bit)
 MEDIUM_GROUP_SCALE_M = 250.0     # Medium: MODIS/WorldClim ~250m target
 SMALL_GROUP_SCALE_M  = 30.0      # Small: DEM 30m, DynamicWorld 10m → sampled at ~30m
+
+# TODO: change to cmd line args
+SET = 'test'
+REGION_MULTIPLIER = 1.0 
+if SET == 'train':
+    REGION_MULTIPLIER = 1.0     # 2x 95th quantile step size
+elif SET == 'test':
+    REGION_MULTIPLIER = 15.0    # 30x 95th quantile
+else:
+    print("Set must be 'train' or 'test'")
+    exit()
 
 
 # -------------------------------------------------------------------------
@@ -250,7 +264,8 @@ def getResult(idx, req):
 
     print(f"[INFO] idx={idx}, point_id={point_id}, buffer_km={buffer_km}, ts={ts}")
 
-    region = square_region_for_point(lon, lat, buffer_km)
+    region = square_region_for_point(lon, lat, 
+                                     REGION_MULTIPLIER*buffer_km) # scale unaffected
 
     # ---- BIG GROUP (11km) ----
     big_out = OUTPUT_DIR / f"{study}/point_{point_id}_big.tif"
@@ -287,21 +302,22 @@ def getResult(idx, req):
             med_out = None # error
 
     # ---- SMALL GROUP (30m) ----
-    sml_out = OUTPUT_DIR / f"{study}/point_{point_id}_small.tif"
-    if not os.path.exists(sml_out):
-        try:
-            sml_img = make_small_stack(ts)
-            sml_scale = compute_group_scale(buffer_km, SMALL_GROUP_SCALE_M)
-            sml_params = {
-                "scale": sml_scale,
-                "region": region,
-                "format": "GEO_TIFF",
-                "crs": "EPSG:4326",
-            }
-            sml_url = sml_img.getDownloadURL(sml_params)
-            download_tiff(sml_url, sml_out)
-        except:
-            sml_out = None # error
+    # sml_out = OUTPUT_DIR / f"{study}/point_{point_id}_small.tif"
+    # if not os.path.exists(sml_out):
+    #     try:
+    #         sml_img = make_small_stack(ts)
+    #         sml_scale = compute_group_scale(buffer_km, SMALL_GROUP_SCALE_M)
+    #         sml_params = {
+    #             "scale": sml_scale,
+    #             "region": region,
+    #             "format": "GEO_TIFF",
+    #             "crs": "EPSG:4326",
+    #         }
+    #         sml_url = sml_img.getDownloadURL(sml_params)
+    #         download_tiff(sml_url, sml_out)
+    #     except:
+    #         sml_out = None # error
+    sml_out = None # TODO not working
 
     return {
         "point_id": point_id,
@@ -315,7 +331,7 @@ def getResult(idx, req):
 # -------------------------------------------------------------------------
 
 def main(df, study_id):
-    manifest_path = OUTPUT_DIR / f"{study_id}_manifest.json"
+    manifest_path = OUTPUT_DIR / f"{study_id}_manifest_{SET}.json"
     if os.path.exists(manifest_path):
         print(study_id, "already complete (manifest present). Skipping.")
         return
@@ -336,11 +352,18 @@ if __name__ == "__main__":
     mammals_df = all_df[all_df.broad_taxonomic_group.str.lower() == 'terrestrial mammals']
     csv_loc = 'mbr_studies_2year_filtered_traintest/'
 
+    # do succesful ones first
+    studies = [ d for d in os.listdir('dem_out') if os.path.isdir('dem_out/'+d) ]
+    studies.remove('c73c7698-2c6b-44d4-8879-fe10d7536935') # this one failed
+
     for study_id, study_name in zip(mammals_df.study_id.values, mammals_df.study_name.values):
-        study_df = pd.read_csv(os.path.join(csv_loc, study_id +"_"+ study_name + "_2year_filtered_traintest.csv"))
-        train_df = study_df[study_df.set == 'train']
-        train_df['timestamp'] = pd.to_datetime(train_df['timestamp'], errors='coerce')
-        train_df = train_df.dropna(subset=['timestamp'])
-        
-        os.makedirs(os.path.join(OUTPUT_DIR, study_id), exist_ok=True)
-        main(train_df, study_id)
+        if study_id in studies:
+            print("Running on", study_id, SET, REGION_MULTIPLIER)
+
+            study_df = pd.read_csv(os.path.join(csv_loc, study_id +"_"+ study_name + "_2year_filtered_traintest.csv"))
+            df = study_df[study_df.set == SET]
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df = df.dropna(subset=['timestamp'])
+            
+            os.makedirs(os.path.join(OUTPUT_DIR, study_id), exist_ok=True)
+            main(df, study_id)

@@ -66,7 +66,8 @@ def process_study_dem(df, study_id, px_per_side=500, crs='EPSG:4326'):
     print(f"[INFO] Processing study {study_id}: {len(df)} points")
 
     # Compute buffer (meters per step) and scale (meters per pixel) for this study
-    buffer_km = get_buffer_m_for_study(df) / 1000
+    # Do this based on training data only
+    buffer_km = get_buffer_m_for_study(df[df.set == 'train']) / 1000
     print(f"[INFO] Buffer km for study {study_id}: {buffer_km:.3f}")
     dem_scale = compute_group_scale(buffer_km, DEM_SCALE_M)
     print(f"[INFO] DEM scale for study {study_id}: {dem_scale:.1f}m")
@@ -77,8 +78,20 @@ def process_study_dem(df, study_id, px_per_side=500, crs='EPSG:4326'):
     for i, row in df.iterrows():
         lon = float(row[LON_COL])
         lat = float(row[LAT_COL])
-        region = square_region_for_point(lon, lat, buffer_km)
+        set = row['set']
+
+        # different region sizes for train and test because we will simulate in test region
+        if set == 'train':
+            region_multiplier = 1.0
+        elif set == 'test':
+            region_multiplier = 15.0
+        else:
+            raise ValueError("Set should be 'train' or 'test'")
+        
+        region = square_region_for_point(lon, lat, 
+                                         region_multiplier*buffer_km)
         regions.append(region)
+
     print(f"[INFO] Creating union of {len(regions)} regions...")
     union_region = union_regions(regions)
 
@@ -120,7 +133,7 @@ def download_dem_for_study(study_info):
     study_output_dir = OUTPUT_DIR / study_id
     study_output_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_path = study_output_dir / "dem_manifest.json"
+    manifest_path = study_output_dir / "dem_manifest_new.json" # for v2 that adds test data
     if manifest_path.exists():
         print(f"[INFO] {study_id}: DEM already downloaded (manifest exists)")
         with open(manifest_path, 'r') as f:
@@ -255,19 +268,18 @@ if __name__ == "__main__":
             print(f"\n[INFO] Processing study {idx+1}/{len(mammals_df)}: {study_id}")
 
             study_file = os.path.join(csv_loc, f"{study_id}_{study_name}_2year_filtered_traintest.csv")
-            study_df = pd.read_csv(study_file)
+            df = pd.read_csv(study_file)
 
-            # Use training data only
-            train_df = study_df[study_df.set == 'train']
-            train_df[TIME_COL] = pd.to_datetime(train_df[TIME_COL], errors='coerce')
-            train_df = train_df.dropna(subset=[TIME_COL])
+            # df = study_df[study_df.set == SET]
+            df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors='coerce')
+            df = df.dropna(subset=[TIME_COL])
 
-            if len(train_df) == 0:
-                print(f"[WARN] No valid training data for study {study_id}, skipping")
-                results.append({"study_id": study_id, "error": "No valid training data", "processing_complete": False})
+            if len(df) == 0:
+                print(f"[WARN] No valid data for study {study_id}, skipping")
+                results.append({"study_id": study_id, "error": f"No valid data", "processing_complete": False})
                 continue
 
-            result = main(train_df, study_id)
+            result = main(df, study_id)
             results.append(result)
 
         except Exception as e:
@@ -276,7 +288,7 @@ if __name__ == "__main__":
             continue
 
     # Save summary results
-    summary_file = OUTPUT_DIR / "processing_summary.json"
+    summary_file = OUTPUT_DIR / f"processing_summary.json"
     with open(summary_file, 'w') as f:
         json.dump(results, f, indent=2)
 
