@@ -1,11 +1,27 @@
-# requires:
-# conda install -c conda-forge gdal
-# conda install -c conda-forge libgdal-hdf4
-# conda install rasterio                      <--- needs to be the conda version; pip version has only minimal GDAL and can't open HDF files
+"""
+PyTorch datasets for MoveBench.
 
-# known problems
-# Time stamp alignment is off - technically I did not correctly combine current location + next time when downloading
-#     probably minor; the hourly features are so coarse; but worth fixing
+DEPRECATED: This module is deprecated. Please import from movebench.datasets instead:
+
+    from movebench.datasets import ChipDataset, SSFDataset, iSSFDataset
+
+This file is kept for backward compatibility during the migration period.
+
+requires:
+    conda install -c conda-forge gdal
+    conda install -c conda-forge libgdal-hdf4
+    conda install rasterio  # needs conda version for HDF support
+"""
+
+import warnings
+
+# Emit deprecation warning on import
+warnings.warn(
+    "Importing from pytorch.py is deprecated. "
+    "Use 'from movebench.datasets import ChipDataset, SSFDataset, iSSFDataset' instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import os
 from functools import lru_cache
@@ -28,17 +44,33 @@ import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 
-# MODIS grid
-with open("sn_bound_10deg.txt") as f:
-    raw = f.read()
-lines = [ln for ln in raw.splitlines()
-         if ln.strip() and re.match(r"^\d", ln.strip())]
-buf = StringIO("\n".join(lines))
-cols = ["iv", "ih", "lon_min", "lon_max", "lat_min", "lat_max"]
-modis_grid = pd.read_csv(buf, delim_whitespace=True, header=None, names=cols)
+from movebench.config import (
+    PATHS, LAYERS,
+    LON_COL, LAT_COL, TIME_COL, INDIVIDUAL_COL,
+    YEAR_BOUNDS,
+)
+
+# MODIS grid - lazy loaded
+_modis_grid = None
+
+def _load_modis_grid():
+    """Load MODIS sinusoidal grid bounds (lazy)."""
+    global _modis_grid
+    if _modis_grid is None:
+        grid_file = PATHS.get("modis_grid", "sn_bound_10deg.txt")
+        with open(grid_file) as f:
+            raw = f.read()
+        lines = [ln for ln in raw.splitlines() if ln.strip() and re.match(r"^\d", ln.strip())]
+        buf = StringIO("\n".join(lines))
+        _modis_grid = pd.read_csv(buf, sep=r'\s+', header=None,
+                                   names=["iv", "ih", "lon_min", "lon_max", "lat_min", "lat_max"])
+    return _modis_grid
 
 def lat_lon_to_modis(ctr_lat, ctr_long):
-    rows = modis_grid[ (modis_grid.lon_min <= ctr_long) & ( ctr_long <= modis_grid.lon_max) & (modis_grid.lat_min <= ctr_lat) & ( ctr_lat <= modis_grid.lat_max) ]
+    """Get MODIS tile (h, v) for a lat/lon coordinate."""
+    grid = _load_modis_grid()
+    rows = grid[(grid.lon_min <= ctr_long) & (ctr_long <= grid.lon_max) &
+                (grid.lat_min <= ctr_lat) & (ctr_lat <= grid.lat_max)]
     return list(zip(rows.ih.values, rows.iv.values))
 
 ### rasterio methods ###
@@ -164,18 +196,130 @@ def _reproject_all_to_meters(layers, dst_crs="EPSG:3857"):
 
     return aligned, dst_transform, dst_crs
 
+
+class Normalizer:
+    """
+    Z-score normalization with selective channel mask.
+
+    Loads existing {study}_mean.pt and {study}_std.pt files.
+    Skips normalization for categorical layers (e.g., one-hot MODIS LC).
+    """
+    def __init__(self, mean, std, normalize_mask):
+        self.mean = mean
+        self.std = std
+        self.normalize_mask = normalize_mask
+
+    def __call__(self, x):
+        """Apply normalization to tensor x of shape (C, H, W) or (C, N)."""
+        if x.dim() == 3:
+            normed = (x - self.mean[:, None, None]) / self.std[:, None, None]
+            return torch.where(self.normalize_mask[:, None, None], normed, x)
+        elif x.dim() == 2:
+            normed = (x - self.mean[:, None]) / self.std[:, None]
+            return torch.where(self.normalize_mask[:, None], normed, x)
+        else:
+            raise ValueError(f"Expected 2D or 3D tensor, got {x.dim()}D")
+
+    @classmethod
+    def load(cls, study_id, num_channels, categorical_start_idx, categorical_end_idx):
+        """
+        Load normalizer from existing mean/std files.
+
+        Args:
+            study_id: Study identifier
+            num_channels: Total number of channels (e.g., 63)
+            categorical_start_idx: Start index of categorical channels to skip
+            categorical_end_idx: End index of categorical channels to skip
+        """
+        mean_path = f'{study_id}_mean.pt'
+        std_path = f'{study_id}_std.pt'
+
+        if not os.path.exists(mean_path):
+            return None
+
+        mean = torch.load(mean_path)
+        std = torch.load(std_path)
+
+        # Build mask: True = normalize, False = skip (categorical)
+        normalize_mask = torch.ones(num_channels, dtype=torch.bool)
+        normalize_mask[categorical_start_idx:categorical_end_idx] = False
+
+        return cls(mean, std, normalize_mask)
+
+    @classmethod
+    def compute_from_dataset(cls, dataset, num_samples=1000, categorical_indices=None):
+        """
+        Compute normalization statistics from dataset samples.
+
+        Args:
+            dataset: ChipDataset instance (without normalization)
+            num_samples: Number of samples to use
+            categorical_indices: Tuple (start, end) of categorical channel indices to skip
+        """
+        from torch.utils.data import DataLoader
+        from tqdm import tqdm
+
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=4)
+
+        layer_sum = None
+        layer_sq_sum = None
+        count = None
+
+        for i_batch, (x, valid_mask, _, _) in tqdm(enumerate(dataloader), total=num_samples):
+            x = x.squeeze(0)
+            valid_mask = valid_mask.squeeze(0)
+            num_valid = valid_mask.sum(dim=(-1, -2))
+            x_clean = torch.where(valid_mask, x, torch.zeros_like(x))
+
+            s = x_clean.sum(dim=(-1, -2))
+            s2 = (x_clean ** 2).sum(dim=(-1, -2))
+
+            if layer_sum is None:
+                layer_sum = s
+                layer_sq_sum = s2
+                count = num_valid
+            else:
+                layer_sum += s
+                layer_sq_sum += s2
+                count += num_valid
+
+            if i_batch >= num_samples:
+                break
+
+        mean = layer_sum / count
+        var = torch.clamp(layer_sq_sum / count - mean**2, min=0.0)
+        std = torch.sqrt(var)
+
+        # Build normalize mask
+        num_channels = mean.shape[0]
+        normalize_mask = torch.ones(num_channels, dtype=torch.bool)
+        if categorical_indices:
+            normalize_mask[categorical_indices[0]:categorical_indices[1]] = False
+
+        return cls(mean, std, normalize_mask)
+
+    def save(self, study_id):
+        """Save mean and std to files."""
+        torch.save(self.mean, f'{study_id}_mean.pt')
+        torch.save(self.std, f'{study_id}_std.pt')
+
+
 class ChipDataset(Dataset):
-    def __init__(self,  study_id, idx_to_timestamp, chip_base_dir='chips_out', dem_base_dir='dem_out'):
+    def __init__(self,  study_id, idx_to_timestamp, chip_base_dir=None, dem_base_dir=None):
+        self.study_id = study_id
         self.idx_to_timestamp = idx_to_timestamp.reset_index() # reset index to allow easy iteration but retain old index
+
+        chip_base_dir = chip_base_dir or str(PATHS["legacy_chips"])
+        dem_base_dir = dem_base_dir or str(PATHS["legacy_dem"])
 
         self.chip_dir = os.path.join(chip_base_dir, study_id)
         self.dem_dir  = os.path.join(dem_base_dir, study_id)
         self.dem_manifest = json.load(open(os.path.join(self.dem_dir, 'dem_manifest.json'), 'r'))
 
-        self.hii_dir = '/archive/vision/beery/movebench/human_impact_index/'
-        self.cvf_dir = '/archive/vision/beery/movebench/modis_cvf2015-2025/'
-        self.lc_dir = '/archive/vision/beery/movebench/modis_lc2015-2025/'
-        self.bioclim_dir = '/archive/vision/beery/movebench/bioclim/'
+        self.hii_dir = str(PATHS["hii"])
+        self.cvf_dir = str(PATHS["modis_cvf"])
+        self.lc_dir = str(PATHS["modis_lc"])
+        self.bioclim_dir = str(PATHS["bioclim"])
 
         # build modis filepath indices to avoid globs later
         # self.lc_dir + f"/MCD12Q1.A{year}001.h{h:02d}v{v:02d}*.hdf"
@@ -195,17 +339,15 @@ class ChipDataset(Dataset):
             v = int(fname.split("v")[1][:2])
             self.modis_cvf_index[(int(year), int(h), int(v))] = path
 
-        # TODO figure out where to cache these long term
-        self.mean, self.std = None, None
-        if os.path.exists(f'{study_id}_mean.pt'):
-            self.mean = torch.load(f'{study_id}_mean.pt')
-            self.std  = torch.load(f'{study_id}_std.pt')
-        else:
-            print("WARNING: Features will not be standardized for", study_id)
+        # Normalizer is loaded lazily on first __getitem__ call
+        # (needs to know num_channels and categorical indices)
+        self.normalizer = None
+        self._lc_nc = LAYERS["modis_lc"].num_classes  # 18
+        self._categorical_start_idx = None
 
-        # which layers to normalize
-        # computed first time __getitem__ is called; maybe could move to constructor
-        self.norm_mask = None
+        # Check if normalization files exist
+        if not os.path.exists(f'{study_id}_mean.pt'):
+            print("WARNING: Features will not be standardized for", study_id)
 
     def __getitem__(self, idx):
         idx, timestamp = self.idx_to_timestamp.iloc[idx].values # map to original df index
@@ -242,7 +384,7 @@ class ChipDataset(Dataset):
         
         # MODIS land cover -- annual, hdf files
         # int-valued (should be one-hot as features)
-        year = int(max(min(timestamp.year, 2025), 2015))
+        year = int(max(min(timestamp.year, YEAR_BOUNDS["modis_lc"][1]), YEAR_BOUNDS["modis_lc"][0]))
         # get all files that the bounds fall into - will need to merge them
         hvs = []
         for lat in [ bounds[1], bounds[3] ]:
@@ -274,7 +416,7 @@ class ChipDataset(Dataset):
         layer_names.extend(["modis_treecover", "modis_nontreeveg", "modis_nonveg"])
 
         # Human impact -- annual
-        year = max(min(timestamp.year, 2020), 2015)
+        year = max(min(timestamp.year, YEAR_BOUNDS["hii"][1]), YEAR_BOUNDS["hii"][0])
         hii_f = os.path.join(self.hii_dir, f'hii_{year}-01-01.tif')
         hii_raster = _get_rasterio_window_cached(hii_f, med_chip['bounds'])
         # print("HII", hii_raster['array'].shape)
@@ -302,7 +444,7 @@ class ChipDataset(Dataset):
 
         # convert classification data to one-hot
         lc_idx = layer_names.index("modis_lc")
-        lc_nc  = 18 # should be 17 classes in modis land cover, but sometimes there are 0 vals
+        lc_nc  = LAYERS["modis_lc"].num_classes  # 18: 17 classes + 1 for invalid/masked
         reprojected_t[lc_idx][reprojected_t[lc_idx] > 17] = 0 # make any invalid entries 0
         reprojected_t[lc_idx] = torch.nn.functional.one_hot(reprojected_t[lc_idx].long(), 
                                                             num_classes=lc_nc).squeeze(0).permute(2,0,1)
@@ -314,15 +456,24 @@ class ChipDataset(Dataset):
         # concat and standardize columns if appropriate
         final_t = torch.cat(reprojected_t)
         lc_start_idx = sum([ a['array'].shape[0] for a in all_layers[:lc_idx] ])
-        if self.mean is not None:
-            if self.norm_mask is not None:
-                norm_mask = self.norm_mask
-            else:
-                norm_mask = torch.ones(final_t.shape[0], dtype=bool)
-                norm_mask[lc_start_idx:lc_start_idx+lc_nc] = False
-                self.norm_mask = norm_mask
-            normed = (final_t - self.mean[:, None, None]) / self.std[:, None, None]
-            final_t = torch.where(norm_mask[:, None, None], normed, final_t)
+
+        # Load normalizer on first call (now we know num_channels)
+        if self.normalizer is None and self._categorical_start_idx is None:
+            num_channels = final_t.shape[0]
+            self.normalizer = Normalizer.load(
+                self.study_id,
+                num_channels,
+                lc_start_idx,
+                lc_start_idx + self._lc_nc
+            )
+            self._categorical_start_idx = lc_start_idx
+            # Store norm_mask for backward compatibility with SSFDataset
+            if self.normalizer is not None:
+                self.norm_mask = self.normalizer.normalize_mask
+
+        # Apply normalization if available
+        if self.normalizer is not None:
+            final_t = self.normalizer(final_t)
 
         return final_t, torch.cat(valid_masks), final_transform, final_crs
 
@@ -331,19 +482,19 @@ class ChipDataset(Dataset):
 
 def setup_df_for_ssf(df, step_multiplier=2, step_q=0.95, gap_q=0.999):
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    df = df.dropna(subset=['timestamp'])
+    df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors='coerce')
+    df = df.dropna(subset=[TIME_COL])
 
     # sort so diffs make sense; keep original index (chip ids)
-    df = df.sort_values(['individual-local-identifier', 'timestamp'])
+    df = df.sort_values([INDIVIDUAL_COL, TIME_COL])
 
-    df['lat_rad'] = np.deg2rad(df['location-lat'])
-    df['lon_rad'] = np.deg2rad(df['location-long'])
-    
-    g = df.groupby('individual-local-identifier')
+    df['lat_rad'] = np.deg2rad(df[LAT_COL])
+    df['lon_rad'] = np.deg2rad(df[LON_COL])
+
+    g = df.groupby(INDIVIDUAL_COL)
 
     # ---- time gaps per individual ----
-    df['time_since_last'] = g['timestamp'].diff()
+    df['time_since_last'] = g[TIME_COL].diff()
     per_indiv_cutoff = g['time_since_last'].transform(
         lambda s: s.dropna().quantile(gap_q)
     )
@@ -406,8 +557,8 @@ def setup_df_for_ssf(df, step_multiplier=2, step_q=0.95, gap_q=0.999):
     # index of the next row in time order
     df['next_index'] = df.index.to_series().shift(-1).astype('Int64')
 
-    same_indiv_next = df['individual-local-identifier'].eq(
-        df['individual-local-identifier'].shift(-1)
+    same_indiv_next = df[INDIVIDUAL_COL].eq(
+        df[INDIVIDUAL_COL].shift(-1)
     )
     same_burst_next = df['burst_id'].eq(df['burst_id'].shift(-1))
     valid_step_next = df['valid_step'].shift(-1).fillna(False)  # step from current -> next
@@ -478,8 +629,8 @@ class SSFDataset(ChipDataset):
 
         # start location
         row = self.df.loc[orig_idx]
-        start_lat = row['location-lat']
-        start_long = row['location-long']
+        start_lat = row[LAT_COL]
+        start_long = row[LON_COL]
         start_bearing = row['bearing']
 
         # sample candidate steps (pseudo-negatives)
@@ -500,8 +651,8 @@ class SSFDataset(ChipDataset):
         # append true endpoint
         next_idx = int(row['next_index'])
         next_row = self.df.loc[next_idx]
-        end_lat = next_row['location-lat']
-        end_long = next_row['location-long']
+        end_lat = next_row[LAT_COL]
+        end_long = next_row[LON_COL]
         x1, y1 = transformer.transform(end_long, end_lat)
         xs = np.append(xs, x1)
         ys = np.append(ys, y1)
@@ -545,10 +696,7 @@ class SSFDataset(ChipDataset):
         )
         interp_pixels = samples.squeeze(0).squeeze(-1)  # (1, C, N, 1) -> squeeze to (C, N)
 
-        print("norm mask shape", self.norm_mask.shape)
-        print("interp pixels shape", interp_pixels.shape)
-        print("interp pixels shape", snapped_pixels.shape)
-        step_pixels = torch.where(self.norm_mask[:, None] , interp_pixels, snapped_pixels)
+        step_pixels = torch.where(self.norm_mask[:, None], interp_pixels, snapped_pixels)
 
         return step_pixels, valid_pixels, chip_transform, chip_crs
 
