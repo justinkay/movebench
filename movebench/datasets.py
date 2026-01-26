@@ -186,6 +186,10 @@ class ChipDataset(Dataset):
             self._categorical_start_idx = lc_start_idx
             if self.normalizer is not None:
                 self.norm_mask = self.normalizer.normalize_mask
+            else:
+                # Create norm_mask even without normalizer (for SSFDataset interpolation)
+                self.norm_mask = torch.ones(num_channels, dtype=torch.bool)
+                self.norm_mask[lc_start_idx:lc_start_idx + self._lc_nc] = False
 
         # Apply normalization if available
         if self.normalizer is not None:

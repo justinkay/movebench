@@ -411,6 +411,32 @@ DEFAULT_LAYERS = [
     "bioclim",
 ]
 
+# -----------------------------------------------------------------------------
+# Canonical Layer Loading Order
+# -----------------------------------------------------------------------------
+# This defines the canonical order for loading layers, which determines
+# channel indices. Important for computing categorical indices deterministically.
+# This order matches ChipDataset's actual loading order.
+
+LAYER_ORDER = [
+    # Medium chip (MODIS products at ~250m)
+    "modis_lst",         # 2 bands  → channels 0-1
+    "modis_vi",          # 2 bands  → channels 2-3
+    "modis_ndsi",        # 1 band   → channel 4
+    "modis_bai",         # 1 band   → channel 5
+    # Big chip (ERA5 at ~11km)
+    "era5_land",         # 12 bands → channels 6-17
+    "era5",              # 3 bands  → channels 18-20
+    # Other layers
+    "dem",               # 1 band   → channel 21
+    "modis_lc",          # 1→18 (one-hot) → channels 22-39
+    "modis_cvf_tree",    # 1 band   → channel 40
+    "modis_cvf_nontree", # 1 band   → channel 41
+    "modis_cvf_nonveg",  # 1 band   → channel 42
+    "hii",               # 1 band   → channel 43
+    "bioclim",           # 19 bands → channels 44-62
+]
+
 # Minimal layer set for quick testing
 MINIMAL_LAYERS = [
     "era5_land",
@@ -525,3 +551,66 @@ def get_band_names(layer_names: list[str]) -> list[str]:
         else:
             names.extend([f"{layer_name}_{band}" for band in cfg.bands])
     return names
+
+
+def get_channel_indices(layer_order: list[str] = None) -> dict[str, tuple[int, int]]:
+    """
+    Compute (start, end) channel indices for each layer.
+
+    Args:
+        layer_order: List of layer names in order. Defaults to LAYER_ORDER.
+
+    Returns:
+        Dict mapping layer name to (start_index, end_index) tuple.
+    """
+    if layer_order is None:
+        layer_order = LAYER_ORDER
+
+    indices = {}
+    offset = 0
+    for name in layer_order:
+        layer = LAYERS[name]
+        if layer.categorical:
+            n_channels = layer.num_classes
+        else:
+            n_channels = len(layer.bands)
+        indices[name] = (offset, offset + n_channels)
+        offset += n_channels
+    return indices
+
+
+def get_categorical_indices(layer_order: list[str] = None) -> list[tuple[int, int]]:
+    """
+    Get (start, end) channel indices for all categorical layers.
+
+    Args:
+        layer_order: List of layer names in order. Defaults to LAYER_ORDER.
+
+    Returns:
+        List of (start_index, end_index) tuples for categorical layers.
+    """
+    if layer_order is None:
+        layer_order = LAYER_ORDER
+
+    channel_indices = get_channel_indices(layer_order)
+    result = []
+    for name in layer_order:
+        layer = LAYERS[name]
+        if layer.categorical:
+            result.append(channel_indices[name])
+    return result
+
+
+def get_total_channels(layer_order: list[str] = None) -> int:
+    """
+    Get total number of channels for the given layer order.
+
+    Args:
+        layer_order: List of layer names in order. Defaults to LAYER_ORDER.
+
+    Returns:
+        Total number of channels.
+    """
+    if layer_order is None:
+        layer_order = LAYER_ORDER
+    return get_band_count(layer_order)
