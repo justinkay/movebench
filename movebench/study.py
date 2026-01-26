@@ -331,5 +331,59 @@ class Study:
             **kwargs
         )
 
+    def download_rasters(
+        self,
+        splits: list[str] | str | None = None,
+        groups: list[str] | None = None,
+        include_dem: bool = True,
+        n_workers: int = 16,
+        skip_existing: bool = True,
+    ) -> dict:
+        """
+        Download all GEE environmental rasters for this study.
+
+        Downloads ERA5 atmospheric data, MODIS products (LST, VI, NDSI, BAI),
+        and optionally DEM tiles for the specified splits.
+
+        Args:
+            splits: List of splits to download ("train", "test"), or single split.
+                    Default: ["train", "test"]
+            groups: List of chip groups to download (e.g., ["era5", "modis"]).
+                    Default: all groups in CHIP_GROUPS
+            include_dem: Whether to download DEM tiles (default True)
+            n_workers: Number of parallel download workers (default 16)
+            skip_existing: Skip files that already exist (default True)
+
+        Returns:
+            Dict with download results:
+            {
+                "chips": {
+                    "train": {"total": N, "downloaded": N, "existing": N, "failed": N},
+                    "test": {...}
+                },
+                "tiles": {
+                    "dem": {"total": N, "downloaded": N, ...}
+                }
+            }
+
+        Example:
+            >>> study = Study.load("abc123-def456")
+            >>> result = study.download_rasters()
+            >>> print(f"Downloaded: {result['chips']['train']['downloaded']} chips")
+
+            # Download only train split, no DEM
+            >>> result = study.download_rasters(splits="train", include_dem=False)
+        """
+        from movebench.download import download_study_rasters
+
+        return download_study_rasters(
+            study_id=self.study_id,
+            splits=splits,
+            groups=groups,
+            include_dem=include_dem,
+            n_workers=n_workers,
+            skip_existing=skip_existing,
+        )
+
     def __repr__(self) -> str:
         return f"Study({self.study_id!r})"
