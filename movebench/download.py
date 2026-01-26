@@ -59,11 +59,6 @@ def ensure_ee_initialized():
     return _ee
 
 
-def _init_worker():
-    """Initialize GEE in a worker process."""
-    ensure_ee_initialized()
-
-
 # =============================================================================
 # DOWNLOAD UTILITIES
 # =============================================================================
@@ -317,7 +312,6 @@ def _download_chip_worker(args: tuple) -> dict:
         Dict with download results
     """
     idx, req = args
-    ensure_ee_initialized()
 
     point_id = req["point_id"]
     lon = req["lon"]
@@ -329,10 +323,27 @@ def _download_chip_worker(args: tuple) -> dict:
     groups = req["groups"]
     skip_existing = req["skip_existing"]
 
+    results = {"point_id": point_id, "split": split, "files": {}}
+
+    # Check if all files exist before initializing GEE
+    all_exist = True
+    for group_name in groups:
+        out_path = study_dir / "chips" / split / f"{point_id:05d}_{group_name}.tif"
+        if not (skip_existing and out_path.exists()):
+            all_exist = False
+            break
+
+    if all_exist:
+        for group_name in groups:
+            out_path = study_dir / "chips" / split / f"{point_id:05d}_{group_name}.tif"
+            results["files"][group_name] = {"path": str(out_path), "status": "existing"}
+        return results
+
+    # Only initialize GEE if we need to download something
+    ensure_ee_initialized()
+
     region_mult = REGION_MULTIPLIER[split]
     region = square_region_for_point(lon, lat, region_mult * buffer_km)
-
-    results = {"point_id": point_id, "split": split, "files": {}}
 
     for group_name in groups:
         group_config = CHIP_GROUPS[group_name]
@@ -436,8 +447,8 @@ def download_chips(
     # Create output directory
     (study_dir / "chips" / split).mkdir(parents=True, exist_ok=True)
 
-    # Download with multiprocessing
-    with mp.Pool(n_workers, initializer=_init_worker) as pool:
+    # Download with multiprocessing (lazy GEE init in each worker)
+    with mp.Pool(n_workers) as pool:
         results = pool.map(_download_chip_worker, enumerate(requests))
 
     # Aggregate statistics
@@ -575,7 +586,7 @@ def download_dem_tiles(
 
         tile_meta = {
             "tile_id": i,
-            "filename": f"tile_{i:03d}.tif",
+            "file": f"tile_{i:03d}.tif",
             "bounds": {
                 "min_lon": min_lon,
                 "max_lon": max_lon,
