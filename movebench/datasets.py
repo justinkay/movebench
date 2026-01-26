@@ -175,6 +175,21 @@ class ChipDataset(Dataset):
         nodata_vals = [a['nodata'] or torch.inf for a in all_layers]
         valid_masks = [(layer != nodata_val) for layer, nodata_val in zip(reprojected_t, nodata_vals)]
 
+        # Apply valid_range constraints from config
+        # Mapping from local layer_names to config layer names
+        layer_name_to_config = {
+            "modis_treecover": "modis_cvf_tree",
+            "modis_nontreeveg": "modis_cvf_nontree",
+            "modis_nonveg": "modis_cvf_nonveg",
+        }
+        for i, name in enumerate(layer_names):
+            config_name = layer_name_to_config.get(name)
+            if config_name and config_name in LAYERS:
+                valid_range = LAYERS[config_name].valid_range
+                if valid_range is not None:
+                    lo, hi = valid_range
+                    valid_masks[i] = valid_masks[i] & (reprojected_t[i] >= lo) & (reprojected_t[i] <= hi)
+
         # Concat and standardize columns if appropriate
         final_t = torch.cat(reprojected_t)
         lc_start_idx = sum([a['array'].shape[0] for a in all_layers[:lc_idx]])

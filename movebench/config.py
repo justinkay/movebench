@@ -119,7 +119,7 @@ class LayerConfig:
         categorical: If True, values are class labels (apply one-hot encoding)
         num_classes: Number of classes (for categorical layers)
         normalize: Whether to include in z-score normalization
-        nodata: NoData value (None = use file metadata)
+        valid_range: (min, max) tuple for valid data; values outside are masked
         scale_factor: Multiply raw values by this (e.g., 0.02 for MODIS LST)
         offset: Add this after scale_factor (for unit conversion)
     """
@@ -133,7 +133,7 @@ class LayerConfig:
     categorical: bool = False
     num_classes: int = 0
     normalize: bool = True
-    nodata: float | None = None
+    valid_range: tuple[float, float] | None = None  # (min, max) inclusive; values outside are masked
     scale_factor: float = 1.0
     offset: float = 0.0
 
@@ -280,6 +280,7 @@ MODIS_CVF_TREE = LayerConfig(
     native_scale_m=250.0,
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
+    valid_range=(0, 100),
 )
 
 MODIS_CVF_NONTREE = LayerConfig(
@@ -289,6 +290,7 @@ MODIS_CVF_NONTREE = LayerConfig(
     native_scale_m=250.0,
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
+    valid_range=(0, 100),
 )
 
 MODIS_CVF_NONVEG = LayerConfig(
@@ -298,6 +300,7 @@ MODIS_CVF_NONVEG = LayerConfig(
     native_scale_m=250.0,
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
+    valid_range=(0, 100),
 )
 
 
