@@ -34,7 +34,7 @@ class ChipDataset(Dataset):
         - CRS of the chip
     """
 
-    def __init__(self, study_id, idx_to_timestamp, chip_base_dir=None, dem_base_dir=None):
+    def __init__(self, study_id, idx_to_timestamp, chip_base_dir=None, dem_base_dir=None, normalizer=None):
         """
         Initialize ChipDataset.
 
@@ -43,6 +43,8 @@ class ChipDataset(Dataset):
             idx_to_timestamp: Series mapping original df indices to timestamps
             chip_base_dir: Directory containing chip files (default: from config)
             dem_base_dir: Directory containing DEM files (default: from config)
+            normalizer: Optional pre-computed Normalizer instance. If provided,
+                       skip auto-loading from files.
         """
         self.study_id = study_id
         self.idx_to_timestamp = idx_to_timestamp.reset_index()
@@ -76,13 +78,14 @@ class ChipDataset(Dataset):
             v = int(fname.split("v")[1][:2])
             self.modis_cvf_index[(int(year), int(h), int(v))] = path
 
-        # Normalizer is loaded lazily on first __getitem__ call
-        self.normalizer = None
+        # Normalizer: use provided one or load lazily on first __getitem__ call
+        self.normalizer = normalizer
+        self._normalizer_provided = normalizer is not None
         self._lc_nc = LAYERS["modis_lc"].num_classes
         self._categorical_start_idx = None
 
-        # Check if normalization files exist
-        if not os.path.exists(f'{study_id}_mean.pt'):
+        # Only warn about missing normalization if no normalizer was provided
+        if not self._normalizer_provided and not os.path.exists(f'{study_id}_mean.pt'):
             print("WARNING: Features will not be standardized for", study_id)
 
     def __getitem__(self, idx):
@@ -175,15 +178,20 @@ class ChipDataset(Dataset):
         lc_start_idx = sum([a['array'].shape[0] for a in all_layers[:lc_idx]])
 
         # Load normalizer on first call (now we know num_channels)
-        if self.normalizer is None and self._categorical_start_idx is None:
+        # Skip auto-loading if normalizer was provided at init time
+        if self._categorical_start_idx is None:
             num_channels = final_t.shape[0]
-            self.normalizer = Normalizer.load(
-                self.study_id,
-                num_channels,
-                lc_start_idx,
-                lc_start_idx + self._lc_nc
-            )
             self._categorical_start_idx = lc_start_idx
+
+            if not self._normalizer_provided and self.normalizer is None:
+                # Try to load from legacy files
+                self.normalizer = Normalizer.load(
+                    self.study_id,
+                    num_channels,
+                    lc_start_idx,
+                    lc_start_idx + self._lc_nc
+                )
+
             if self.normalizer is not None:
                 self.norm_mask = self.normalizer.normalize_mask
             else:

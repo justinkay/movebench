@@ -121,8 +121,9 @@ class Normalizer:
     """
     Z-score normalization with selective channel mask.
 
-    Loads existing {study}_mean.pt and {study}_std.pt files.
-    Skips normalization for categorical layers (e.g., one-hot MODIS LC).
+    Supports two modes:
+    1. Legacy: Load from {study}_mean.pt and {study}_std.pt files
+    2. Per-layer: Assemble from per-layer/per-band JSON statistics
     """
 
     def __init__(self, mean, std, normalize_mask):
@@ -137,6 +138,90 @@ class Normalizer:
         self.mean = mean
         self.std = std
         self.normalize_mask = normalize_mask
+
+    @classmethod
+    def from_per_layer_stats(cls, stats: dict, layer_order: list[str]):
+        """
+        Assemble normalizer from per-layer/per-band statistics.
+
+        Args:
+            stats: Dict mapping layer_name -> {"bands": {band_name: {"mean", "std"}}}
+                   or None for categorical layers
+            layer_order: List of layer names in order
+
+        Returns:
+            Normalizer instance
+        """
+        from movebench.config import LAYERS
+
+        means = []
+        stds = []
+        mask = []
+
+        for layer_name in layer_order:
+            layer = LAYERS[layer_name]
+            layer_stats = stats.get(layer_name)
+
+            if layer.categorical:
+                # Categorical layers: don't normalize
+                n = layer.num_classes
+                means.extend([0.0] * n)
+                stds.extend([1.0] * n)
+                mask.extend([False] * n)
+            elif layer_stats is not None:
+                # Assemble in band order from config
+                for band in layer.bands:
+                    band_stats = layer_stats.get("bands", {}).get(band)
+                    if band_stats:
+                        means.append(band_stats["mean"])
+                        stds.append(band_stats["std"])
+                    else:
+                        # Missing band: identity transform
+                        means.append(0.0)
+                        stds.append(1.0)
+                    mask.append(True)
+            else:
+                # Missing layer: identity transform for all bands
+                n = len(layer.bands)
+                means.extend([0.0] * n)
+                stds.extend([1.0] * n)
+                mask.extend([True] * n)
+
+        return cls(
+            torch.tensor(means, dtype=torch.float32),
+            torch.tensor(stds, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.bool),
+        )
+
+    @staticmethod
+    def load_per_layer_stats(path: str) -> dict:
+        """
+        Load per-layer stats from JSON file.
+
+        Args:
+            path: Path to JSON file
+
+        Returns:
+            Dict of per-layer statistics, or empty dict if file doesn't exist
+        """
+        import json
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    @staticmethod
+    def save_per_layer_stats(stats: dict, path: str):
+        """
+        Save per-layer stats to JSON file.
+
+        Args:
+            stats: Dict of per-layer statistics
+            path: Path to JSON file
+        """
+        import json
+        with open(path, "w") as f:
+            json.dump(stats, f, indent=2)
 
     def __call__(self, x):
         """
