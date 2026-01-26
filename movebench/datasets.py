@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import rasterio
 from pyproj import Transformer
 
-from movebench.config import PATHS, LAYERS, YEAR_BOUNDS, LON_COL, LAT_COL
+from movebench.config import PATHS, LAYERS, YEAR_BOUNDS, LON_COL, LAT_COL, POINT_ID_COL
 from movebench.utils import lat_lon_to_modis_tiles, setup_df_for_ssf
 from movebench.loaders import (
     load_geotiff,
@@ -34,27 +34,31 @@ class ChipDataset(Dataset):
         - CRS of the chip
     """
 
-    def __init__(self, study_id, idx_to_timestamp, chip_base_dir=None, dem_base_dir=None, normalizer=None):
+    def __init__(self, study_id, idx_to_timestamp, split, study_dir=None, normalizer=None):
         """
         Initialize ChipDataset.
 
         Args:
             study_id: Study identifier (UUID)
-            idx_to_timestamp: Series mapping original df indices to timestamps
-            chip_base_dir: Directory containing chip files (default: from config)
-            dem_base_dir: Directory containing DEM files (default: from config)
+            idx_to_timestamp: DataFrame with columns ['index', 'timestamp', 'point_id']
+            split: Data split ("train" or "test")
+            study_dir: Study directory (default: PATHS["studies"] / study_id)
             normalizer: Optional pre-computed Normalizer instance. If provided,
                        skip auto-loading from files.
         """
         self.study_id = study_id
-        self.idx_to_timestamp = idx_to_timestamp.reset_index()
+        self.idx_to_timestamp = idx_to_timestamp.reset_index(drop=True)
+        self.split = split
 
-        chip_base_dir = chip_base_dir or str(PATHS["legacy_chips"])
-        dem_base_dir = dem_base_dir or str(PATHS["legacy_dem"])
+        # Set up directory paths
+        study_dir = study_dir or (PATHS["studies"] / study_id)
+        self.chip_dir = study_dir / "chips" / split
+        self.dem_dir = study_dir / "tiles" / "dem"
 
-        self.chip_dir = os.path.join(chip_base_dir, study_id)
-        self.dem_dir = os.path.join(dem_base_dir, study_id)
-        self.dem_manifest = json.load(open(os.path.join(self.dem_dir, 'dem_manifest.json'), 'r'))
+        # Load DEM tile index
+        dem_index_path = self.dem_dir / "index.json"
+        with open(dem_index_path, 'r') as f:
+            self.dem_manifest = json.load(f)
 
         self.hii_dir = str(PATHS["hii"])
         self.cvf_dir = str(PATHS["modis_cvf"])
@@ -78,38 +82,36 @@ class ChipDataset(Dataset):
             v = int(fname.split("v")[1][:2])
             self.modis_cvf_index[(int(year), int(h), int(v))] = path
 
-        # Normalizer: use provided one or load lazily on first __getitem__ call
+        # Normalizer: use provided one or None (should be provided by Study)
         self.normalizer = normalizer
         self._normalizer_provided = normalizer is not None
         self._lc_nc = LAYERS["modis_lc"].num_classes
         self._categorical_start_idx = None
 
-        # Only warn about missing normalization if no normalizer was provided
-        if not self._normalizer_provided and not os.path.exists(f'{study_id}_mean.pt'):
-            print("WARNING: Features will not be standardized for", study_id)
-
     def __getitem__(self, idx):
-        idx, timestamp = self.idx_to_timestamp.iloc[idx].values
-        idx = int(idx)
+        row = self.idx_to_timestamp.iloc[idx]
+        point_id = int(row[POINT_ID_COL])
+        timestamp = row['timestamp']
         all_layers = []
         layer_names = []
 
-        # ERA5 chips
-        big_chip = load_geotiff(os.path.join(self.chip_dir, f"point_{idx}_big.tif"))
-        med_chip = load_geotiff(os.path.join(self.chip_dir, f"point_{idx}_medium.tif"))
+        # ERA5 chips (new naming: {point_id:05d}_era5.tif)
+        big_chip = load_geotiff(self.chip_dir / f"{point_id:05d}_era5.tif")
+        # MODIS chips (new naming: {point_id:05d}_modis.tif)
+        med_chip = load_geotiff(self.chip_dir / f"{point_id:05d}_modis.tif")
         all_layers.extend([med_chip, big_chip])
-        layer_names.extend(["era5_med", "era5_big"])
+        layer_names.extend(["modis", "era5"])
 
         # Get location for other queries
         bounds = med_chip['bounds']
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
 
-        # DEM - bigger tile
-        for chunk in self.dem_manifest.get("chunk_info", []):
+        # DEM - bigger tile (new structure: tiles key instead of chunk_info)
+        for chunk in self.dem_manifest.get("tiles", []):
             b = chunk["bounds"]
             if b["min_lon"] <= center_lon <= b["max_lon"] and b["min_lat"] <= center_lat <= b["max_lat"]:
-                demf = os.path.join(self.dem_dir, chunk["filename"])
+                demf = os.path.join(self.dem_dir, chunk["file"])
                 dem_raster = load_geotiff_cached(demf)
                 break
         all_layers.append(dem_raster)
@@ -177,20 +179,10 @@ class ChipDataset(Dataset):
         final_t = torch.cat(reprojected_t)
         lc_start_idx = sum([a['array'].shape[0] for a in all_layers[:lc_idx]])
 
-        # Load normalizer on first call (now we know num_channels)
-        # Skip auto-loading if normalizer was provided at init time
+        # Set categorical start index on first call (for SSFDataset interpolation)
         if self._categorical_start_idx is None:
             num_channels = final_t.shape[0]
             self._categorical_start_idx = lc_start_idx
-
-            if not self._normalizer_provided and self.normalizer is None:
-                # Try to load from legacy files
-                self.normalizer = Normalizer.load(
-                    self.study_id,
-                    num_channels,
-                    lc_start_idx,
-                    lc_start_idx + self._lc_nc
-                )
 
             if self.normalizer is not None:
                 self.norm_mask = self.normalizer.normalize_mask
@@ -220,32 +212,41 @@ class SSFDataset(ChipDataset):
     def __init__(self,
                  study_id,
                  df,
+                 split,
+                 study_dir=None,
                  random_seed: int = 0,
                  num_candidates: int = 100,
                  filter_quantile: float = 0.98,
-                 chip_base_dir=None,
-                 dem_base_dir=None):
+                 normalizer=None):
         """
         Initialize SSFDataset.
 
         Args:
             study_id: Study identifier
             df: DataFrame with location and timestamp columns (already filtered to train/test)
+            split: Data split ("train" or "test")
+            study_dir: Study directory (default: PATHS["studies"] / study_id)
             random_seed: Random seed for reproducibility
             num_candidates: Number of pseudo-absence candidates per step
             filter_quantile: Quantile for step length filtering
-            chip_base_dir: Directory containing chip files
-            dem_base_dir: Directory containing DEM files
+            normalizer: Optional pre-computed Normalizer instance
         """
         self.df = setup_df_for_ssf(df.copy())
         self.sample_indices = self.df.index[self.df['can_be_ssf_start']].to_numpy()
-        timestamps = pd.to_datetime(self.df.loc[self.sample_indices, 'timestamp'])
+
+        # Build idx_to_timestamp DataFrame with index, timestamp, and point_id
+        idx_to_timestamp = pd.DataFrame({
+            'index': self.sample_indices,
+            'timestamp': pd.to_datetime(self.df.loc[self.sample_indices, 'timestamp']),
+            POINT_ID_COL: self.df.loc[self.sample_indices, POINT_ID_COL],
+        })
 
         super().__init__(
             study_id,
-            idx_to_timestamp=timestamps,
-            chip_base_dir=chip_base_dir,
-            dem_base_dir=dem_base_dir,
+            idx_to_timestamp=idx_to_timestamp,
+            split=split,
+            study_dir=study_dir,
+            normalizer=normalizer,
         )
 
         self.random_seed = random_seed

@@ -38,10 +38,6 @@ PATHS = {
     "hii": SHARED_ROOT / "human_impact_index",
     "bioclim": SHARED_ROOT / "bioclim",
 
-    # Legacy paths (for backward compatibility during migration)
-    "legacy_chips": DATA_ROOT / "chips_out",
-    "legacy_dem": DATA_ROOT / "dem_out",
-
     # MODIS sinusoidal grid definition file
     "modis_grid": DATA_ROOT / "sn_bound_10deg.txt",
 }

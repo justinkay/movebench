@@ -121,9 +121,7 @@ class Normalizer:
     """
     Z-score normalization with selective channel mask.
 
-    Supports two modes:
-    1. Legacy: Load from {study}_mean.pt and {study}_std.pt files
-    2. Per-layer: Assemble from per-layer/per-band JSON statistics
+    Assembles from per-layer/per-band JSON statistics.
     """
 
     def __init__(self, mean, std, normalize_mask):
@@ -241,92 +239,3 @@ class Normalizer:
             return torch.where(self.normalize_mask[:, None], normed, x)
         else:
             raise ValueError(f"Expected 2D or 3D tensor, got {x.dim()}D")
-
-    @classmethod
-    def load(cls, study_id, num_channels, categorical_start_idx, categorical_end_idx):
-        """
-        Load normalizer from existing mean/std files.
-
-        Args:
-            study_id: Study identifier
-            num_channels: Total number of channels (e.g., 63)
-            categorical_start_idx: Start index of categorical channels to skip
-            categorical_end_idx: End index of categorical channels to skip
-
-        Returns:
-            Normalizer instance, or None if files don't exist
-        """
-        mean_path = f'{study_id}_mean.pt'
-        std_path = f'{study_id}_std.pt'
-
-        if not os.path.exists(mean_path):
-            return None
-
-        mean = torch.load(mean_path)
-        std = torch.load(std_path)
-
-        # Build mask: True = normalize, False = skip (categorical)
-        normalize_mask = torch.ones(num_channels, dtype=torch.bool)
-        normalize_mask[categorical_start_idx:categorical_end_idx] = False
-
-        return cls(mean, std, normalize_mask)
-
-    @classmethod
-    def compute_from_dataset(cls, dataset, num_samples=1000, categorical_indices=None):
-        """
-        Compute normalization statistics from dataset samples.
-
-        Args:
-            dataset: ChipDataset instance (without normalization)
-            num_samples: Number of samples to use
-            categorical_indices: Tuple (start, end) of categorical channel indices to skip
-
-        Returns:
-            Normalizer instance
-        """
-        from torch.utils.data import DataLoader
-        from tqdm import tqdm
-
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=4)
-
-        layer_sum = None
-        layer_sq_sum = None
-        count = None
-
-        for i_batch, (x, valid_mask, _, _) in tqdm(enumerate(dataloader), total=num_samples):
-            x = x.squeeze(0)
-            valid_mask = valid_mask.squeeze(0)
-            num_valid = valid_mask.sum(dim=(-1, -2))
-            x_clean = torch.where(valid_mask, x, torch.zeros_like(x))
-
-            s = x_clean.sum(dim=(-1, -2))
-            s2 = (x_clean ** 2).sum(dim=(-1, -2))
-
-            if layer_sum is None:
-                layer_sum = s
-                layer_sq_sum = s2
-                count = num_valid
-            else:
-                layer_sum += s
-                layer_sq_sum += s2
-                count += num_valid
-
-            if i_batch >= num_samples:
-                break
-
-        mean = layer_sum / count
-        var = torch.clamp(layer_sq_sum / count - mean**2, min=0.0)
-        std = torch.sqrt(var)
-
-        # Build normalize mask
-        num_channels = mean.shape[0]
-        normalize_mask = torch.ones(num_channels, dtype=torch.bool)
-        if categorical_indices:
-            normalize_mask[categorical_indices[0]:categorical_indices[1]] = False
-
-        return cls(mean, std, normalize_mask)
-
-    def save(self, study_id):
-        """Save mean and std to files."""
-        torch.save(self.mean, f'{study_id}_mean.pt')
-        torch.save(self.std, f'{study_id}_std.pt')
