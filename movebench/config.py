@@ -121,7 +121,6 @@ class LayerConfig:
         normalize: Whether to include in z-score normalization
         valid_range: (min, max) tuple for valid data; values outside are masked
         scale_factor: Multiply raw values by this (e.g., 0.02 for MODIS LST)
-        offset: Add this after scale_factor (for unit conversion)
     """
     name: str
     source: Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff"]
@@ -135,7 +134,6 @@ class LayerConfig:
     normalize: bool = True
     valid_range: tuple[float, float] | None = None  # (min, max) inclusive; values outside are masked
     scale_factor: float = 1.0
-    offset: float = 0.0
 
 
 # -----------------------------------------------------------------------------
@@ -315,6 +313,7 @@ HII = LayerConfig(
     native_scale_m=1000.0,  # ~1km
     temporal="annual",
     path_pattern=str(PATHS["hii"] / "hii_{year}-01-01.tif"),
+    valid_range=(0, 100),
 )
 
 BIOCLIM = LayerConfig(

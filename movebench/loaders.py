@@ -1,14 +1,21 @@
 """Raster file loading utilities."""
 
+from __future__ import annotations
+
 import os
 import glob
+import json
 from functools import lru_cache
+from typing import Protocol, TYPE_CHECKING
 
 import rasterio
 from rasterio.warp import transform_bounds
 from rasterio.merge import merge
 from rasterio.windows import from_bounds
 from rasterio.enums import Resampling
+
+if TYPE_CHECKING:
+    from movebench.config import LayerConfig
 
 
 def load_geotiff(path):
@@ -160,3 +167,246 @@ class ModisFileIndex:
     def __len__(self):
         """Number of indexed files."""
         return len(self._index)
+
+    @classmethod
+    def from_layer_config(cls, layer_config: LayerConfig) -> "ModisFileIndex":
+        """
+        Create index from LayerConfig's path_pattern.
+
+        Args:
+            layer_config: LayerConfig with path_pattern containing {year}, {h}, {v}
+
+        Returns:
+            ModisFileIndex instance
+        """
+        # Extract base directory and product prefix from path_pattern
+        # Pattern like: /path/to/MCD12Q1.A{year}001.h{h:02d}v{v:02d}.061.*.hdf
+        pattern = layer_config.path_pattern
+        base_dir = os.path.dirname(pattern)
+
+        # Extract product prefix (e.g., "MCD12Q1" or "MOD44B")
+        filename_pattern = os.path.basename(pattern)
+        product_prefix = filename_pattern.split(".")[0]
+
+        return cls(base_dir, product_prefix)
+
+
+# =============================================================================
+# LAYER LOADER PROTOCOL AND IMPLEMENTATIONS
+# =============================================================================
+
+class LayerLoader(Protocol):
+    """Protocol for layer loaders."""
+
+    def load(self, bounds: tuple, timestamp=None, **context) -> dict:
+        """
+        Load layer data for given bounds and context.
+
+        Args:
+            bounds: (min_lon, min_lat, max_lon, max_lat) in EPSG:4326
+            timestamp: Optional timestamp for temporal layers
+            **context: Additional context (hvs, point_id, etc.)
+
+        Returns:
+            dict with keys: array, transform, crs, nodata, bounds, bands
+        """
+        ...
+
+
+class LocalTiffLoader:
+    """
+    Loads windowed GeoTIFFs using path_pattern (for HII, bioclim).
+    """
+
+    def __init__(self, layer_config: LayerConfig):
+        self.config = layer_config
+
+    def load(self, bounds: tuple, timestamp=None, band_num: int = None, **kwargs) -> dict:
+        """
+        Load a windowed region from a local GeoTIFF.
+
+        Args:
+            bounds: (min_lon, min_lat, max_lon, max_lat)
+            timestamp: Optional timestamp (used for {year} in path_pattern)
+            band_num: Optional band number (for bioclim layers)
+
+        Returns:
+            dict with raster data
+        """
+        from movebench.config import YEAR_BOUNDS
+
+        # Build path from pattern
+        path = self.config.path_pattern
+        if timestamp is not None and "{year}" in path:
+            year_bounds = YEAR_BOUNDS.get(self.config.name, (1900, 2100))
+            year = max(min(timestamp.year, year_bounds[1]), year_bounds[0])
+            path = path.format(year=year)
+        if band_num is not None and "{band_num}" in path:
+            path = path.format(band_num=band_num)
+
+        return load_geotiff_window(path, bounds)
+
+
+class LocalHdfLoader:
+    """
+    Loads MODIS HDF products with tile merging (for modis_lc, modis_cvf_*).
+    """
+
+    def __init__(self, layer_config: LayerConfig):
+        self.config = layer_config
+        self._index = ModisFileIndex.from_layer_config(layer_config)
+
+    def load(self, bounds: tuple, timestamp, hvs: list[tuple[int, int]], **kwargs) -> dict:
+        """
+        Load and merge MODIS HDF tiles for given bounds.
+
+        Args:
+            bounds: (min_lon, min_lat, max_lon, max_lat)
+            timestamp: Timestamp for year selection
+            hvs: List of (h, v) MODIS tile coordinates
+
+        Returns:
+            dict with merged raster data
+        """
+        from movebench.config import YEAR_BOUNDS
+
+        # Determine year (clamp to available range)
+        year_bounds = YEAR_BOUNDS.get(self.config.name.replace("_tree", "").replace("_nontree", "").replace("_nonveg", ""), (1900, 2100))
+        if self.config.name.startswith("modis_cvf"):
+            year_bounds = YEAR_BOUNDS.get("modis_cvf", year_bounds)
+        year = max(min(timestamp.year, year_bounds[1]), year_bounds[0])
+
+        # Build subdataset paths
+        sd_paths = []
+        subdataset = self._get_subdataset_name()
+        for (h, v) in hvs:
+            hdf_path = self._index.get_path(year, int(h), int(v))
+            if hdf_path is None:
+                raise FileNotFoundError(f"No MODIS file for year={year}, h={h}, v={v}")
+            sd_paths.append(f"HDF4_EOS:EOS_GRID:{hdf_path}{subdataset}")
+
+        return load_merged_hdf_window(tuple(sd_paths), bounds)
+
+    def _get_subdataset_name(self) -> str:
+        """Get the HDF subdataset name for this layer."""
+        if self.config.name == "modis_lc":
+            return ":MCD12Q1:LC_Type1"
+        elif self.config.name == "modis_cvf_tree":
+            return ":MOD44B_250m_GRID:Percent_Tree_Cover"
+        elif self.config.name == "modis_cvf_nontree":
+            return ":MOD44B_250m_GRID:Percent_NonTree_Vegetation"
+        elif self.config.name == "modis_cvf_nonveg":
+            return ":MOD44B_250m_GRID:Percent_NonVegetated"
+        else:
+            # Default: use first band name
+            return f":{self.config.bands[0]}"
+
+
+class ChipLoader:
+    """
+    Loads pre-downloaded GEE chips (era5, modis).
+    """
+
+    def __init__(self, chip_dir: str, chip_group: str):
+        """
+        Args:
+            chip_dir: Directory containing chip files
+            chip_group: Chip group name (e.g., "era5", "modis")
+        """
+        self.chip_dir = chip_dir
+        self.chip_group = chip_group
+
+    def load(self, point_id: int, **kwargs) -> dict:
+        """
+        Load a chip file for a given point.
+
+        Args:
+            point_id: Point identifier
+
+        Returns:
+            dict with raster data
+        """
+        chip_path = os.path.join(self.chip_dir, f"{point_id:05d}_{self.chip_group}.tif")
+        return load_geotiff(chip_path)
+
+
+class TileLoader:
+    """
+    Loads from tile manifest (dem).
+    """
+
+    def __init__(self, tile_dir: str, layer_name: str):
+        """
+        Args:
+            tile_dir: Directory containing tiles and index.json
+            layer_name: Layer name (e.g., "dem")
+        """
+        self.tile_dir = tile_dir
+        self.layer_name = layer_name
+        self._manifest = None
+
+    @property
+    def manifest(self) -> dict:
+        """Lazy-load tile manifest."""
+        if self._manifest is None:
+            index_path = os.path.join(self.tile_dir, "index.json")
+            with open(index_path, 'r') as f:
+                self._manifest = json.load(f)
+        return self._manifest
+
+    def load(self, center_lon: float, center_lat: float, **kwargs) -> dict:
+        """
+        Load the tile containing the given point.
+
+        Args:
+            center_lon: Longitude of center point
+            center_lat: Latitude of center point
+
+        Returns:
+            dict with raster data
+        """
+        for tile in self.manifest.get("tiles", []):
+            b = tile["bounds"]
+            if (b["min_lon"] <= center_lon <= b["max_lon"] and
+                    b["min_lat"] <= center_lat <= b["max_lat"]):
+                tile_path = os.path.join(self.tile_dir, tile["file"])
+                return load_geotiff_cached(tile_path)
+
+        raise ValueError(f"No tile found for ({center_lon}, {center_lat})")
+
+
+def get_loader(layer_name: str, **init_kwargs) -> LayerLoader:
+    """
+    Factory that creates a loader based on layer config source type.
+
+    Args:
+        layer_name: Name of the layer in LAYERS config
+        **init_kwargs: Additional arguments for loader initialization
+            - chip_dir: Required for ChipLoader
+            - tile_dir: Required for TileLoader
+            - chip_group: Required for ChipLoader
+
+    Returns:
+        LayerLoader instance appropriate for the layer's source type
+    """
+    from movebench.config import LAYERS
+
+    config = LAYERS[layer_name]
+
+    if config.source == "local_tiff":
+        return LocalTiffLoader(config)
+    elif config.source == "local_hdf":
+        return LocalHdfLoader(config)
+    elif config.source == "gee_chip":
+        chip_dir = init_kwargs.get("chip_dir")
+        chip_group = init_kwargs.get("chip_group")
+        if chip_dir is None or chip_group is None:
+            raise ValueError("chip_dir and chip_group required for gee_chip layers")
+        return ChipLoader(chip_dir, chip_group)
+    elif config.source == "gee_tile":
+        tile_dir = init_kwargs.get("tile_dir")
+        if tile_dir is None:
+            raise ValueError("tile_dir required for gee_tile layers")
+        return TileLoader(tile_dir, layer_name)
+    else:
+        raise ValueError(f"Unknown source type: {config.source}")
