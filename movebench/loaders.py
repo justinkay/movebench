@@ -381,28 +381,61 @@ class TileLoader:
             center_lat = (min_lat + max_lat) / 2
             raise ValueError(f"No tile found for bounds {bounds} (center: {center_lon}, {center_lat})")
 
-        # If only one tile, use cached loader directly
+        # If only one tile, read directly with window
         if len(matching_tiles) == 1:
-            return load_geotiff_cached(matching_tiles[0])
+            with rasterio.open(matching_tiles[0]) as ds:
+                window = from_bounds(min_lon, min_lat, max_lon, max_lat, ds.transform)
+                # Use boundless read to handle edge cases where bounds extend
+                # slightly beyond tile extent
+                arr = ds.read(window=window, boundless=True, fill_value=ds.nodata or 0)
+                return {
+                    "array": arr,
+                    "transform": ds.window_transform(window),
+                    "crs": ds.crs,
+                    "nodata": ds.nodata,
+                    "bounds": bounds,
+                    "bands": ds.descriptions,
+                }
 
-        # Merge multiple tiles
+        # Merge multiple tiles without bounds constraint, then window the result.
+        # This avoids edge artifacts where merge() with bounds can produce zeros
+        # at pixel edges that extend slightly beyond source data extent.
         datasets = [rasterio.open(p) for p in matching_tiles]
         try:
             crs = datasets[0].crs
             nodata_val = datasets[0].nodata
 
-            mosaic, out_transform = merge(
+            # Merge without bounds - combines all tiles
+            mosaic, full_transform = merge(
                 datasets,
-                bounds=bounds,
                 nodata=nodata_val,
                 resampling=Resampling.bilinear,
             )
+
+            # Window to requested bounds using floor/ceil to capture full extent
+            window = from_bounds(min_lon, min_lat, max_lon, max_lat, full_transform)
+            import math
+            row_off = math.floor(window.row_off)
+            col_off = math.floor(window.col_off)
+            row_end = math.ceil(window.row_off + window.height)
+            col_end = math.ceil(window.col_off + window.width)
+
+            # Clamp to valid array range
+            row_off = max(0, row_off)
+            col_off = max(0, col_off)
+            row_end = min(mosaic.shape[1], row_end)
+            col_end = min(mosaic.shape[2], col_end)
+
+            windowed = mosaic[:, row_off:row_end, col_off:col_end]
+
+            # Compute transform for windowed region
+            out_transform = full_transform * rasterio.Affine.translation(col_off, row_off)
         finally:
             for ds in datasets:
                 ds.close()
 
         return {
-            "array": mosaic,
+            "array": windowed,
             "transform": out_transform,
             "crs": crs,
             "nodata": nodata_val,
