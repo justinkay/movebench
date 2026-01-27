@@ -838,8 +838,7 @@ def download_dem_tiles(
 def download_study_rasters(
     study_id: str,
     splits: list[str] | str | None = None,
-    groups: list[str] | None = None,
-    include_dem: bool = True,
+    layers: list[str] | None = None,
     n_workers: int = 16,
     skip_existing: bool = True,
 ) -> dict:
@@ -852,8 +851,9 @@ def download_study_rasters(
         study_id: Study identifier (UUID)
         splits: List of splits to download ("train", "test"), or single split.
                 Default: ["train", "test"]
-        groups: List of chip groups to download. Default: all groups in CHIP_GROUPS
-        include_dem: Whether to download DEM tiles
+        layers: List of layers to download. Accepts chip group names
+                ("era5", "modis", "dynamic_world") and tile layer names ("dem").
+                Default: all GEE layers
         n_workers: Number of parallel download workers
         skip_existing: Skip files that already exist
 
@@ -870,8 +870,13 @@ def download_study_rasters(
     elif isinstance(splits, str):
         splits = [splits]
 
-    if groups is None:
-        groups = list(CHIP_GROUPS.keys())
+    # Normalize layers - default to all GEE layers
+    if layers is None:
+        layers = list(CHIP_GROUPS.keys()) + ["dem"]
+
+    # Partition into chip groups vs tile layers
+    chip_groups = [l for l in layers if l in CHIP_GROUPS]
+    tile_layers = [l for l in layers if l not in CHIP_GROUPS]
 
     # Load study data
     study_dir = get_study_dir(study_id)
@@ -888,7 +893,7 @@ def download_study_rasters(
 
     print(f"[download_study_rasters] Study: {study_id}")
     print(f"[download_study_rasters] Total points: {len(df)}")
-    print(f"[download_study_rasters] Splits: {splits}, Groups: {groups}, DEM: {include_dem}")
+    print(f"[download_study_rasters] Splits: {splits}, Chip groups: {chip_groups}, Tile layers: {tile_layers}")
 
     # Compute buffer from training data (used consistently for all splits)
     train_df = df[df[SET_COL] == "train"]
@@ -898,34 +903,37 @@ def download_study_rasters(
 
     results = {"chips": {}, "tiles": {}}
 
-    # Download chips for each split
-    for split in splits:
-        split_df = df[df[SET_COL] == split].copy()
-        if len(split_df) == 0:
-            print(f"[download_study_rasters] No data for split '{split}', skipping")
-            results["chips"][split] = {"total": 0, "downloaded": 0, "existing": 0, "failed": 0}
-            continue
+    # Download chips for each split (if any chip groups requested)
+    if chip_groups:
+        for split in splits:
+            split_df = df[df[SET_COL] == split].copy()
+            if len(split_df) == 0:
+                print(f"[download_study_rasters] No data for split '{split}', skipping")
+                results["chips"][split] = {"total": 0, "downloaded": 0, "existing": 0, "failed": 0}
+                continue
 
-        print(f"\n[download_study_rasters] Downloading {split} chips ({len(split_df)} points)...")
-        results["chips"][split] = download_chips(
-            split_df,
-            study_dir,
-            split,
-            buffer_km=buffer_km,
-            groups=groups,
-            n_workers=n_workers,
-            skip_existing=skip_existing,
-        )
+            print(f"\n[download_study_rasters] Downloading {split} chips ({len(split_df)} points)...")
+            results["chips"][split] = download_chips(
+                split_df,
+                study_dir,
+                split,
+                buffer_km=buffer_km,
+                groups=chip_groups,
+                n_workers=n_workers,
+                skip_existing=skip_existing,
+            )
 
-    # Download DEM tiles (covers all splits)
-    if include_dem:
-        print(f"\n[download_study_rasters] Downloading DEM tiles...")
-        results["tiles"]["dem"] = download_dem_tiles(
-            df,
-            study_dir,
-            n_workers=1,  # DEM download is sequential due to GEE rate limits
-            skip_existing=skip_existing,
-        )
+    # Download tile layers (if any requested)
+    for layer in tile_layers:
+        if layer == "dem":
+            print(f"\n[download_study_rasters] Downloading DEM tiles...")
+            results["tiles"]["dem"] = download_dem_tiles(
+                df,
+                study_dir,
+                n_workers=1,  # DEM download is sequential due to GEE rate limits
+                skip_existing=skip_existing,
+            )
+        # Future: other tile layers would go here
 
     print(f"\n[download_study_rasters] All downloads complete for {study_id}")
     return results

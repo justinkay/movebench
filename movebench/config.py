@@ -385,6 +385,9 @@ CHIP_GROUPS = {
     },
 }
 
+# All downloadable GEE layers (chip groups + tile layers)
+GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem"]
+
 
 # -----------------------------------------------------------------------------
 # Default Layer Sets
