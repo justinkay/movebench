@@ -8,7 +8,7 @@ This module defines:
 - Chip groupings for GEE downloads
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 from pathlib import Path
 import os
@@ -85,14 +85,6 @@ REGION_MULTIPLIER = {
 # GEE download settings
 GEE_MAX_DOWNLOAD_SIZE_MB = 32
 GEE_MAX_GRID_DIMENSION = 10000
-
-# Year bounds for temporal layers (clip timestamps to these ranges)
-# DEPRECATED: Use config.year_bounds instead. Kept for backwards compatibility.
-YEAR_BOUNDS = {
-    "modis_lc": (2015, 2025),
-    "modis_cvf": (2015, 2025),
-    "hii": (2015, 2020),
-}
 
 
 # =============================================================================

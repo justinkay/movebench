@@ -274,7 +274,6 @@ class LocalHdfLoader:
         Returns:
             dict with merged raster data
         """
-        # Use config.year_bounds instead of YEAR_BOUNDS lookup
         year_bounds = self.config.year_bounds or (1900, 2100)
         year = max(min(timestamp.year, year_bounds[1]), year_bounds[0])
 
