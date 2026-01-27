@@ -241,12 +241,10 @@ class LocalTiffLoader:
         Returns:
             dict with raster data
         """
-        from movebench.config import YEAR_BOUNDS
-
         # Build path from pattern
         path = self.config.path_pattern
         if timestamp is not None and "{year}" in path:
-            year_bounds = YEAR_BOUNDS.get(self.config.name, (1900, 2100))
+            year_bounds = self.config.year_bounds or (1900, 2100)
             year = max(min(timestamp.year, year_bounds[1]), year_bounds[0])
             path = path.format(year=year)
         if band_num is not None and "{band_num}" in path:
@@ -276,38 +274,19 @@ class LocalHdfLoader:
         Returns:
             dict with merged raster data
         """
-        from movebench.config import YEAR_BOUNDS
-
-        # Determine year (clamp to available range)
-        year_bounds = YEAR_BOUNDS.get(self.config.name.replace("_tree", "").replace("_nontree", "").replace("_nonveg", ""), (1900, 2100))
-        if self.config.name.startswith("modis_cvf"):
-            year_bounds = YEAR_BOUNDS.get("modis_cvf", year_bounds)
+        # Use config.year_bounds instead of YEAR_BOUNDS lookup
+        year_bounds = self.config.year_bounds or (1900, 2100)
         year = max(min(timestamp.year, year_bounds[1]), year_bounds[0])
 
-        # Build subdataset paths
+        # Build subdataset paths using config.hdf_path_suffix
         sd_paths = []
-        subdataset = self._get_subdataset_name()
         for (h, v) in hvs:
             hdf_path = self._index.get_path(year, int(h), int(v))
             if hdf_path is None:
                 raise FileNotFoundError(f"No MODIS file for year={year}, h={h}, v={v}")
-            sd_paths.append(f"HDF4_EOS:EOS_GRID:{hdf_path}{subdataset}")
+            sd_paths.append(f"HDF4_EOS:EOS_GRID:{hdf_path}{self.config.hdf_path_suffix}")
 
         return load_merged_hdf_window(tuple(sd_paths), bounds)
-
-    def _get_subdataset_name(self) -> str:
-        """Get the HDF subdataset name for this layer."""
-        if self.config.name == "modis_lc":
-            return ":MCD12Q1:LC_Type1"
-        elif self.config.name == "modis_cvf_tree":
-            return ":MOD44B_250m_GRID:Percent_Tree_Cover"
-        elif self.config.name == "modis_cvf_nontree":
-            return ":MOD44B_250m_GRID:Percent_NonTree_Vegetation"
-        elif self.config.name == "modis_cvf_nonveg":
-            return ":MOD44B_250m_GRID:Percent_NonVegetated"
-        else:
-            # Default: use first band name
-            return f":{self.config.bands[0]}"
 
 
 class ChipLoader:

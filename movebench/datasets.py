@@ -12,14 +12,8 @@ from pyproj import Transformer
 
 from movebench.config import PATHS, LAYERS, LON_COL, LAT_COL, POINT_ID_COL
 from movebench.utils import lat_lon_to_modis_tiles, setup_df_for_ssf
-from movebench.loaders import (
-    ChipLoader,
-    TileLoader,
-    LocalTiffLoader,
-    LocalHdfLoader,
-    get_loader,
-)
-from movebench.transforms import reproject_to_meters, Normalizer
+from movebench.loaders import ChipLoader, TileLoader, get_loader
+from movebench.transforms import reproject_to_meters, Normalizer, one_hot_encode
 
 
 class ChipDataset(Dataset):
@@ -188,11 +182,7 @@ class ChipDataset(Dataset):
         # Convert land cover to one-hot
         lc_idx = layer_names.index("modis_lc")
         lc_nc = LAYERS["modis_lc"].num_classes
-        reprojected_t[lc_idx][reprojected_t[lc_idx] > 17] = 0
-        reprojected_t[lc_idx] = torch.nn.functional.one_hot(
-            reprojected_t[lc_idx].long(),
-            num_classes=lc_nc
-        ).squeeze(0).permute(2, 0, 1)
+        reprojected_t[lc_idx] = one_hot_encode(reprojected_t[lc_idx], lc_nc)
 
         # Compute nodata masks (handle NaN nodata values specially)
         valid_masks = []

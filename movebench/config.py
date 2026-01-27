@@ -87,6 +87,7 @@ GEE_MAX_DOWNLOAD_SIZE_MB = 32
 GEE_MAX_GRID_DIMENSION = 10000
 
 # Year bounds for temporal layers (clip timestamps to these ranges)
+# DEPRECATED: Use config.year_bounds instead. Kept for backwards compatibility.
 YEAR_BOUNDS = {
     "modis_lc": (2015, 2025),
     "modis_cvf": (2015, 2025),
@@ -134,6 +135,8 @@ class LayerConfig:
     normalize: bool = True
     valid_range: tuple[float, float] | None = None  # (min, max) inclusive; values outside are masked
     scale_factor: float = 1.0
+    hdf_path_suffix: str = ""  # HDF subdataset path suffix (e.g., ":MCD12Q1:LC_Type1")
+    year_bounds: tuple[int, int] | None = None  # (min_year, max_year) for temporal clipping
 
 
 # -----------------------------------------------------------------------------
@@ -269,6 +272,8 @@ MODIS_LC = LayerConfig(
     categorical=True,
     num_classes=18,  # 17 classes + 1 for invalid/masked
     normalize=False,
+    hdf_path_suffix=":MCD12Q1:LC_Type1",
+    year_bounds=(2015, 2025),
 )
 
 MODIS_CVF_TREE = LayerConfig(
@@ -279,6 +284,8 @@ MODIS_CVF_TREE = LayerConfig(
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
     valid_range=(0, 100),
+    hdf_path_suffix=":MOD44B_250m_GRID:Percent_Tree_Cover",
+    year_bounds=(2015, 2025),
 )
 
 MODIS_CVF_NONTREE = LayerConfig(
@@ -289,6 +296,8 @@ MODIS_CVF_NONTREE = LayerConfig(
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
     valid_range=(0, 100),
+    hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonTree_Vegetation",
+    year_bounds=(2015, 2025),
 )
 
 MODIS_CVF_NONVEG = LayerConfig(
@@ -299,6 +308,8 @@ MODIS_CVF_NONVEG = LayerConfig(
     temporal="annual",
     path_pattern=str(PATHS["modis_cvf"] / "MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf"),
     valid_range=(0, 100),
+    hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonVegetated",
+    year_bounds=(2015, 2025),
 )
 
 
@@ -313,6 +324,7 @@ HII = LayerConfig(
     native_scale_m=1000.0,  # ~1km
     temporal="annual",
     path_pattern=str(PATHS["hii"] / "hii_{year}-01-01.tif"),
+    year_bounds=(2015, 2020),
 )
 
 BIOCLIM = LayerConfig(
@@ -530,33 +542,10 @@ def compute_group_scale(
         return native_scale_m
 
 
-def get_band_count(layer_names: list[str]) -> int:
-    """Get total number of bands across layers (accounting for one-hot encoding)."""
-    total = 0
-    for name in layer_names:
-        cfg = get_layer(name)
-        if cfg.categorical:
-            total += cfg.num_classes
-        else:
-            total += len(cfg.bands)
-    return total
-
-
-def get_band_names(layer_names: list[str]) -> list[str]:
-    """Get list of all band names across layers."""
-    names = []
-    for layer_name in layer_names:
-        cfg = get_layer(layer_name)
-        if cfg.categorical:
-            names.extend([f"{layer_name}_class_{i}" for i in range(cfg.num_classes)])
-        else:
-            names.extend([f"{layer_name}_{band}" for band in cfg.bands])
-    return names
-
-
 def get_channel_indices(layer_order: list[str] = None) -> dict[str, tuple[int, int]]:
     """
     Compute (start, end) channel indices for each layer.
+    This is the source of truth for channel layout.
 
     Args:
         layer_order: List of layer names in order. Defaults to LAYER_ORDER.
@@ -571,47 +560,40 @@ def get_channel_indices(layer_order: list[str] = None) -> dict[str, tuple[int, i
     offset = 0
     for name in layer_order:
         layer = LAYERS[name]
-        if layer.categorical:
-            n_channels = layer.num_classes
-        else:
-            n_channels = len(layer.bands)
+        n_channels = layer.num_classes if layer.categorical else len(layer.bands)
         indices[name] = (offset, offset + n_channels)
         offset += n_channels
     return indices
 
 
-def get_categorical_indices(layer_order: list[str] = None) -> list[tuple[int, int]]:
-    """
-    Get (start, end) channel indices for all categorical layers.
-
-    Args:
-        layer_order: List of layer names in order. Defaults to LAYER_ORDER.
-
-    Returns:
-        List of (start_index, end_index) tuples for categorical layers.
-    """
-    if layer_order is None:
-        layer_order = LAYER_ORDER
-
-    channel_indices = get_channel_indices(layer_order)
-    result = []
-    for name in layer_order:
-        layer = LAYERS[name]
-        if layer.categorical:
-            result.append(channel_indices[name])
-    return result
-
-
 def get_total_channels(layer_order: list[str] = None) -> int:
-    """
-    Get total number of channels for the given layer order.
+    """Get total number of channels."""
+    indices = get_channel_indices(layer_order)
+    if not indices:
+        return 0
+    return max(end for _, end in indices.values())
 
-    Args:
-        layer_order: List of layer names in order. Defaults to LAYER_ORDER.
 
-    Returns:
-        Total number of channels.
-    """
+def get_band_count(layer_names: list[str]) -> int:
+    """Get total bands for a list of layers (for backwards compat)."""
+    return get_total_channels(layer_names)
+
+
+def get_band_names(layer_names: list[str]) -> list[str]:
+    """Get list of all band names across layers."""
+    names = []
+    for layer_name in layer_names:
+        cfg = get_layer(layer_name)
+        if cfg.categorical:
+            names.extend([f"{layer_name}_class_{i}" for i in range(cfg.num_classes)])
+        else:
+            names.extend([f"{layer_name}_{band}" for band in cfg.bands])
+    return names
+
+
+def get_categorical_indices(layer_order: list[str] = None) -> list[tuple[int, int]]:
+    """Get (start, end) indices for categorical layers only."""
     if layer_order is None:
         layer_order = LAYER_ORDER
-    return get_band_count(layer_order)
+    indices = get_channel_indices(layer_order)
+    return [indices[name] for name in layer_order if LAYERS[name].categorical]
