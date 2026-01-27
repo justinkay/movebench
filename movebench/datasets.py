@@ -124,8 +124,8 @@ class ChipDataset(Dataset):
         center_lon = (bounds[0] + bounds[2]) / 2
         center_lat = (bounds[1] + bounds[3]) / 2
 
-        # DEM tile
-        dem_raster = self._loaders["dem"].load(center_lon=center_lon, center_lat=center_lat)
+        # DEM tile (load all tiles intersecting bounds and merge)
+        dem_raster = self._loaders["dem"].load(bounds=bounds)
         all_layers.append(dem_raster)
         layer_names.append("dem")
 

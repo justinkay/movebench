@@ -354,25 +354,61 @@ class TileLoader:
                 self._manifest = json.load(f)
         return self._manifest
 
-    def load(self, center_lon: float, center_lat: float, **kwargs) -> dict:
+    def load(self, bounds: tuple, **kwargs) -> dict:
         """
-        Load the tile containing the given point.
+        Load and merge all tiles that intersect the given bounds.
 
         Args:
-            center_lon: Longitude of center point
-            center_lat: Latitude of center point
+            bounds: (min_lon, min_lat, max_lon, max_lat) in EPSG:4326
 
         Returns:
-            dict with raster data
+            dict with raster data covering the requested bounds
         """
+        min_lon, min_lat, max_lon, max_lat = bounds
+
+        # Find all tiles that intersect with the requested bounds
+        matching_tiles = []
         for tile in self.manifest.get("tiles", []):
             b = tile["bounds"]
-            if (b["min_lon"] <= center_lon <= b["max_lon"] and
-                    b["min_lat"] <= center_lat <= b["max_lat"]):
+            # Check if tile bounds intersect with requested bounds
+            if (b["min_lon"] <= max_lon and b["max_lon"] >= min_lon and
+                    b["min_lat"] <= max_lat and b["max_lat"] >= min_lat):
                 tile_path = os.path.join(self.tile_dir, tile["file"])
-                return load_geotiff_cached(tile_path)
+                matching_tiles.append(tile_path)
 
-        raise ValueError(f"No tile found for ({center_lon}, {center_lat})")
+        if not matching_tiles:
+            center_lon = (min_lon + max_lon) / 2
+            center_lat = (min_lat + max_lat) / 2
+            raise ValueError(f"No tile found for bounds {bounds} (center: {center_lon}, {center_lat})")
+
+        # If only one tile, use cached loader directly
+        if len(matching_tiles) == 1:
+            return load_geotiff_cached(matching_tiles[0])
+
+        # Merge multiple tiles
+        datasets = [rasterio.open(p) for p in matching_tiles]
+        try:
+            crs = datasets[0].crs
+            nodata_val = datasets[0].nodata
+
+            mosaic, out_transform = merge(
+                datasets,
+                bounds=bounds,
+                nodata=nodata_val,
+                resampling=Resampling.bilinear,
+            )
+        finally:
+            for ds in datasets:
+                ds.close()
+
+        return {
+            "array": mosaic,
+            "transform": out_transform,
+            "crs": crs,
+            "nodata": nodata_val,
+            "bounds": bounds,
+            "bands": None,
+        }
 
 
 def get_loader(layer_name: str, **init_kwargs) -> LayerLoader:

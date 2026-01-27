@@ -313,7 +313,6 @@ HII = LayerConfig(
     native_scale_m=1000.0,  # ~1km
     temporal="annual",
     path_pattern=str(PATHS["hii"] / "hii_{year}-01-01.tif"),
-    valid_range=(0, 100),
 )
 
 BIOCLIM = LayerConfig(
