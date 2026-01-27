@@ -374,11 +374,11 @@ CHIP_GROUPS = {
         "target_scale_m": 250.0,
     },
 
-    # "Small" group: high-res land cover (~10-30m) - currently disabled
-    # "landcover": {
-    #     "layers": ["dynamic_world"],
-    #     "target_scale_m": 30.0,
-    # },
+    # Dynamic World: high-res land cover probabilities (~10m, resampled to 30m)
+    "dynamic_world": {
+        "layers": ["dynamic_world"],
+        "target_scale_m": 30.0,  # Resample 10m to 30m for reasonable file sizes
+    },
 }
 
 
@@ -406,6 +406,9 @@ DEFAULT_LAYERS = [
     "modis_cvf_nonveg",
     "hii",
     "bioclim",
+
+    # Dynamic World
+    "dynamic_world",
 ]
 
 # -----------------------------------------------------------------------------
@@ -432,6 +435,7 @@ LAYER_ORDER = [
     "modis_cvf_nonveg",  # 1 band   → channel 42
     "hii",               # 1 band   → channel 43
     "bioclim",           # 19 bands → channels 44-62
+    "dynamic_world",     # 9 bands  → channels 63-71
 ]
 
 # Minimal layer set for quick testing

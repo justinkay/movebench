@@ -10,12 +10,17 @@ Downloads are organized per-study and use the naming convention from config.py.
 """
 
 import json
+import math
 import multiprocessing as mp
+import os
+import tempfile
 from pathlib import Path
 from functools import wraps
 
 import numpy as np
 import pandas as pd
+import rasterio
+from rasterio.merge import merge
 import requests
 from retry import retry
 
@@ -24,6 +29,7 @@ from movebench.config import (
     CHIP_GROUPS,
     LAYERS,
     REGION_MULTIPLIER,
+    GEE_MAX_DOWNLOAD_SIZE_MB,
     LON_COL,
     LAT_COL,
     TIME_COL,
@@ -79,6 +85,144 @@ def download_tiff(url: str, out_path: Path) -> None:
         for chunk in r.iter_content(1 << 20):  # 1MB chunks
             if chunk:
                 f.write(chunk)
+
+
+def download_tiled_image(img, region, scale: float, out_path: Path, crs: str = "EPSG:4326") -> None:
+    """
+    Download a large GEE image by splitting into tiles and merging.
+
+    When the full region exceeds GEE's download size limit, this function
+    splits the region into a grid of smaller tiles, downloads each tile,
+    and merges them into a single output file.
+
+    Args:
+        img: ee.Image to download
+        region: ee.Geometry defining the region to download
+        scale: Resolution in meters per pixel
+        out_path: Output file path
+        crs: Coordinate reference system (default EPSG:4326)
+    """
+    ee = ensure_ee_initialized()
+
+    # Get region bounds
+    bounds_info = region.bounds().getInfo()
+    coords = bounds_info['coordinates'][0]
+    min_lon = min(c[0] for c in coords)
+    max_lon = max(c[0] for c in coords)
+    min_lat = min(c[1] for c in coords)
+    max_lat = max(c[1] for c in coords)
+
+    # Estimate image size
+    # At equator: 1 degree ≈ 111km. Use cos(lat) correction for longitude.
+    center_lat = (min_lat + max_lat) / 2
+    lon_deg_to_m = 111320 * math.cos(math.radians(center_lat))
+    lat_deg_to_m = 110540
+
+    width_m = (max_lon - min_lon) * lon_deg_to_m
+    height_m = (max_lat - min_lat) * lat_deg_to_m
+    width_px = width_m / scale
+    height_px = height_m / scale
+
+    # Get band count from image
+    band_names = img.bandNames().getInfo()
+    num_bands = len(band_names)
+    bytes_per_pixel = 4  # float32
+
+    estimated_size_bytes = width_px * height_px * num_bands * bytes_per_pixel
+    # GEE's actual limit is 48MB (50,331,648 bytes), use that directly
+    gee_limit_bytes = 50_331_648
+
+    # If small enough, download directly
+    if estimated_size_bytes <= gee_limit_bytes * 0.7:  # 30% safety margin
+        params = {
+            "scale": scale,
+            "region": region,
+            "format": "GEO_TIFF",
+            "crs": crs,
+        }
+        url = img.getDownloadURL(params)
+        download_tiff(url, out_path)
+        return
+
+    # Calculate grid dimensions
+    # Each tile should be well under the limit - use 35% to account for GEE overhead
+    pixels_per_tile = (gee_limit_bytes * 0.35) / (num_bands * bytes_per_pixel)
+    tile_side_px = math.sqrt(pixels_per_tile)
+    tile_side_m = tile_side_px * scale
+
+    # Convert to degrees
+    tile_width_deg = tile_side_m / lon_deg_to_m
+    tile_height_deg = tile_side_m / lat_deg_to_m
+
+    n_cols = math.ceil((max_lon - min_lon) / tile_width_deg)
+    n_rows = math.ceil((max_lat - min_lat) / tile_height_deg)
+
+    # Download tiles to temp directory and merge
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tile_paths = []
+        tile_idx = 0
+
+        for row in range(n_rows):
+            for col in range(n_cols):
+                tile_min_lon = min_lon + col * tile_width_deg
+                tile_max_lon = min(tile_min_lon + tile_width_deg, max_lon)
+                tile_min_lat = min_lat + row * tile_height_deg
+                tile_max_lat = min(tile_min_lat + tile_height_deg, max_lat)
+
+                tile_region = ee.Geometry.Rectangle([
+                    tile_min_lon, tile_min_lat,
+                    tile_max_lon, tile_max_lat
+                ])
+
+                tile_path = Path(tmp_dir) / f"tile_{tile_idx:03d}.tif"
+
+                params = {
+                    "scale": scale,
+                    "region": tile_region,
+                    "format": "GEO_TIFF",
+                    "crs": crs,
+                }
+
+                try:
+                    url = img.getDownloadURL(params)
+                    download_tiff(url, tile_path)
+                    tile_paths.append(tile_path)
+                except Exception as e:
+                    print(f"[WARN] Tile {tile_idx} download failed: {e}")
+
+                tile_idx += 1
+
+        if not tile_paths:
+            raise RuntimeError("All tile downloads failed")
+
+        # Merge tiles using rasterio
+        # Suppress GDAL warnings about TIFF photometric interpretation for multi-band GEE files
+        old_cpl_log = os.environ.get('CPL_LOG', '')
+        os.environ['CPL_LOG'] = '/dev/null'
+        src_files = [rasterio.open(p) for p in tile_paths]
+        try:
+            mosaic, mosaic_transform = merge(src_files)
+
+            # Write merged output
+            profile = src_files[0].profile.copy()
+            profile.update({
+                'height': mosaic.shape[1],
+                'width': mosaic.shape[2],
+                'transform': mosaic_transform,
+            })
+
+            with rasterio.open(out_path, 'w', **profile) as dst:
+                dst.write(mosaic)
+        finally:
+            for src in src_files:
+                src.close()
+            # Restore GDAL logging
+            if old_cpl_log:
+                os.environ['CPL_LOG'] = old_cpl_log
+            else:
+                os.environ.pop('CPL_LOG', None)
 
 
 # =============================================================================
@@ -224,6 +368,56 @@ def make_modis_stack(timestamp: str):
             .toFloat())
 
 
+def make_dynamic_world_stack(timestamp: str, region):
+    """
+    Build Dynamic World probability stack for a timestamp.
+
+    Uses a 30-day median composite to handle Sentinel-2 gaps from clouds.
+    Falls back to 60-day window if needed.
+
+    Args:
+        timestamp: ISO format timestamp string
+        region: ee.Geometry region to filter by
+
+    Returns:
+        ee.Image with 9 probability bands (dw_water, dw_trees, etc.)
+    """
+    ee = ensure_ee_initialized()
+    ts = ee.Date(timestamp)
+
+    dw_config = LAYERS["dynamic_world"]
+    dw_bands = dw_config.bands
+
+    # Primary: 30-day window median composite
+    dw_col_30 = (ee.ImageCollection(dw_config.gee_collection)
+                 .filterDate(ts.advance(-15, "day"), ts.advance(15, "day"))
+                 .filterBounds(region)
+                 .select(dw_bands))
+
+    # Fallback: 60-day window if 30-day is empty
+    dw_col_60 = (ee.ImageCollection(dw_config.gee_collection)
+                 .filterDate(ts.advance(-30, "day"), ts.advance(30, "day"))
+                 .filterBounds(region)
+                 .select(dw_bands))
+
+    # Use conditional to pick appropriate collection
+    dw_col = ee.ImageCollection(
+        ee.Algorithms.If(
+            dw_col_30.size().gt(0),
+            dw_col_30,
+            dw_col_60
+        )
+    )
+
+    # Median composite (robust to clouds and outliers)
+    dw_img = dw_col.median()
+
+    # Rename bands for clarity
+    dw_img = dw_img.rename(["dw_" + b for b in dw_bands])
+
+    return dw_img.toFloat()
+
+
 def make_dem_image():
     """
     Create DEM image from Copernicus GLO-30.
@@ -361,20 +555,16 @@ def _download_chip_worker(args: tuple) -> dict:
                 img = make_era5_stack(timestamp)
             elif group_name == "modis":
                 img = make_modis_stack(timestamp)
+            elif group_name == "dynamic_world":
+                img = make_dynamic_world_stack(timestamp, region)
             else:
                 raise ValueError(f"Unknown chip group: {group_name}")
 
             # Compute download scale
             scale = compute_group_scale(buffer_km, target_scale_m)
 
-            params = {
-                "scale": scale,
-                "region": region,
-                "format": "GEO_TIFF",
-                "crs": "EPSG:4326",
-            }
-            url = img.getDownloadURL(params)
-            download_tiff(url, out_path)
+            # Use tiled download (handles large regions automatically)
+            download_tiled_image(img, region, scale, out_path, crs="EPSG:4326")
 
             results["files"][group_name] = {"path": str(out_path), "status": "downloaded"}
             print(f"[OK] point={point_id} group={group_name}")
@@ -390,6 +580,7 @@ def download_chips(
     df: pd.DataFrame,
     study_dir: Path,
     split: str,
+    buffer_km: float,
     groups: list[str] | None = None,
     n_workers: int = 16,
     skip_existing: bool = True,
@@ -401,6 +592,7 @@ def download_chips(
         df: DataFrame with trajectory data (must have LON_COL, LAT_COL, TIME_COL, POINT_ID_COL)
         study_dir: Path to study directory
         split: "train" or "test"
+        buffer_km: Buffer radius in kilometers (should be computed from training data)
         groups: List of chip groups to download (default: all in CHIP_GROUPS)
         n_workers: Number of parallel workers
         skip_existing: Skip chips that already exist
@@ -417,8 +609,6 @@ def download_chips(
     if missing:
         raise ValueError(f"DataFrame missing required columns: {missing}")
 
-    # Compute buffer from training data
-    buffer_km = get_buffer_m_for_study(df) / 1000.0
     print(f"[download_chips] Buffer: {buffer_km:.3f} km, split: {split}, groups: {groups}")
 
     # Build request list
@@ -700,6 +890,12 @@ def download_study_rasters(
     print(f"[download_study_rasters] Total points: {len(df)}")
     print(f"[download_study_rasters] Splits: {splits}, Groups: {groups}, DEM: {include_dem}")
 
+    # Compute buffer from training data (used consistently for all splits)
+    train_df = df[df[SET_COL] == "train"]
+    if len(train_df) == 0:
+        raise ValueError("No training data found - cannot compute buffer")
+    buffer_km = get_buffer_m_for_study(train_df) / 1000.0
+
     results = {"chips": {}, "tiles": {}}
 
     # Download chips for each split
@@ -715,6 +911,7 @@ def download_study_rasters(
             split_df,
             study_dir,
             split,
+            buffer_km=buffer_km,
             groups=groups,
             n_workers=n_workers,
             skip_existing=skip_existing,

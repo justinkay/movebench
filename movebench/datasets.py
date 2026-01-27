@@ -70,6 +70,7 @@ class ChipDataset(Dataset):
         # GEE chip loaders
         loaders["era5"] = ChipLoader(str(self.chip_dir), "era5")
         loaders["modis"] = ChipLoader(str(self.chip_dir), "modis")
+        loaders["dynamic_world"] = ChipLoader(str(self.chip_dir), "dynamic_world")
 
         # GEE tile loader (DEM)
         loaders["dem"] = TileLoader(str(self.dem_dir), "dem")
@@ -156,6 +157,25 @@ class ChipDataset(Dataset):
             bioclim_raster = self._loaders["bioclim"].load(bounds=bounds, band_num=i)
             all_layers.append(bioclim_raster)
             layer_names.append(f"bioclim_{i}")
+
+        # Dynamic World (9 probability bands)
+        try:
+            dw_chip = self._loaders["dynamic_world"].load(point_id=point_id)
+            all_layers.append(dw_chip)
+            layer_names.append("dynamic_world")
+        except FileNotFoundError:
+            # Handle missing Dynamic World data gracefully
+            H, W = med_chip['array'].shape[1:]
+            placeholder = {
+                'array': np.full((9, H, W), np.nan, dtype=np.float32),
+                'transform': med_chip['transform'],
+                'crs': med_chip['crs'],
+                'nodata': np.nan,
+                'bounds': med_chip['bounds'],
+                'bands': LAYERS["dynamic_world"].bands,
+            }
+            all_layers.append(placeholder)
+            layer_names.append("dynamic_world")
 
         return all_layers, layer_names
 
