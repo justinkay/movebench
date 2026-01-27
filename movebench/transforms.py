@@ -66,7 +66,18 @@ def reproject_to_meters(layers, dst_crs="EPSG:3857"):
     aligned = []
     for layer in layers:
         C = layer["array"].shape[0]
-        dst = np.full((C, dst_height, dst_width), np.nan, dtype=np.float32)
+
+        # Get source nodata value
+        src_nodata = layer.get("nodata")
+
+        # Use layer's nodata as dst_nodata if defined (preserves categorical nodata),
+        # otherwise use np.nan for continuous layers without defined nodata
+        if src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+            dst_nodata = src_nodata
+        else:
+            dst_nodata = np.nan
+
+        dst = np.full((C, dst_height, dst_width), dst_nodata, dtype=np.float32)
 
         reproject(
             source=layer["array"],
@@ -76,6 +87,8 @@ def reproject_to_meters(layers, dst_crs="EPSG:3857"):
             dst_transform=dst_transform,
             dst_crs=dst_crs,
             resampling=Resampling.nearest,
+            src_nodata=src_nodata if src_nodata is not None else np.nan,
+            dst_nodata=dst_nodata,
         )
         aligned.append(dst)
 

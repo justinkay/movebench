@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 import glob
 import json
 from functools import lru_cache
 from typing import Protocol, TYPE_CHECKING
 
+import numpy as np
 import rasterio
 from rasterio.warp import transform_bounds
 from rasterio.merge import merge
@@ -51,6 +53,9 @@ def load_geotiff_window(path, bounds):
     """
     Load a windowed region from GeoTIFF.
 
+    Uses boundless read to ensure the returned array covers the exact
+    requested bounds, filling out-of-bounds areas with nodata.
+
     Args:
         path: Path to the GeoTIFF file
         bounds: Tuple (min_lon, min_lat, max_lon, max_lat)
@@ -61,11 +66,14 @@ def load_geotiff_window(path, bounds):
     with rasterio.open(path) as ds:
         min_lon, min_lat, max_lon, max_lat = bounds
         window = from_bounds(min_lon, min_lat, max_lon, max_lat, ds.transform)
+        # Use np.nan as fill when nodata is not defined
+        fill_val = ds.nodata if ds.nodata is not None else np.nan
+        arr = ds.read(window=window, boundless=True, fill_value=fill_val)
         return {
-            "array": ds.read(window=window),
+            "array": arr,
             "transform": ds.window_transform(window),
             "crs": ds.crs,
-            "nodata": ds.nodata,
+            "nodata": fill_val,
             "bounds": bounds,
         }
 
@@ -386,13 +394,15 @@ class TileLoader:
             with rasterio.open(matching_tiles[0]) as ds:
                 window = from_bounds(min_lon, min_lat, max_lon, max_lat, ds.transform)
                 # Use boundless read to handle edge cases where bounds extend
-                # slightly beyond tile extent
-                arr = ds.read(window=window, boundless=True, fill_value=ds.nodata or 0)
+                # slightly beyond tile extent. Use np.nan as fill when nodata
+                # is not defined, since 0 is a valid elevation value.
+                fill_val = ds.nodata if ds.nodata is not None else np.nan
+                arr = ds.read(window=window, boundless=True, fill_value=fill_val)
                 return {
                     "array": arr,
                     "transform": ds.window_transform(window),
                     "crs": ds.crs,
-                    "nodata": ds.nodata,
+                    "nodata": fill_val,
                     "bounds": bounds,
                     "bands": ds.descriptions,
                 }
@@ -403,7 +413,8 @@ class TileLoader:
         datasets = [rasterio.open(p) for p in matching_tiles]
         try:
             crs = datasets[0].crs
-            nodata_val = datasets[0].nodata
+            # Use np.nan as nodata when not defined, since 0 is valid for DEM
+            nodata_val = datasets[0].nodata if datasets[0].nodata is not None else np.nan
 
             # Merge without bounds - combines all tiles
             mosaic, full_transform = merge(
@@ -414,7 +425,6 @@ class TileLoader:
 
             # Window to requested bounds using floor/ceil to capture full extent
             window = from_bounds(min_lon, min_lat, max_lon, max_lat, full_transform)
-            import math
             row_off = math.floor(window.row_off)
             col_off = math.floor(window.col_off)
             row_end = math.ceil(window.row_off + window.height)

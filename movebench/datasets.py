@@ -174,9 +174,19 @@ class ChipDataset(Dataset):
             num_classes=lc_nc
         ).squeeze(0).permute(2, 0, 1)
 
-        # Compute nodata masks
-        nodata_vals = [a['nodata'] or torch.inf for a in all_layers]
-        valid_masks = [(layer != nodata_val) for layer, nodata_val in zip(reprojected_t, nodata_vals)]
+        # Compute nodata masks (handle NaN nodata values specially)
+        valid_masks = []
+        for layer, layer_dict in zip(reprojected_t, all_layers):
+            nodata_val = layer_dict['nodata']
+            if nodata_val is None:
+                # No nodata defined - all finite values are valid
+                valid_masks.append(torch.isfinite(layer))
+            elif isinstance(nodata_val, float) and np.isnan(nodata_val):
+                # NaN nodata - use isnan for proper detection
+                valid_masks.append(~torch.isnan(layer))
+            else:
+                # Regular nodata value
+                valid_masks.append(layer != nodata_val)
 
         # Apply valid_range constraints from config
         for i, name in enumerate(layer_names):
