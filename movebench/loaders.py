@@ -602,8 +602,11 @@ class OrographicUpliftLoader(DerivedLoader):
         wind_speed = np.sqrt(u10_mean**2 + v10_mean**2)
         wind_dir = np.arctan2(u10_mean, v10_mean)  # meteorological convention
 
-        # Orographic uplift formula
-        wo = wind_speed * np.sin(slope_rad) * np.cos(wind_dir - aspect_rad)
+        # Orographic uplift formula (NaN from DEM nodata is expected and masked downstream)
+        with np.errstate(invalid="ignore"):
+            wo = wind_speed * np.sin(slope_rad) * np.cos(wind_dir - aspect_rad)
+        # Clamp before float32 cast to prevent inf from overflow
+        wo = np.nan_to_num(wo, nan=np.nan, posinf=np.nan, neginf=np.nan)
         wo = wo.astype(np.float32)
 
         return {
@@ -623,7 +626,7 @@ class ThermalUpliftLoader(DerivedLoader):
     w* = (g * Q0 * zi / T0)^(1/3)
 
     Where:
-        Q0 = surface_sensible_heat_flux / (rho * cp)
+        Q0 = -surface_sensible_heat_flux_Wm2 / (rho * cp)
         zi = boundary_layer_height
         T0 = temperature_2m
         g = 9.81 m/s^2
@@ -654,12 +657,14 @@ class ThermalUpliftLoader(DerivedLoader):
         rho = 1.225
         cp = 1005.0
 
-        # ERA5 sensible heat flux is in J/m^2 (accumulated), but hourly images
-        # represent W/m^2. The sign convention: negative = upward (toward atmosphere).
-        # For convective velocity we need upward flux, so negate.
-        q0 = -shf_mean / (rho * cp)
+        # ERA5 sensible heat flux: ECMWF convention is positive downward.
+        # Upward (convective) flux is negative. Negate to get Q0 > 0 for convection.
+        # ERA5-Land provides accumulated J/m^2 over the hourly step;
+        # divide by 3600s to convert to instantaneous W/m^2.
+        shf_wm2 = shf_mean / 3600.0
+        q0 = -shf_wm2 / (rho * cp)
 
-        if q0 > 0 and blh_mean > 0 and t2m_mean > 0:
+        if np.isfinite(q0) and q0 > 0 and np.isfinite(blh_mean) and blh_mean > 0 and np.isfinite(t2m_mean) and t2m_mean > 0:
             w_star = (g * q0 * blh_mean / t2m_mean) ** (1.0 / 3.0)
         else:
             w_star = 0.0

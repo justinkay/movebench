@@ -432,88 +432,36 @@ def make_dem_image():
     return dem_img.toFloat()
 
 
-def make_dist_water_image():
+def make_dist_water_image(scale=None):
     """
     Create distance-to-water image from JRC Global Surface Water.
 
     Uses max_extent band to identify any pixel that has ever been water,
-    then computes Euclidean distance transform. Result in meters.
-    Max detectable distance: ~30km at 30m resolution (neighborhood=1024).
+    then computes geodesic distance via cumulativeCost. Result in meters.
+    Max detectable distance: 30km.
 
     Returns ee.Image with single 'dist_water' band.
     """
     ee = ensure_ee_initialized()
     gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
-    water_mask = gsw.select("max_extent").gt(0)
-    # fastDistanceTransform returns squared pixel distance
-    dist_px2 = water_mask.fastDistanceTransform(neighborhood=1024).sqrt()
-    # Convert pixel distance to meters (native 30m resolution)
-    dist_m = dist_px2.multiply(30.0).rename("dist_water")
-    return dist_m.toFloat()
-
-
-def make_dist_coast_image():
-    """
-    Create distance-to-coast image from LSIB land boundaries.
-
-    Rasterizes land polygons, inverts to get ocean mask, then computes
-    distance transform. Result in meters.
-    At 1km resolution, max detectable distance: ~2000km (neighborhood=2048).
-
-    Returns ee.Image with single 'dist_coast' band.
-    """
-    ee = ensure_ee_initialized()
-    land = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
-    # Rasterize land polygons to a binary mask
-    land_img = land.reduceToImage(
-        properties=[ee.Feature(land.first()).propertyNames().get(0)],
-        reducer=ee.Reducer.count(),
-    ).gt(0)
-    # Ocean mask (invert land)
-    ocean_mask = land_img.Not()
-    # Distance from each pixel to nearest ocean pixel = distance to coast
-    dist_px2 = ocean_mask.fastDistanceTransform(neighborhood=2048).sqrt()
-    dist_m = dist_px2.multiply(1000.0).rename("dist_coast")
-    return dist_m.toFloat()
-
-
-def make_dist_road_image():
-    """
-    Create distance-to-road image from GRIP4 global roads dataset.
-
-    Merges road FeatureCollections from all continents, rasterizes,
-    then computes distance transform. Result in meters.
-    Max detectable distance: ~15km at 30m resolution (neighborhood=512).
-
-    Returns ee.Image with single 'dist_road' band.
-    """
-    ee = ensure_ee_initialized()
-    continents = [
-        "projects/sat-io/open-datasets/GRIP4/Africa",
-        "projects/sat-io/open-datasets/GRIP4/Asia",
-        "projects/sat-io/open-datasets/GRIP4/Europe",
-        "projects/sat-io/open-datasets/GRIP4/MENA",
-        "projects/sat-io/open-datasets/GRIP4/North-America",
-        "projects/sat-io/open-datasets/GRIP4/Oceania",
-        "projects/sat-io/open-datasets/GRIP4/South-America",
-    ]
-    # Merge all continents
-    roads = ee.FeatureCollection(continents[0])
-    for c in continents[1:]:
-        roads = roads.merge(ee.FeatureCollection(c))
-    # Rasterize roads (paint 1 on road pixels)
-    road_img = ee.Image(0).paint(roads, 1).gt(0)
-    dist_px2 = road_img.fastDistanceTransform(neighborhood=512).sqrt()
-    dist_m = dist_px2.multiply(30.0).rename("dist_road")
-    return dist_m.toFloat()
+    # max_extent: 1 = water detected, 0 = no water, masked = outside coverage.
+    # unmask(0) treats areas outside coverage as non-water.
+    water = gsw.select("max_extent").unmask(0).gt(0).selfMask()
+    # cumulativeCost with geodeticDistance=True gives distance in meters
+    # directly — no pixel-size conversion needed.
+    max_dist = 30000  # 30km
+    dist = (ee.Image(1)
+            .cumulativeCost(source=water, maxDistance=max_dist,
+                            geodeticDistance=True)
+            .unmask(max_dist)  # beyond range → max distance
+            .rename("dist_water"))
+    return dist.toFloat()
 
 
 # Map tile layer names to their image builder functions
 _TILE_IMAGE_BUILDERS = {
     "dem": make_dem_image,
     "dist_water": make_dist_water_image,
-    "dist_coast": make_dist_coast_image,
-    "dist_road": make_dist_road_image,
 }
 
 
@@ -787,6 +735,29 @@ def download_tile_layer(
     Returns:
         Dict with download statistics and tile index
     """
+    # Early exit: if index.json exists and all tile files are present, skip GEE entirely
+    if skip_existing:
+        tile_dir = study_dir / "tiles" / layer_name
+        index_path = tile_dir / "index.json"
+        if index_path.exists():
+            with open(index_path, 'r') as f:
+                existing_index = json.load(f)
+            tiles = existing_index.get("tiles", [])
+            has_failures = any(t.get("status") == "failed" for t in tiles)
+            if tiles and not has_failures and all(
+                (tile_dir / t["file"]).exists()
+                for t in tiles
+            ):
+                n = len(tiles)
+                print(f"[download_tile_layer:{layer_name}] All {n} tiles already exist, skipping")
+                return {
+                    "total": n,
+                    "downloaded": 0,
+                    "existing": n,
+                    "failed": 0,
+                    "index_path": str(index_path),
+                }
+
     ee = ensure_ee_initialized()
 
     # Validate columns

@@ -80,7 +80,7 @@ class ChipDataset(Dataset):
         loaders["rugosity"] = RugosityLoader(LAYERS["rugosity"])
 
         # Distance tile loaders (gracefully handle missing tiles)
-        for dist_layer in ["dist_water", "dist_coast", "dist_road"]:
+        for dist_layer in ["dist_water"]:
             tile_dir = self.study_dir / "tiles" / dist_layer
             index_path = tile_dir / "index.json"
             if index_path.exists():
@@ -160,7 +160,7 @@ class ChipDataset(Dataset):
         layer_names.append("rugosity")
 
         # Distance tile layers (NaN placeholder if not downloaded)
-        for dist_layer in ["dist_water", "dist_coast", "dist_road"]:
+        for dist_layer in ["dist_water"]:
             if dist_layer in self._loaders:
                 try:
                     dist_raster = self._loaders[dist_layer].load(bounds=bounds)

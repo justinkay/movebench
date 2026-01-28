@@ -296,24 +296,6 @@ DIST_WATER = LayerConfig(
     gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
 )
 
-DIST_COAST = LayerConfig(
-    name="dist_coast",
-    source="gee_tile",
-    bands=["dist_coast"],
-    native_scale_m=1000.0,
-    temporal="static",
-    gee_collection="USDOS/LSIB_SIMPLE/2017",
-)
-
-DIST_ROAD = LayerConfig(
-    name="dist_road",
-    source="gee_tile",
-    bands=["dist_road"],
-    native_scale_m=30.0,
-    temporal="static",
-    gee_collection="projects/sat-io/open-datasets/GRIP4",
-)
-
 
 # -----------------------------------------------------------------------------
 # Uplift Layers (computed on-load from DEM-derived + ERA5)
@@ -435,8 +417,6 @@ LAYERS: dict[str, LayerConfig] = {
     # GEE tiles
     "dem": DEM,
     "dist_water": DIST_WATER,
-    "dist_coast": DIST_COAST,
-    "dist_road": DIST_ROAD,
 
     # DEM-derived
     "slope": SLOPE,
@@ -486,7 +466,7 @@ CHIP_GROUPS = {
 }
 
 # All downloadable GEE layers (chip groups + tile layers)
-GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem", "dist_water", "dist_coast", "dist_road"]
+GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem", "dist_water"]
 
 
 # -----------------------------------------------------------------------------
@@ -513,8 +493,6 @@ DEFAULT_LAYERS = [
 
     # Distance tiles
     "dist_water",
-    "dist_coast",
-    "dist_road",
 
     # Uplift (derived)
     "orographic_uplift",
@@ -554,11 +532,9 @@ LAYER_ORDER = [
     "aspect",            # 2 bands  → channels 23-24
     "rugosity",          # 1 band   → channel 25
     "dist_water",        # 1 band   → channel 26
-    "dist_coast",        # 1 band   → channel 27
-    "dist_road",         # 1 band   → channel 28
-    "orographic_uplift", # 1 band   → channel 29
-    "thermal_uplift",    # 1 band   → channel 30
-    "modis_lc",          # 1→18 (one-hot) → channels 31-48
+    "orographic_uplift", # 1 band   → channel 27
+    "thermal_uplift",    # 1 band   → channel 28
+    "modis_lc",          # 1→18 (one-hot) → channels 29-46
     "modis_cvf_tree",    # 1 band   → channel 40
     "modis_cvf_nontree", # 1 band   → channel 41
     "modis_cvf_nonveg",  # 1 band   → channel 42
