@@ -7,40 +7,6 @@ import torch
 from rasterio.warp import reproject, calculate_default_transform, Resampling
 
 
-def reproject_all(layers):
-    """
-    Reproject all layers to match the first layer's CRS and extent.
-
-    Args:
-        layers: List of layer dicts with keys: array, transform, crs
-
-    Returns:
-        List of numpy arrays aligned to first layer
-    """
-    ref_raster = layers[0]
-    _, H_ref, W_ref = ref_raster['array'].shape
-
-    aligned = [ref_raster['array']]
-    dst_crs = ref_raster['crs']
-    dst_transform = ref_raster['transform']
-
-    for layer in layers[1:]:
-        # create new np array as destination - same channels as this layer but with target width/height
-        dst = np.full((layer["array"].shape[0], H_ref, W_ref), np.nan, dtype=np.float32)
-        reproject(
-            source=layer["array"],
-            destination=dst,
-            src_transform=layer["transform"],
-            src_crs=layer["crs"],
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest,
-        )
-        aligned.append(dst)
-
-    return aligned
-
-
 def reproject_to_meters(layers, dst_crs="EPSG:3857"):
     """
     Reproject all layers to a metric CRS, aligned to first layer's bounds.
@@ -110,24 +76,6 @@ def one_hot_encode(arr, num_classes):
     arr_t = arr_t.long()
     arr_t[arr_t >= num_classes] = 0
     return torch.nn.functional.one_hot(arr_t, num_classes).squeeze(0).permute(2, 0, 1)
-
-
-def compute_valid_mask(arrays, nodata_vals):
-    """
-    Compute valid data mask from list of arrays and nodata values.
-
-    Args:
-        arrays: List of torch tensors
-        nodata_vals: List of nodata values (None treated as infinity)
-
-    Returns:
-        Concatenated boolean mask tensor
-    """
-    masks = []
-    for arr, nodata in zip(arrays, nodata_vals):
-        nodata_val = nodata if nodata is not None else float('inf')
-        masks.append(arr != nodata_val)
-    return torch.cat(masks)
 
 
 class Normalizer:

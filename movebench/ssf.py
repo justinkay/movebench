@@ -621,3 +621,32 @@ class iSSFDataset(SSFDataset):
             samples[i] = (pseudo_lens, pseudo_turns)
 
         return samples
+
+
+def grouped_nll(beta_vec, X_t, y_t, starts_t, ends_t):
+    """
+    Compute grouped negative log-likelihood for conditional logistic regression.
+
+    Args:
+        beta_vec: Parameter vector
+        X_t: Feature matrix
+        y_t: Binary labels (1 for chosen, 0 for available)
+        starts_t: Group start indices
+        ends_t: Group end indices
+
+    Returns:
+        Mean NLL across groups
+    """
+    total = beta_vec.new_tensor(0.0)
+    for s_t, e_t in zip(starts_t, ends_t):
+        s, e = int(s_t), int(e_t)
+
+        Xg = X_t[s:e]
+        yg = y_t[s:e]
+        logits = Xg @ beta_vec
+
+        logZ = torch.logsumexp(logits, dim=0)
+        jstar = torch.nonzero(yg, as_tuple=True)[0].item()
+        total = total - (logits[jstar] - logZ)
+
+    return total / max(len(starts_t), 1)
