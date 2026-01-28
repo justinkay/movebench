@@ -566,7 +566,8 @@ class SSFDataset(Dataset):
         if self.normalizer is not None:
             step_pixels = self.normalizer(step_pixels)
 
-        return step_pixels, valid_pixels, None, TARGET_CRS
+        # Return empty dict for transform (None can't be collated by DataLoader)
+        return step_pixels, valid_pixels, {}, TARGET_CRS
 
     def __len__(self):
         return len(self.sample_indices)
