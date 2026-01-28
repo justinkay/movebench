@@ -116,7 +116,7 @@ class LayerConfig:
         scale_factor: Multiply raw values by this (e.g., 0.02 for MODIS LST)
     """
     name: str
-    source: Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff"]
+    source: Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff", "derived"]
     bands: list[str]
     native_scale_m: float
     temporal: Literal["hourly", "daily", "8day", "16day", "annual", "static"]
@@ -129,6 +129,7 @@ class LayerConfig:
     scale_factor: float = 1.0
     hdf_path_suffix: str = ""  # HDF subdataset path suffix (e.g., ":MCD12Q1:LC_Type1")
     year_bounds: tuple[int, int] | None = None  # (min_year, max_year) for temporal clipping
+    derived_from: list[str] | None = None  # Parent layers for derived layers
 
 
 # -----------------------------------------------------------------------------
@@ -251,6 +252,93 @@ DEM = LayerConfig(
 
 
 # -----------------------------------------------------------------------------
+# DEM-Derived Layers (computed on-load from DEM tiles)
+# -----------------------------------------------------------------------------
+
+SLOPE = LayerConfig(
+    name="slope",
+    source="derived",
+    bands=["slope"],
+    native_scale_m=30.0,
+    temporal="static",
+    derived_from=["dem"],
+)
+
+ASPECT = LayerConfig(
+    name="aspect",
+    source="derived",
+    bands=["aspect_sin", "aspect_cos"],
+    native_scale_m=30.0,
+    temporal="static",
+    derived_from=["dem"],
+)
+
+RUGOSITY = LayerConfig(
+    name="rugosity",
+    source="derived",
+    bands=["tri"],
+    native_scale_m=30.0,
+    temporal="static",
+    derived_from=["dem"],
+)
+
+
+# -----------------------------------------------------------------------------
+# GEE Tile Distance Layers (downloaded as tiles covering study extent)
+# -----------------------------------------------------------------------------
+
+DIST_WATER = LayerConfig(
+    name="dist_water",
+    source="gee_tile",
+    bands=["dist_water"],
+    native_scale_m=30.0,
+    temporal="static",
+    gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
+)
+
+DIST_COAST = LayerConfig(
+    name="dist_coast",
+    source="gee_tile",
+    bands=["dist_coast"],
+    native_scale_m=1000.0,
+    temporal="static",
+    gee_collection="USDOS/LSIB_SIMPLE/2017",
+)
+
+DIST_ROAD = LayerConfig(
+    name="dist_road",
+    source="gee_tile",
+    bands=["dist_road"],
+    native_scale_m=30.0,
+    temporal="static",
+    gee_collection="projects/sat-io/open-datasets/GRIP4",
+)
+
+
+# -----------------------------------------------------------------------------
+# Uplift Layers (computed on-load from DEM-derived + ERA5)
+# -----------------------------------------------------------------------------
+
+OROGRAPHIC_UPLIFT = LayerConfig(
+    name="orographic_uplift",
+    source="derived",
+    bands=["orographic_uplift"],
+    native_scale_m=30.0,
+    temporal="hourly",
+    derived_from=["slope", "aspect", "era5_land"],
+)
+
+THERMAL_UPLIFT = LayerConfig(
+    name="thermal_uplift",
+    source="derived",
+    bands=["thermal_uplift"],
+    native_scale_m=11132.0,
+    temporal="hourly",
+    derived_from=["era5_land", "era5"],
+)
+
+
+# -----------------------------------------------------------------------------
 # Local HDF Layers (MODIS products from local archive)
 # -----------------------------------------------------------------------------
 
@@ -346,6 +434,18 @@ LAYERS: dict[str, LayerConfig] = {
 
     # GEE tiles
     "dem": DEM,
+    "dist_water": DIST_WATER,
+    "dist_coast": DIST_COAST,
+    "dist_road": DIST_ROAD,
+
+    # DEM-derived
+    "slope": SLOPE,
+    "aspect": ASPECT,
+    "rugosity": RUGOSITY,
+
+    # Uplift (derived)
+    "orographic_uplift": OROGRAPHIC_UPLIFT,
+    "thermal_uplift": THERMAL_UPLIFT,
 
     # Local HDF
     "modis_lc": MODIS_LC,
@@ -386,7 +486,7 @@ CHIP_GROUPS = {
 }
 
 # All downloadable GEE layers (chip groups + tile layers)
-GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem"]
+GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem", "dist_water", "dist_coast", "dist_road"]
 
 
 # -----------------------------------------------------------------------------
@@ -405,6 +505,20 @@ DEFAULT_LAYERS = [
 
     # GEE tiles
     "dem",
+
+    # DEM-derived
+    "slope",
+    "aspect",
+    "rugosity",
+
+    # Distance tiles
+    "dist_water",
+    "dist_coast",
+    "dist_road",
+
+    # Uplift (derived)
+    "orographic_uplift",
+    "thermal_uplift",
 
     # Local layers
     "modis_lc",
@@ -436,7 +550,15 @@ LAYER_ORDER = [
     "era5",              # 3 bands  → channels 18-20
     # Other layers
     "dem",               # 1 band   → channel 21
-    "modis_lc",          # 1→18 (one-hot) → channels 22-39
+    "slope",             # 1 band   → channel 22
+    "aspect",            # 2 bands  → channels 23-24
+    "rugosity",          # 1 band   → channel 25
+    "dist_water",        # 1 band   → channel 26
+    "dist_coast",        # 1 band   → channel 27
+    "dist_road",         # 1 band   → channel 28
+    "orographic_uplift", # 1 band   → channel 29
+    "thermal_uplift",    # 1 band   → channel 30
+    "modis_lc",          # 1→18 (one-hot) → channels 31-48
     "modis_cvf_tree",    # 1 band   → channel 40
     "modis_cvf_nontree", # 1 band   → channel 41
     "modis_cvf_nonveg",  # 1 band   → channel 42

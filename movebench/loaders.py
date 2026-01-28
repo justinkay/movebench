@@ -432,6 +432,262 @@ class TileLoader:
         }
 
 
+# =============================================================================
+# DERIVED LAYER LOADERS (computed from parent layers)
+# =============================================================================
+
+class DerivedLoader:
+    """Base class for layers computed from other loaded layers."""
+
+    def __init__(self, layer_config: "LayerConfig"):
+        self.config = layer_config
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        """
+        Compute derived layer from parent layer data.
+
+        Args:
+            parent_data: Dict mapping parent layer name to its loaded data dict
+                         (each with keys: array, transform, crs, nodata, bounds)
+
+        Returns:
+            dict with keys: array, transform, crs, nodata, bounds, bands
+        """
+        raise NotImplementedError
+
+
+def _gradient_meters(elev: np.ndarray, transform) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute elevation gradients in meters.
+
+    Uses pixel spacing from the rasterio transform and corrects for
+    latitude-dependent longitude spacing.
+
+    Args:
+        elev: 2D elevation array (H, W) in meters
+        transform: rasterio Affine transform
+
+    Returns:
+        (gy, gx) gradients in m/m (rise/run)
+    """
+    # Pixel spacing in degrees
+    dx_deg = abs(transform.a)
+    dy_deg = abs(transform.e)
+
+    # Convert to meters (approximate)
+    # Use center latitude for longitude correction
+    nrows = elev.shape[0]
+    center_row = nrows // 2
+    # Latitude at center of array
+    center_lat = transform.f + center_row * transform.e
+    lat_rad = np.radians(center_lat)
+
+    dy_m = dy_deg * 110540.0  # meters per degree latitude
+    dx_m = dx_deg * 111320.0 * np.cos(lat_rad)  # meters per degree longitude
+
+    gy, gx = np.gradient(elev, dy_m, dx_m)
+    return gy, gx
+
+
+class SlopeLoader(DerivedLoader):
+    """Compute slope in degrees from DEM."""
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        dem_data = parent_data["dem"]
+        elev = dem_data["array"][0].astype(np.float64)  # (H, W)
+
+        gy, gx = _gradient_meters(elev, dem_data["transform"])
+        slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
+        slope_deg = np.degrees(slope_rad).astype(np.float32)
+
+        return {
+            "array": slope_deg[np.newaxis],  # (1, H, W)
+            "transform": dem_data["transform"],
+            "crs": dem_data["crs"],
+            "nodata": np.nan,
+            "bounds": dem_data["bounds"],
+            "bands": ["slope"],
+        }
+
+
+class AspectLoader(DerivedLoader):
+    """Compute aspect as (sin, cos) encoding from DEM."""
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        dem_data = parent_data["dem"]
+        elev = dem_data["array"][0].astype(np.float64)
+
+        gy, gx = _gradient_meters(elev, dem_data["transform"])
+        aspect_rad = np.arctan2(-gx, gy)  # radians, north=0 clockwise
+
+        sin_aspect = np.sin(aspect_rad).astype(np.float32)
+        cos_aspect = np.cos(aspect_rad).astype(np.float32)
+
+        return {
+            "array": np.stack([sin_aspect, cos_aspect], axis=0),  # (2, H, W)
+            "transform": dem_data["transform"],
+            "crs": dem_data["crs"],
+            "nodata": np.nan,
+            "bounds": dem_data["bounds"],
+            "bands": ["aspect_sin", "aspect_cos"],
+        }
+
+
+class RugosityLoader(DerivedLoader):
+    """
+    Compute Terrain Ruggedness Index (TRI) from DEM.
+
+    TRI = sqrt(sum((z_neighbor - z_center)^2)) over a 3x3 window.
+    """
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        dem_data = parent_data["dem"]
+        elev = dem_data["array"][0].astype(np.float64)
+        H, W = elev.shape
+
+        # Pad with edge values for border pixels
+        padded = np.pad(elev, 1, mode="edge")
+
+        # Sum of squared differences over 3x3 neighborhood
+        sq_sum = np.zeros((H, W), dtype=np.float64)
+        for di in range(3):
+            for dj in range(3):
+                if di == 1 and dj == 1:
+                    continue  # skip center
+                neighbor = padded[di:di + H, dj:dj + W]
+                sq_sum += (neighbor - elev) ** 2
+
+        tri = np.sqrt(sq_sum).astype(np.float32)
+
+        return {
+            "array": tri[np.newaxis],  # (1, H, W)
+            "transform": dem_data["transform"],
+            "crs": dem_data["crs"],
+            "nodata": np.nan,
+            "bounds": dem_data["bounds"],
+            "bands": ["tri"],
+        }
+
+
+class OrographicUpliftLoader(DerivedLoader):
+    """
+    Compute orographic uplift: Wo = wind_speed * sin(slope) * cos(wind_dir - aspect).
+
+    Based on Bohrer et al. 2012. Requires slope, aspect, and ERA5 wind components.
+    Wind components are broadcast from coarse ERA5 grid to DEM resolution.
+    """
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        slope_data = parent_data["slope"]
+        aspect_data = parent_data["aspect"]
+        era5l_data = parent_data["era5_land"]
+
+        slope_rad = np.radians(slope_data["array"][0])  # slope in degrees -> radians
+
+        # Aspect encoded as (sin, cos) -> recover angle
+        sin_asp = aspect_data["array"][0]
+        cos_asp = aspect_data["array"][1]
+        aspect_rad = np.arctan2(sin_asp, cos_asp)
+
+        # ERA5-Land wind components (u10 = index 4, v10 = index 5 in era5_land bands)
+        # u_component_of_wind_10m, v_component_of_wind_10m
+        u10 = era5l_data["array"][4].astype(np.float64)
+        v10 = era5l_data["array"][5].astype(np.float64)
+
+        # ERA5 is coarse - it may be a single pixel or small grid.
+        # Take mean to get scalar wind, then broadcast.
+        u10_mean = np.nanmean(u10)
+        v10_mean = np.nanmean(v10)
+
+        wind_speed = np.sqrt(u10_mean**2 + v10_mean**2)
+        wind_dir = np.arctan2(u10_mean, v10_mean)  # meteorological convention
+
+        # Orographic uplift formula
+        wo = wind_speed * np.sin(slope_rad) * np.cos(wind_dir - aspect_rad)
+        wo = wo.astype(np.float32)
+
+        return {
+            "array": wo[np.newaxis],  # (1, H, W)
+            "transform": slope_data["transform"],
+            "crs": slope_data["crs"],
+            "nodata": np.nan,
+            "bounds": slope_data["bounds"],
+            "bands": ["orographic_uplift"],
+        }
+
+
+class ThermalUpliftLoader(DerivedLoader):
+    """
+    Compute Deardorff convective velocity scale.
+
+    w* = (g * Q0 * zi / T0)^(1/3)
+
+    Where:
+        Q0 = surface_sensible_heat_flux / (rho * cp)
+        zi = boundary_layer_height
+        T0 = temperature_2m
+        g = 9.81 m/s^2
+        rho = 1.225 kg/m^3 (sea level air density)
+        cp = 1005 J/(kg·K)
+
+    Only computed where Q0 > 0 (convective conditions), else 0.
+    """
+
+    def compute(self, parent_data: dict[str, dict]) -> dict:
+        era5l_data = parent_data["era5_land"]
+        era5_data = parent_data["era5"]
+
+        # ERA5-Land: temperature_2m (index 0), surface_sensible_heat_flux (index 11)
+        t2m = era5l_data["array"][0].astype(np.float64)
+        shf = era5l_data["array"][11].astype(np.float64)
+
+        # ERA5: boundary_layer_height (index 0)
+        blh = era5_data["array"][0].astype(np.float64)
+
+        # Take spatial means (coarse grids, typically 1-few pixels)
+        t2m_mean = np.nanmean(t2m)
+        shf_mean = np.nanmean(shf)
+        blh_mean = np.nanmean(blh)
+
+        # Physical constants
+        g = 9.81
+        rho = 1.225
+        cp = 1005.0
+
+        # ERA5 sensible heat flux is in J/m^2 (accumulated), but hourly images
+        # represent W/m^2. The sign convention: negative = upward (toward atmosphere).
+        # For convective velocity we need upward flux, so negate.
+        q0 = -shf_mean / (rho * cp)
+
+        if q0 > 0 and blh_mean > 0 and t2m_mean > 0:
+            w_star = (g * q0 * blh_mean / t2m_mean) ** (1.0 / 3.0)
+        else:
+            w_star = 0.0
+
+        # Return as single-pixel array matching ERA5 grid
+        H, W = era5l_data["array"].shape[1:]
+        result = np.full((1, H, W), w_star, dtype=np.float32)
+
+        return {
+            "array": result,
+            "transform": era5l_data["transform"],
+            "crs": era5l_data["crs"],
+            "nodata": np.nan,
+            "bounds": era5l_data["bounds"],
+            "bands": ["thermal_uplift"],
+        }
+
+
+# Map derived layer names to their loader classes
+_DERIVED_LOADERS = {
+    "slope": SlopeLoader,
+    "aspect": AspectLoader,
+    "rugosity": RugosityLoader,
+    "orographic_uplift": OrographicUpliftLoader,
+    "thermal_uplift": ThermalUpliftLoader,
+}
+
+
 def get_loader(layer_name: str, **init_kwargs) -> LayerLoader:
     """
     Factory that creates a loader based on layer config source type.
@@ -465,5 +721,9 @@ def get_loader(layer_name: str, **init_kwargs) -> LayerLoader:
         if tile_dir is None:
             raise ValueError("tile_dir required for gee_tile layers")
         return TileLoader(tile_dir, layer_name)
+    elif config.source == "derived":
+        if layer_name not in _DERIVED_LOADERS:
+            raise ValueError(f"No derived loader for layer: {layer_name}")
+        return _DERIVED_LOADERS[layer_name](config)
     else:
         raise ValueError(f"Unknown source type: {config.source}")

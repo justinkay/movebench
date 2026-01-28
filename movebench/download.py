@@ -27,6 +27,7 @@ from retry import retry
 from movebench.config import (
     PATHS,
     CHIP_GROUPS,
+    GEE_LAYERS,
     LAYERS,
     REGION_MULTIPLIER,
     GEE_MAX_DOWNLOAD_SIZE_MB,
@@ -431,6 +432,91 @@ def make_dem_image():
     return dem_img.toFloat()
 
 
+def make_dist_water_image():
+    """
+    Create distance-to-water image from JRC Global Surface Water.
+
+    Uses max_extent band to identify any pixel that has ever been water,
+    then computes Euclidean distance transform. Result in meters.
+    Max detectable distance: ~30km at 30m resolution (neighborhood=1024).
+
+    Returns ee.Image with single 'dist_water' band.
+    """
+    ee = ensure_ee_initialized()
+    gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
+    water_mask = gsw.select("max_extent").gt(0)
+    # fastDistanceTransform returns squared pixel distance
+    dist_px2 = water_mask.fastDistanceTransform(neighborhood=1024).sqrt()
+    # Convert pixel distance to meters (native 30m resolution)
+    dist_m = dist_px2.multiply(30.0).rename("dist_water")
+    return dist_m.toFloat()
+
+
+def make_dist_coast_image():
+    """
+    Create distance-to-coast image from LSIB land boundaries.
+
+    Rasterizes land polygons, inverts to get ocean mask, then computes
+    distance transform. Result in meters.
+    At 1km resolution, max detectable distance: ~2000km (neighborhood=2048).
+
+    Returns ee.Image with single 'dist_coast' band.
+    """
+    ee = ensure_ee_initialized()
+    land = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+    # Rasterize land polygons to a binary mask
+    land_img = land.reduceToImage(
+        properties=[ee.Feature(land.first()).propertyNames().get(0)],
+        reducer=ee.Reducer.count(),
+    ).gt(0)
+    # Ocean mask (invert land)
+    ocean_mask = land_img.Not()
+    # Distance from each pixel to nearest ocean pixel = distance to coast
+    dist_px2 = ocean_mask.fastDistanceTransform(neighborhood=2048).sqrt()
+    dist_m = dist_px2.multiply(1000.0).rename("dist_coast")
+    return dist_m.toFloat()
+
+
+def make_dist_road_image():
+    """
+    Create distance-to-road image from GRIP4 global roads dataset.
+
+    Merges road FeatureCollections from all continents, rasterizes,
+    then computes distance transform. Result in meters.
+    Max detectable distance: ~15km at 30m resolution (neighborhood=512).
+
+    Returns ee.Image with single 'dist_road' band.
+    """
+    ee = ensure_ee_initialized()
+    continents = [
+        "projects/sat-io/open-datasets/GRIP4/Africa",
+        "projects/sat-io/open-datasets/GRIP4/Asia",
+        "projects/sat-io/open-datasets/GRIP4/Europe",
+        "projects/sat-io/open-datasets/GRIP4/MENA",
+        "projects/sat-io/open-datasets/GRIP4/North-America",
+        "projects/sat-io/open-datasets/GRIP4/Oceania",
+        "projects/sat-io/open-datasets/GRIP4/South-America",
+    ]
+    # Merge all continents
+    roads = ee.FeatureCollection(continents[0])
+    for c in continents[1:]:
+        roads = roads.merge(ee.FeatureCollection(c))
+    # Rasterize roads (paint 1 on road pixels)
+    road_img = ee.Image(0).paint(roads, 1).gt(0)
+    dist_px2 = road_img.fastDistanceTransform(neighborhood=512).sqrt()
+    dist_m = dist_px2.multiply(30.0).rename("dist_road")
+    return dist_m.toFloat()
+
+
+# Map tile layer names to their image builder functions
+_TILE_IMAGE_BUILDERS = {
+    "dem": make_dem_image,
+    "dist_water": make_dist_water_image,
+    "dist_coast": make_dist_coast_image,
+    "dist_road": make_dist_road_image,
+}
+
+
 # =============================================================================
 # MOVEMENT ANALYSIS (for buffer computation)
 # =============================================================================
@@ -674,15 +760,17 @@ def download_chips(
 # DEM TILE DOWNLOAD FUNCTIONS
 # =============================================================================
 
-def download_dem_tiles(
+def download_tile_layer(
     df: pd.DataFrame,
     study_dir: Path,
-    n_workers: int = 1,
+    layer_name: str,
+    make_image_fn,
     skip_existing: bool = True,
     px_per_side: int = 500,
+    nodata_value: float = 0,
 ) -> dict:
     """
-    Download DEM tiles covering all points in a study.
+    Download tiles for a layer covering all points in a study.
 
     Creates a grid of tiles covering the union of all point regions,
     then downloads each tile.
@@ -690,9 +778,11 @@ def download_dem_tiles(
     Args:
         df: DataFrame with trajectory data
         study_dir: Path to study directory
-        n_workers: Number of parallel workers (currently sequential due to GEE limits)
+        layer_name: Name of the layer (used for directory naming)
+        make_image_fn: Callable returning an ee.Image for this layer
         skip_existing: Skip tiles that already exist
         px_per_side: Target pixels per tile side
+        nodata_value: Value to use for unmasking (default 0)
 
     Returns:
         Dict with download statistics and tile index
@@ -709,10 +799,10 @@ def download_dem_tiles(
     train_df = df[df[SET_COL] == "train"]
     buffer_km = get_buffer_m_for_study(train_df) / 1000.0
 
-    dem_config = LAYERS["dem"]
-    dem_scale = compute_group_scale(buffer_km, dem_config.native_scale_m)
+    layer_config = LAYERS[layer_name]
+    layer_scale = compute_group_scale(buffer_km, layer_config.native_scale_m)
 
-    print(f"[download_dem_tiles] Buffer: {buffer_km:.3f} km, scale: {dem_scale:.1f}m")
+    print(f"[download_tile_layer:{layer_name}] Buffer: {buffer_km:.3f} km, scale: {layer_scale:.1f}m")
 
     # Build regions for all points
     regions = []
@@ -724,12 +814,12 @@ def download_dem_tiles(
         region = square_region_for_point(lon, lat, region_mult * buffer_km)
         regions.append(region)
 
-    print(f"[download_dem_tiles] Creating union of {len(regions)} regions...")
+    print(f"[download_tile_layer:{layer_name}] Creating union of {len(regions)} regions...")
     union_region = union_regions(regions)
 
     # Create grid covering the union
     crs = "EPSG:4326"
-    grid_size_m = dem_scale * px_per_side
+    grid_size_m = layer_scale * px_per_side
     bounds = union_region.bounds(proj=crs, maxError=10)
     grid = bounds.coveringGrid(proj=crs, scale=grid_size_m)
     filtered_grid = grid.filter(ee.Filter.intersects('.geo', union_region))
@@ -740,20 +830,15 @@ def download_dem_tiles(
         for i, _ in enumerate(tile_ids)
     ]
 
-    print(f"[download_dem_tiles] Created {len(download_regions)} tiles")
+    print(f"[download_tile_layer:{layer_name}] Created {len(download_regions)} tiles")
 
     # Create output directory
-    tile_dir = get_tile_dir(str(study_dir).replace(str(PATHS["studies"]) + "/", ""), "dem")
-    # Actually use the study_dir directly
-    tile_dir = study_dir / "tiles" / "dem"
+    tile_dir = study_dir / "tiles" / layer_name
     tile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Download DEM tiles
-    dem_img = make_dem_image()
-
-    # Unmask to ensure consistent dimensions
-    nodata_value = 0
-    dem_img = dem_img.unmask(value=nodata_value, sameFootprint=False)
+    # Build the image
+    img = make_image_fn()
+    img = img.unmask(value=nodata_value, sameFootprint=False)
 
     tile_index = []
     stats = {
@@ -792,21 +877,21 @@ def download_dem_tiles(
             continue
 
         try:
-            print(f"[download_dem_tiles] Downloading tile {i+1}/{len(download_regions)}")
+            print(f"[download_tile_layer:{layer_name}] Downloading tile {i+1}/{len(download_regions)}")
             params = {
-                "scale": dem_scale,
+                "scale": layer_scale,
                 "region": region,
                 "format": "GEO_TIFF",
                 "crs": "EPSG:4326",
             }
-            url = dem_img.getDownloadURL(params)
+            url = img.getDownloadURL(params)
             download_tiff(url, tile_path)
 
             tile_meta["status"] = "downloaded"
             stats["downloaded"] += 1
 
         except Exception as e:
-            print(f"[download_dem_tiles] Failed tile {i}: {e}")
+            print(f"[download_tile_layer:{layer_name}] Failed tile {i}: {e}")
             tile_meta["status"] = "failed"
             tile_meta["error"] = str(e)
             stats["failed"] += 1
@@ -816,19 +901,39 @@ def download_dem_tiles(
     # Save tile index
     index_path = tile_dir / "index.json"
     index_data = {
+        "layer_name": layer_name,
         "buffer_km": buffer_km,
-        "dem_scale": dem_scale,
+        "scale": layer_scale,
         "num_tiles": len(tile_index),
         "tiles": tile_index,
     }
     with open(index_path, "w") as f:
         json.dump(index_data, f, indent=2)
 
-    print(f"[download_dem_tiles] Complete: {stats['downloaded']} downloaded, "
+    print(f"[download_tile_layer:{layer_name}] Complete: {stats['downloaded']} downloaded, "
           f"{stats['existing']} existing, {stats['failed']} failed")
 
     stats["index_path"] = str(index_path)
     return stats
+
+
+def download_dem_tiles(
+    df: pd.DataFrame,
+    study_dir: Path,
+    n_workers: int = 1,
+    skip_existing: bool = True,
+    px_per_side: int = 500,
+) -> dict:
+    """
+    Download DEM tiles covering all points in a study.
+
+    Thin wrapper around download_tile_layer for backwards compatibility.
+    """
+    return download_tile_layer(
+        df, study_dir, "dem", make_dem_image,
+        skip_existing=skip_existing, px_per_side=px_per_side,
+        nodata_value=0,
+    )
 
 
 # =============================================================================
@@ -872,7 +977,7 @@ def download_study_rasters(
 
     # Normalize layers - default to all GEE layers
     if layers is None:
-        layers = list(CHIP_GROUPS.keys()) + ["dem"]
+        layers = GEE_LAYERS
 
     # Partition into chip groups vs tile layers
     chip_groups = [l for l in layers if l in CHIP_GROUPS]
@@ -925,15 +1030,17 @@ def download_study_rasters(
 
     # Download tile layers (if any requested)
     for layer in tile_layers:
-        if layer == "dem":
-            print(f"\n[download_study_rasters] Downloading DEM tiles...")
-            results["tiles"]["dem"] = download_dem_tiles(
-                df,
-                study_dir,
-                n_workers=1,  # DEM download is sequential due to GEE rate limits
-                skip_existing=skip_existing,
-            )
-        # Future: other tile layers would go here
+        if layer not in _TILE_IMAGE_BUILDERS:
+            print(f"[download_study_rasters] Unknown tile layer '{layer}', skipping")
+            continue
+        print(f"\n[download_study_rasters] Downloading {layer} tiles...")
+        results["tiles"][layer] = download_tile_layer(
+            df,
+            study_dir,
+            layer,
+            _TILE_IMAGE_BUILDERS[layer],
+            skip_existing=skip_existing,
+        )
 
     print(f"\n[download_study_rasters] All downloads complete for {study_id}")
     return results

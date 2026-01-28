@@ -573,12 +573,62 @@ class SSFDataset(Dataset):
         return len(self.sample_indices)
 
 
+MOVEMENT_FEATURES = ["sl_", "log_sl_", "cos_ta_"]
+
+
+def get_issf_channel_info(n_env_channels=None):
+    """Return dict with channel ranges for env, movement, interactions, and total.
+
+    Args:
+        n_env_channels: Number of environmental channels. Defaults to get_total_channels().
+
+    Returns:
+        Dict with keys: env, movement, interactions, total, and per-feature details.
+    """
+    if n_env_channels is None:
+        n_env_channels = get_total_channels()
+
+    n_move = len(MOVEMENT_FEATURES)
+    n_interact = n_move * n_env_channels
+    total = n_env_channels + n_move + n_interact
+
+    return {
+        "env": (0, n_env_channels),
+        "sl_": (n_env_channels, n_env_channels + 1),
+        "log_sl_": (n_env_channels + 1, n_env_channels + 2),
+        "cos_ta_": (n_env_channels + 2, n_env_channels + 3),
+        "movement": (n_env_channels, n_env_channels + n_move),
+        "sl_interactions": (n_env_channels + n_move, n_env_channels + n_move + n_env_channels),
+        "log_sl_interactions": (
+            n_env_channels + n_move + n_env_channels,
+            n_env_channels + n_move + 2 * n_env_channels,
+        ),
+        "cos_ta_interactions": (
+            n_env_channels + n_move + 2 * n_env_channels,
+            n_env_channels + n_move + 3 * n_env_channels,
+        ),
+        "interactions": (n_env_channels + n_move, total),
+        "total": total,
+        "n_env": n_env_channels,
+        "n_movement": n_move,
+        "n_interactions": n_interact,
+    }
+
+
 class iSSFDataset(SSFDataset):
     """
     Integrated SSF dataset with parametric movement distributions.
 
     Uses fitted gamma (step length) and von Mises (turn angle) distributions
-    instead of empirical resampling.
+    instead of empirical resampling. Output includes movement features
+    (step length, log step length, cos turn angle) and their interactions
+    with all environmental features.
+
+    Each sample returns:
+        - step_pixels: Tensor (291, 101) with env + movement + interaction values
+        - valid_pixels: Tensor (291, 101) validity mask
+        - {}: Empty dict placeholder
+        - str: TARGET_CRS
     """
 
     def _precompute_all_samples(self) -> dict:
@@ -621,6 +671,165 @@ class iSSFDataset(SSFDataset):
             samples[i] = (pseudo_lens, pseudo_turns)
 
         return samples
+
+    def _compute_candidate_points(self, idx: int) -> tuple:
+        """
+        Compute 101 candidate coordinates plus step lengths and turn angles.
+
+        Returns:
+            Tuple of (lons, lats, xs, ys, bounds_4326, step_lengths, turn_angles)
+            - lons, lats: Arrays of shape (101,) in EPSG:4326
+            - xs, ys: Arrays of shape (101,) in TARGET_CRS
+            - bounds_4326: (min_lon, min_lat, max_lon, max_lat) bounding box
+            - step_lengths: Array of shape (101,) in meters (projected CRS)
+            - turn_angles: Array of shape (101,) in radians
+        """
+        orig_idx = int(self.sample_indices[idx])
+        row = self.df.loc[orig_idx]
+
+        # Start location
+        start_lat = row[LAT_COL]
+        start_lon = row[LON_COL]
+        start_bearing = row['bearing']
+
+        # Get pre-sampled pseudo steps
+        pseudo_lens, pseudo_turns = self._precomputed_samples[idx]
+
+        # Compute candidate positions in target CRS
+        x0, y0 = self._transformer_4326_to_target.transform(start_lon, start_lat)
+
+        headings = start_bearing + pseudo_turns
+        headings = (headings + np.pi) % (2 * np.pi) - np.pi
+        dx = pseudo_lens * np.sin(headings)
+        dy = pseudo_lens * np.cos(headings)
+        xs = x0 + dx
+        ys = y0 + dy
+
+        # True endpoint
+        next_idx = int(row['next_index'])
+        next_row = self.df.loc[next_idx]
+        end_lat = next_row[LAT_COL]
+        end_lon = next_row[LON_COL]
+        x1, y1 = self._transformer_4326_to_target.transform(end_lon, end_lat)
+
+        # Compute true step length and turn angle in projected CRS
+        true_sl = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+        true_heading = np.arctan2(x1 - x0, y1 - y0)
+        true_ta = true_heading - start_bearing
+        # Wrap to [-pi, pi]
+        true_ta = (true_ta + np.pi) % (2 * np.pi) - np.pi
+
+        # Append true endpoint (101 total)
+        xs = np.append(xs, x1)
+        ys = np.append(ys, y1)
+        step_lengths = np.append(pseudo_lens, true_sl)
+        turn_angles = np.append(pseudo_turns, true_ta)
+
+        # Convert back to lat/lon for all points
+        transformer_inv = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+        lons, lats = transformer_inv.transform(xs, ys)
+
+        # Compute bounding box in EPSG:4326 with small buffer
+        buffer_deg = 0.01  # ~1km buffer
+        bounds_4326 = (
+            float(np.min(lons)) - buffer_deg,
+            float(np.min(lats)) - buffer_deg,
+            float(np.max(lons)) + buffer_deg,
+            float(np.max(lats)) + buffer_deg,
+        )
+
+        return lons, lats, xs, ys, bounds_4326, step_lengths, turn_angles
+
+    def _compute_movement_features(
+        self, step_lengths: np.ndarray, turn_angles: np.ndarray
+    ) -> torch.Tensor:
+        """
+        Compute movement feature tensor from step lengths and turn angles.
+
+        Movement features are NOT normalized (per amt conventions):
+        - beta_sl updates gamma scale parameter
+        - beta_log_sl updates gamma shape parameter
+        - beta_cos_ta updates von Mises concentration parameter
+
+        Args:
+            step_lengths: Array of shape (N,) in meters
+            turn_angles: Array of shape (N,) in radians
+
+        Returns:
+            Tensor of shape (3, N): [sl_, log_sl_, cos_ta_]
+        """
+        sl = torch.from_numpy(step_lengths.astype(np.float32))
+        log_sl = torch.log(sl + 1e-8)
+        cos_ta = torch.cos(torch.from_numpy(turn_angles.astype(np.float32)))
+        return torch.stack([sl, log_sl, cos_ta], dim=0)
+
+    def _compute_interactions(
+        self, env_features: torch.Tensor, movement_features: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute interaction terms between movement and environmental features.
+
+        Args:
+            env_features: Tensor of shape (n_env, N) — possibly normalized
+            movement_features: Tensor of shape (3, N) — raw values
+
+        Returns:
+            Tensor of shape (3 * n_env, N)
+        """
+        # movement: (3, 1, N) * env: (1, n_env, N) -> (3, n_env, N) -> (3*n_env, N)
+        n_env, N = env_features.shape
+        interactions = movement_features.unsqueeze(1) * env_features.unsqueeze(0)
+        return interactions.reshape(3 * n_env, N)
+
+    def __getitem__(self, idx) -> tuple:
+        """
+        Load and process all layers for a single sample, including movement
+        features and interaction terms.
+
+        Returns:
+            Tuple of:
+                - step_pixels: Tensor (291, 101) with env + movement + interactions
+                - valid_pixels: Tensor (291, 101) validity mask
+                - {}: Empty dict placeholder
+                - str: TARGET_CRS
+        """
+        orig_idx = int(self.sample_indices[idx])
+        row = self.df.loc[orig_idx]
+        point_id = int(row[POINT_ID_COL])
+        timestamp = row['timestamp']
+
+        # Compute candidate points + movement data
+        lons, lats, xs, ys, bounds_4326, step_lengths, turn_angles = (
+            self._compute_candidate_points(idx)
+        )
+
+        # Load and extract all environmental layer values (72, N)
+        env_pixels, env_valid = self._load_and_extract_all_layers(
+            point_id, timestamp, lons, lats, bounds_4326
+        )
+
+        # Apply normalization to env features only
+        if self.normalizer is not None:
+            env_pixels = self.normalizer(env_pixels)
+
+        N = len(lons)
+
+        # Compute movement features (3, N) — NOT normalized
+        move_feats = self._compute_movement_features(step_lengths, turn_angles)
+
+        # Compute interactions (216, N)
+        interactions = self._compute_interactions(env_pixels, move_feats)
+
+        # Build validity masks
+        move_valid = torch.ones(3, N, dtype=torch.bool)
+        # Interaction validity: invalid if the corresponding env channel is invalid
+        interact_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * self._total_channels, N)
+
+        # Concatenate → (291, N)
+        step_pixels = torch.cat([env_pixels, move_feats, interactions], dim=0)
+        valid_pixels = torch.cat([env_valid, move_valid, interact_valid], dim=0)
+
+        return step_pixels, valid_pixels, {}, TARGET_CRS
 
 
 def grouped_nll(beta_vec, X_t, y_t, starts_t, ends_t):

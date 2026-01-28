@@ -12,7 +12,11 @@ from pyproj import Transformer
 
 from movebench.config import PATHS, LAYERS, LON_COL, LAT_COL, POINT_ID_COL
 from movebench.utils import lat_lon_to_modis_tiles
-from movebench.loaders import ChipLoader, TileLoader, get_loader
+from movebench.loaders import (
+    ChipLoader, TileLoader, get_loader,
+    SlopeLoader, AspectLoader, RugosityLoader,
+    OrographicUpliftLoader, ThermalUpliftLoader,
+)
 from movebench.transforms import reproject_to_meters, Normalizer, one_hot_encode
 
 
@@ -45,6 +49,7 @@ class ChipDataset(Dataset):
 
         # Set up directory paths
         study_dir = study_dir or (PATHS["studies"] / study_id)
+        self.study_dir = study_dir
         self.chip_dir = study_dir / "chips" / split
         self.dem_dir = study_dir / "tiles" / "dem"
 
@@ -68,6 +73,22 @@ class ChipDataset(Dataset):
 
         # GEE tile loader (DEM)
         loaders["dem"] = TileLoader(str(self.dem_dir), "dem")
+
+        # DEM-derived loaders
+        loaders["slope"] = SlopeLoader(LAYERS["slope"])
+        loaders["aspect"] = AspectLoader(LAYERS["aspect"])
+        loaders["rugosity"] = RugosityLoader(LAYERS["rugosity"])
+
+        # Distance tile loaders (gracefully handle missing tiles)
+        for dist_layer in ["dist_water", "dist_coast", "dist_road"]:
+            tile_dir = self.study_dir / "tiles" / dist_layer
+            index_path = tile_dir / "index.json"
+            if index_path.exists():
+                loaders[dist_layer] = TileLoader(str(tile_dir), dist_layer)
+
+        # Uplift derived loaders
+        loaders["orographic_uplift"] = OrographicUpliftLoader(LAYERS["orographic_uplift"])
+        loaders["thermal_uplift"] = ThermalUpliftLoader(LAYERS["thermal_uplift"])
 
         # Local HDF loaders (MODIS products)
         loaders["modis_lc"] = get_loader("modis_lc")
@@ -123,6 +144,72 @@ class ChipDataset(Dataset):
         dem_raster = self._loaders["dem"].load(bounds=bounds)
         all_layers.append(dem_raster)
         layer_names.append("dem")
+
+        # DEM-derived layers (slope, aspect, rugosity)
+        dem_parent = {"dem": dem_raster}
+        slope_raster = self._loaders["slope"].compute(dem_parent)
+        all_layers.append(slope_raster)
+        layer_names.append("slope")
+
+        aspect_raster = self._loaders["aspect"].compute(dem_parent)
+        all_layers.append(aspect_raster)
+        layer_names.append("aspect")
+
+        rugosity_raster = self._loaders["rugosity"].compute(dem_parent)
+        all_layers.append(rugosity_raster)
+        layer_names.append("rugosity")
+
+        # Distance tile layers (NaN placeholder if not downloaded)
+        for dist_layer in ["dist_water", "dist_coast", "dist_road"]:
+            if dist_layer in self._loaders:
+                try:
+                    dist_raster = self._loaders[dist_layer].load(bounds=bounds)
+                except (ValueError, FileNotFoundError):
+                    H, W = dem_raster['array'].shape[1:]
+                    dist_raster = {
+                        'array': np.full((1, H, W), np.nan, dtype=np.float32),
+                        'transform': dem_raster['transform'],
+                        'crs': dem_raster['crs'],
+                        'nodata': np.nan,
+                        'bounds': dem_raster['bounds'],
+                        'bands': LAYERS[dist_layer].bands,
+                    }
+            else:
+                H, W = dem_raster['array'].shape[1:]
+                dist_raster = {
+                    'array': np.full((1, H, W), np.nan, dtype=np.float32),
+                    'transform': dem_raster['transform'],
+                    'crs': dem_raster['crs'],
+                    'nodata': np.nan,
+                    'bounds': dem_raster['bounds'],
+                    'bands': LAYERS[dist_layer].bands,
+                }
+            all_layers.append(dist_raster)
+            layer_names.append(dist_layer)
+
+        # Orographic uplift (requires slope, aspect, ERA5 wind)
+        oro_parent = {
+            "slope": slope_raster,
+            "aspect": aspect_raster,
+            "era5_land": big_chip,  # ERA5 chip contains era5_land bands (first 12)
+        }
+        oro_raster = self._loaders["orographic_uplift"].compute(oro_parent)
+        all_layers.append(oro_raster)
+        layer_names.append("orographic_uplift")
+
+        # Thermal uplift (requires ERA5-Land + ERA5)
+        # big_chip has era5_land (bands 0-11) + era5 (bands 12-14) combined
+        era5l_array = big_chip['array'][:12]  # first 12 bands = era5_land
+        era5_array = big_chip['array'][12:]   # last 3 bands = era5
+        era5l_data = {**big_chip, 'array': era5l_array}
+        era5_data = {**big_chip, 'array': era5_array}
+        therm_parent = {
+            "era5_land": era5l_data,
+            "era5": era5_data,
+        }
+        therm_raster = self._loaders["thermal_uplift"].compute(therm_parent)
+        all_layers.append(therm_raster)
+        layer_names.append("thermal_uplift")
 
         # Compute MODIS tile coordinates for bounds
         hvs = []
