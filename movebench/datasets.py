@@ -289,9 +289,8 @@ class SSFDataset(ChipDataset):
         chip, valid_mask, chip_transform, chip_crs = super().__getitem__(idx)
         C, H, W = chip.shape
 
-        # Map dataset idx -> (original df index, timestamp)
-        orig_idx, timestamp = self.idx_to_timestamp.iloc[idx].values
-        orig_idx = int(orig_idx)
+        # Map dataset idx -> original df index
+        orig_idx = int(self.idx_to_timestamp.iloc[idx]['index'])
 
         # Start location
         row = self.df.loc[orig_idx]
@@ -388,7 +387,7 @@ class iSSFDataset(SSFDataset):
         from scipy import stats
 
         pseudo_lens, pseudo_turns = super()._get_pseudo_steps_and_turns(total_random_samples, rng)
-        valid_lengths = self.df['step_length_m']
+        valid_lengths = self.df.loc[self.df['valid_step'], 'step_length_m']
         valid_turns = self.df['turn_angle_rad'][~np.isnan(self.df['turn_angle_rad'])]
 
         try:

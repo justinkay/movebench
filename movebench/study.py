@@ -288,7 +288,7 @@ class Study:
         Returns:
             SSFDataset instance
         """
-        from movebench.datasets import SSFDataset
+        from movebench.ssf import SSFDataset
 
         if auto_normalize:
             self._ensure_normalization(force=force_normalize)
@@ -316,7 +316,7 @@ class Study:
         Returns:
             iSSFDataset instance
         """
-        from movebench.datasets import iSSFDataset
+        from movebench.ssf import iSSFDataset
 
         if auto_normalize:
             self._ensure_normalization(force=force_normalize)
@@ -341,6 +341,9 @@ class Study:
         """
         Download GEE environmental rasters for this study.
 
+        Downloads ERA5 atmospheric data, MODIS products (LST, VI, NDSI, BAI),
+        Dynamic World land cover, and DEM tiles for the specified splits.
+
         Args:
             splits: List of splits to download ("train", "test"), or single split.
                     Default: ["train", "test"]
@@ -351,7 +354,27 @@ class Study:
             skip_existing: Skip files that already exist (default True)
 
         Returns:
-            Dict with download results for chips and tiles
+            Dict with download results:
+            {
+                "chips": {
+                    "train": {"total": N, "downloaded": N, "existing": N, "failed": N},
+                    "test": {...}
+                },
+                "tiles": {
+                    "dem": {"total": N, "downloaded": N, ...}
+                }
+            }
+
+        Example:
+            >>> study = Study.load("abc123-def456")
+            >>> result = study.download_rasters()
+            >>> print(f"Downloaded: {result['chips']['train']['downloaded']} chips")
+
+            # Download only ERA5 and DEM
+            >>> result = study.download_rasters(layers=["era5", "dem"])
+
+            # Download only train split chips (no DEM)
+            >>> result = study.download_rasters(splits="train", layers=["era5", "modis"])
         """
         from movebench.download import download_study_rasters
 

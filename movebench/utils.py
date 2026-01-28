@@ -178,7 +178,7 @@ def setup_df_for_ssf(df, step_multiplier=2, step_q=0.95, gap_q=0.999):
         df[INDIVIDUAL_COL].shift(-1)
     )
     same_burst_next = df['burst_id'].eq(df['burst_id'].shift(-1))
-    valid_step_next = df['valid_step'].shift(-1).fillna(False)  # step from current -> next
+    valid_step_next = df['valid_step'].shift(-1).fillna(False).astype(bool)
 
     df['can_be_ssf_start'] = (
         ~df['is_first_in_indiv'] &
