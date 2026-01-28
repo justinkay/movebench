@@ -591,8 +591,11 @@ class OrographicUpliftLoader(DerivedLoader):
 
         # ERA5-Land wind components (u10 = index 4, v10 = index 5 in era5_land bands)
         # u_component_of_wind_10m, v_component_of_wind_10m
+        # Replace non-finite values (e.g. -inf nodata) with NaN so nanmean ignores them
         u10 = era5l_data["array"][4].astype(np.float64)
         v10 = era5l_data["array"][5].astype(np.float64)
+        u10 = np.where(np.isfinite(u10), u10, np.nan)
+        v10 = np.where(np.isfinite(v10), v10, np.nan)
 
         # ERA5 is coarse - it may be a single pixel or small grid.
         # Take mean to get scalar wind, then broadcast.
@@ -641,11 +644,15 @@ class ThermalUpliftLoader(DerivedLoader):
         era5_data = parent_data["era5"]
 
         # ERA5-Land: temperature_2m (index 0), surface_sensible_heat_flux (index 11)
+        # Replace non-finite values (e.g. -inf nodata) with NaN so nanmean ignores them
         t2m = era5l_data["array"][0].astype(np.float64)
         shf = era5l_data["array"][11].astype(np.float64)
+        t2m = np.where(np.isfinite(t2m), t2m, np.nan)
+        shf = np.where(np.isfinite(shf), shf, np.nan)
 
         # ERA5: boundary_layer_height (index 0)
         blh = era5_data["array"][0].astype(np.float64)
+        blh = np.where(np.isfinite(blh), blh, np.nan)
 
         # Take spatial means (coarse grids, typically 1-few pixels)
         t2m_mean = np.nanmean(t2m)
