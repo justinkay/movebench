@@ -65,7 +65,7 @@ class ChipDataset(Dataset):
         # GEE chip loaders
         loaders["era5"] = ChipLoader(str(self.chip_dir), "era5")
         loaders["modis"] = ChipLoader(str(self.chip_dir), "modis")
-        loaders["dynamic_world"] = ChipLoader(str(self.chip_dir), "dynamic_world")
+        loaders["high_res"] = ChipLoader(str(self.chip_dir), "high_res")
 
         # GEE tile loader (DEM)
         loaders["dem"] = TileLoader(str(self.dem_dir), "dem")
@@ -237,24 +237,38 @@ class ChipDataset(Dataset):
             all_layers.append(bioclim_raster)
             layer_names.append(f"bioclim_{i}")
 
-        # Dynamic World (9 probability bands)
+        # High-res chip (Dynamic World 9 bands + Landsat NDWI 1 band)
         try:
-            dw_chip = self._loaders["dynamic_world"].load(point_id=point_id)
-            all_layers.append(dw_chip)
-            layer_names.append("dynamic_world")
+            hr_chip = self._loaders["high_res"].load(point_id=point_id)
+            hr_array = hr_chip['array']
+            n_dw = len(LAYERS["dynamic_world"].bands)
+            n_ndwi = len(LAYERS["landsat_ndwi"].bands)
+
+            # Split into DW and NDWI sub-chips
+            dw_chip = {**hr_chip, 'array': hr_array[:n_dw], 'bands': LAYERS["dynamic_world"].bands}
+            ndwi_chip = {**hr_chip, 'array': hr_array[n_dw:n_dw + n_ndwi], 'bands': LAYERS["landsat_ndwi"].bands}
+            all_layers.extend([dw_chip, ndwi_chip])
+            layer_names.extend(["dynamic_world", "landsat_ndwi"])
         except FileNotFoundError:
-            # Handle missing Dynamic World data gracefully
             H, W = med_chip['array'].shape[1:]
-            placeholder = {
-                'array': np.full((9, H, W), np.nan, dtype=np.float32),
+            dw_placeholder = {
+                'array': np.full((len(LAYERS["dynamic_world"].bands), H, W), np.nan, dtype=np.float32),
                 'transform': med_chip['transform'],
                 'crs': med_chip['crs'],
                 'nodata': np.nan,
                 'bounds': med_chip['bounds'],
                 'bands': LAYERS["dynamic_world"].bands,
             }
-            all_layers.append(placeholder)
-            layer_names.append("dynamic_world")
+            ndwi_placeholder = {
+                'array': np.full((len(LAYERS["landsat_ndwi"].bands), H, W), np.nan, dtype=np.float32),
+                'transform': med_chip['transform'],
+                'crs': med_chip['crs'],
+                'nodata': np.nan,
+                'bounds': med_chip['bounds'],
+                'bands': LAYERS["landsat_ndwi"].bands,
+            }
+            all_layers.extend([dw_placeholder, ndwi_placeholder])
+            layer_names.extend(["dynamic_world", "landsat_ndwi"])
 
         return all_layers, layer_names
 

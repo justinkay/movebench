@@ -278,35 +278,6 @@ def _nearest_modis_collection(collection_id: str, timestamp, days_window: int, s
 # IMAGE STACK BUILDERS
 # =============================================================================
 
-def make_era5_stack(timestamp: str):
-    """
-    Build ERA5-Land + ERA5 image stack for a timestamp.
-
-    Returns an ee.Image with ~15 bands of atmospheric data.
-    """
-    ee = ensure_ee_initialized()
-
-    # ERA5-Land hourly bands
-    era5l_config = LAYERS["era5_land"]
-    era5l_bands = era5l_config.bands
-    era5l_img = _nearest_hourly_image(
-        era5l_config.gee_collection,
-        timestamp,
-        era5l_bands
-    ).rename(["era5l_" + b for b in era5l_bands])
-
-    # ERA5 hourly bands
-    era5_config = LAYERS["era5"]
-    era5_bands = era5_config.bands
-    era5_img = _nearest_hourly_image(
-        era5_config.gee_collection,
-        timestamp,
-        era5_bands
-    ).rename(["era5_" + b for b in era5_bands])
-
-    return era5l_img.addBands(era5_img).toFloat()
-
-
 def _nearest_daily_image(collection_id: str, timestamp: str, band_list: list):
     """Get nearest daily aggregate image from a collection."""
     ee = ensure_ee_initialized()
@@ -434,19 +405,49 @@ def make_modis_stack(timestamp: str):
             .toFloat())
 
 
-def make_dynamic_world_stack(timestamp: str, region):
+def make_landsat_ndwi_image(timestamp: str, region):
     """
-    Build Dynamic World probability stack for a timestamp.
+    Get Landsat 32-day NDWI composite nearest to a timestamp.
 
-    Uses a 30-day median composite to handle Sentinel-2 gaps from clouds.
-    Falls back to 60-day window if needed.
+    Uses a ±32 day window with spatial filtering and median composite
+    to handle Landsat's revisit cycle and cloud gaps.
 
     Args:
         timestamp: ISO format timestamp string
         region: ee.Geometry region to filter by
 
     Returns:
-        ee.Image with 9 probability bands (dw_water, dw_trees, etc.)
+        ee.Image with single 'landsat_NDWI' band.
+    """
+    ee = ensure_ee_initialized()
+    ndwi_config = LAYERS["landsat_ndwi"]
+    ts = ee.Date(timestamp)
+
+    col = (ee.ImageCollection(ndwi_config.gee_collection)
+           .filterDate(ts.advance(-32, "day"), ts.advance(32, "day"))
+           .filterBounds(region)
+           .select(ndwi_config.bands))
+
+    ndwi_img = col.median().rename("landsat_NDWI")
+    return ndwi_img.toFloat()
+
+
+def make_high_res_stack(timestamp: str, region):
+    """
+    Build high-resolution image stack for a timestamp.
+
+    Includes Dynamic World land cover probabilities (9 bands) and
+    Landsat NDWI (1 band).
+
+    Uses a 30-day median composite for Dynamic World to handle
+    Sentinel-2 gaps from clouds. Falls back to 60-day window if needed.
+
+    Args:
+        timestamp: ISO format timestamp string
+        region: ee.Geometry region to filter by
+
+    Returns:
+        ee.Image with 10 bands (9 DW probability + 1 NDWI)
     """
     ee = ensure_ee_initialized()
     ts = ee.Date(timestamp)
@@ -481,7 +482,10 @@ def make_dynamic_world_stack(timestamp: str, region):
     # Rename bands for clarity
     dw_img = dw_img.rename(["dw_" + b for b in dw_bands])
 
-    return dw_img.toFloat()
+    # Add Landsat NDWI
+    ndwi_img = make_landsat_ndwi_image(timestamp, region)
+
+    return dw_img.addBands(ndwi_img).toFloat()
 
 
 def make_dem_image():
@@ -594,6 +598,20 @@ def get_buffer_m_for_study(df: pd.DataFrame, step_q: float = 0.95, step_multipli
 # CHIP DOWNLOAD FUNCTIONS
 # =============================================================================
 
+def _expected_band_count(group_name: str) -> int:
+    """Compute the expected number of bands for a chip group."""
+    return sum(len(LAYERS[l].bands) for l in CHIP_GROUPS[group_name]["layers"])
+
+
+def _chip_is_current(path: Path, expected_bands: int) -> bool:
+    """Check if an existing chip file has the expected number of bands."""
+    try:
+        with rasterio.open(path) as ds:
+            return ds.count == expected_bands
+    except Exception:
+        return False
+
+
 def _download_chip_worker(args: tuple) -> dict:
     """
     Worker function to download a single chip.
@@ -618,13 +636,17 @@ def _download_chip_worker(args: tuple) -> dict:
 
     results = {"point_id": point_id, "split": split, "files": {}}
 
-    # Check if all files exist before initializing GEE
+    # Check if all files exist (with correct band count) before initializing GEE
     all_exist = True
-    for group_name in groups:
-        out_path = study_dir / "chips" / split / f"{point_id:05d}_{group_name}.tif"
-        if not (skip_existing and out_path.exists()):
-            all_exist = False
-            break
+    if skip_existing:
+        for group_name in groups:
+            out_path = study_dir / "chips" / split / f"{point_id:05d}_{group_name}.tif"
+            expected = _expected_band_count(group_name)
+            if not (out_path.exists() and _chip_is_current(out_path, expected)):
+                all_exist = False
+                break
+    else:
+        all_exist = False
 
     if all_exist:
         for group_name in groups:
@@ -644,7 +666,8 @@ def _download_chip_worker(args: tuple) -> dict:
 
         out_path = study_dir / "chips" / split / f"{point_id:05d}_{group_name}.tif"
 
-        if skip_existing and out_path.exists():
+        expected = _expected_band_count(group_name)
+        if skip_existing and out_path.exists() and _chip_is_current(out_path, expected):
             results["files"][group_name] = {"path": str(out_path), "status": "existing"}
             continue
 
@@ -654,8 +677,8 @@ def _download_chip_worker(args: tuple) -> dict:
                 img = make_era5_stack(timestamp)
             elif group_name == "modis":
                 img = make_modis_stack(timestamp)
-            elif group_name == "dynamic_world":
-                img = make_dynamic_world_stack(timestamp, region)
+            elif group_name == "high_res":
+                img = make_high_res_stack(timestamp, region)
             else:
                 raise ValueError(f"Unknown chip group: {group_name}")
 
@@ -993,7 +1016,7 @@ def download_study_rasters(
         splits: List of splits to download ("train", "test"), or single split.
                 Default: ["train", "test"]
         layers: List of layers to download. Accepts chip group names
-                ("era5", "modis", "dynamic_world") and tile layer names ("dem").
+                ("era5", "modis", "high_res") and tile layer names ("dem").
                 Default: all GEE layers
         n_workers: Number of parallel download workers
         skip_existing: Skip files that already exist

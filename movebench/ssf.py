@@ -204,7 +204,7 @@ class SSFDataset(Dataset):
         # GEE chip loaders
         self._loaders["era5"] = ChipLoader(str(self.chip_dir), "era5")
         self._loaders["modis"] = ChipLoader(str(self.chip_dir), "modis")
-        self._loaders["dynamic_world"] = ChipLoader(str(self.chip_dir), "dynamic_world")
+        self._loaders["high_res"] = ChipLoader(str(self.chip_dir), "high_res")
 
         # GEE tile loader (DEM)
         self._loaders["dem"] = TileLoader(str(self.dem_dir), "dem")
@@ -600,14 +600,17 @@ class SSFDataset(Dataset):
             except FileNotFoundError:
                 pass
 
-        # --- Dynamic World (9 bands, probabilities) ---
+        # --- High-res chip (Dynamic World 9 bands + Landsat NDWI 1 band) ---
         try:
-            dw_start, dw_end = self._channel_indices["dynamic_world"]
-            dw_chip = loaders["dynamic_world"].load(point_id=point_id)
-            # Use nearest for probabilities (already 0-1)
-            vals, valid = self._extract_from_gee_chip(dw_chip, lons, lats, bilinear=False)
-            all_values[dw_start:dw_end] = vals
-            all_valid[dw_start:dw_end] = valid
+            hr_chip = loaders["high_res"].load(point_id=point_id)
+            vals, valid = self._extract_from_gee_chip(hr_chip, lons, lats, bilinear=False)
+            chip_offset = 0
+            for layer_name in ["dynamic_world", "landsat_ndwi"]:
+                start, end = self._channel_indices[layer_name]
+                n_bands = end - start
+                all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
+                all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
+                chip_offset += n_bands
         except FileNotFoundError:
             pass
 

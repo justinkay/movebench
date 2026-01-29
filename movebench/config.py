@@ -152,6 +152,7 @@ ERA5_LAND = LayerConfig(
         "surface_net_thermal_radiation",
         "surface_latent_heat_flux",
         "surface_sensible_heat_flux",
+        "snow_depth"
     ],
     native_scale_m=11132.0,
     temporal="hourly",
@@ -187,6 +188,7 @@ ERA5_LAND_DAILY = LayerConfig(
         "surface_net_thermal_radiation_sum",
         "surface_latent_heat_flux_sum",
         "surface_sensible_heat_flux_sum",
+        "snow_depth"
     ],
     native_scale_m=11132.0,
     temporal="daily",
@@ -274,6 +276,15 @@ DYNAMIC_WORLD = LayerConfig(
     temporal="daily",
     gee_collection="GOOGLE/DYNAMICWORLD/V1",
     normalize=False,  # Probabilities already 0-1
+)
+
+LANDSAT_NDWI = LayerConfig( # note: lot of missing values even in the 32 day composite
+    name="landsat_ndwi",
+    source="gee_chip",
+    bands=["NDWI"],
+    native_scale_m=30.0,
+    temporal="32day",
+    gee_collection="LANDSAT/COMPOSITES/C02/T1_L2_32DAY_NDWI",
 )
 
 
@@ -438,30 +449,31 @@ LAYERS: dict[str, LayerConfig] = {
     "modis_ndsi": MODIS_NDSI,        # 1 band   → channel 4
     "modis_bai": MODIS_BAI,          # 1 band   → channel 5
     # ERA5 hourly (~11km)
-    "era5_land": ERA5_LAND,          # 12 bands → channels 6-17
-    "era5": ERA5,                    # 3 bands  → channels 18-20
+    "era5_land": ERA5_LAND,          # 13 bands → channels 6-18
+    "era5": ERA5,                    # 3 bands  → channels 19-21
     # ERA5 daily (~11km)
-    "era5_land_daily": ERA5_LAND_DAILY,  # 12 bands → channels 21-32
-    "era5_daily": ERA5_DAILY,        # 9 bands  → channels 33-41
+    "era5_land_daily": ERA5_LAND_DAILY,  # 13 bands → channels 22-34
+    "era5_daily": ERA5_DAILY,        # 9 bands  → channels 35-43
     # GEE tiles + DEM-derived
-    "dem": DEM,                      # 1 band   → channel 42
-    "slope": SLOPE,                  # 1 band   → channel 43
-    "aspect": ASPECT,                # 2 bands  → channels 44-45
-    "rugosity": RUGOSITY,            # 1 band   → channel 46
-    "dist_water": DIST_WATER,        # 1 band   → channel 47
+    "dem": DEM,                      # 1 band   → channel 44
+    "slope": SLOPE,                  # 1 band   → channel 45
+    "aspect": ASPECT,                # 2 bands  → channels 46-47
+    "rugosity": RUGOSITY,            # 1 band   → channel 48
+    "dist_water": DIST_WATER,        # 1 band   → channel 49
     # Uplift (derived)
-    "orographic_uplift": OROGRAPHIC_UPLIFT,  # 1 band → channel 48
-    "thermal_uplift": THERMAL_UPLIFT,        # 1 band → channel 49
+    "orographic_uplift": OROGRAPHIC_UPLIFT,  # 1 band → channel 50
+    "thermal_uplift": THERMAL_UPLIFT,        # 1 band → channel 51
     # Local HDF (MODIS products)
-    "modis_lc": MODIS_LC,            # 1→18 (one-hot) → channels 50-67
-    "modis_cvf_tree": MODIS_CVF_TREE,        # 1 band → channel 68
-    "modis_cvf_nontree": MODIS_CVF_NONTREE,  # 1 band → channel 69
-    "modis_cvf_nonveg": MODIS_CVF_NONVEG,    # 1 band → channel 70
+    "modis_lc": MODIS_LC,            # 1→18 (one-hot) → channels 52-69
+    "modis_cvf_tree": MODIS_CVF_TREE,        # 1 band → channel 70
+    "modis_cvf_nontree": MODIS_CVF_NONTREE,  # 1 band → channel 71
+    "modis_cvf_nonveg": MODIS_CVF_NONVEG,    # 1 band → channel 72
     # Local GeoTIFF
-    "hii": HII,                      # 1 band   → channel 71
-    "bioclim": BIOCLIM,              # 19 bands → channels 72-90
-    # Dynamic World (10m, probabilities)
-    "dynamic_world": DYNAMIC_WORLD,  # 9 bands  → channels 91-99
+    "hii": HII,                      # 1 band   → channel 73
+    "bioclim": BIOCLIM,              # 19 bands → channels 74-92
+    # Dynamic World (10m, probabilities) + Landsat NDWI (30m)
+    "dynamic_world": DYNAMIC_WORLD,  # 9 bands  → channels 93-101
+    "landsat_ndwi": LANDSAT_NDWI,    # 1 band   → channel 102
 }
 
 
@@ -484,9 +496,9 @@ CHIP_GROUPS = {
         "target_scale_m": 250.0,
     },
 
-    # "High-res" group: right now just Dynamic World land cover probabilities (~10m, resampled to 30m)
-    "dynamic_world": {
-        "layers": ["dynamic_world"],
+    # "High-res" group: Dynamic World land cover + Landsat NDWI (~10-30m, resampled to 30m)
+    "high_res": {
+        "layers": ["dynamic_world", "landsat_ndwi"],
         "target_scale_m": 30.0,  # Resample 10m to 30m for reasonable file sizes
     },
 }
