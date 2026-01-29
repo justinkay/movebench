@@ -9,6 +9,9 @@ This avoids the 15x spatial multiplier overhead for test data by loading only
 the minimal region needed for the ~101 candidate points instead of full chips.
 """
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
@@ -58,6 +61,7 @@ class SSFDataset(Dataset):
         random_seed: int = 0,
         num_candidates: int = 100,
         normalizer: Normalizer = None,
+        force_recompute: bool = False,
     ):
         """
         Initialize SSFDataset.
@@ -70,6 +74,8 @@ class SSFDataset(Dataset):
             random_seed: Random seed for reproducibility
             num_candidates: Number of pseudo-absence candidates per step
             normalizer: Optional pre-computed Normalizer instance
+            force_recompute: If True, recompute and re-cache features even if a
+                cache file already exists (e.g. after re-downloading rasters)
         """
         self.study_id = study_id
         self.split = split
@@ -78,9 +84,9 @@ class SSFDataset(Dataset):
         self.normalizer = normalizer
 
         # Set up directory paths
-        study_dir = study_dir or (PATHS["studies"] / study_id)
-        self.chip_dir = study_dir / "chips" / split
-        self.dem_dir = study_dir / "tiles" / "dem"
+        self.study_dir = Path(study_dir or (PATHS["studies"] / study_id))
+        self.chip_dir = self.study_dir / "chips" / split
+        self.dem_dir = self.study_dir / "tiles" / "dem"
 
         # Prepare SSF DataFrame
         self.df = setup_df_for_ssf(df.copy())
@@ -101,6 +107,76 @@ class SSFDataset(Dataset):
         self._transformer_4326_to_target = Transformer.from_crs(
             "EPSG:4326", TARGET_CRS, always_xy=True
         )
+
+        # Feature cache
+        self._feature_cache = self._load_or_build_cache(force_recompute)
+
+    def _cache_key(self) -> str:
+        """Compute a hash key for the current dataset configuration."""
+        key_data = (
+            f"{self.study_id}|{self.split}|{self.random_seed}|{self.num_candidates}"
+            f"|{len(self.sample_indices)}|{self._total_channels}"
+            f"|{self.sample_indices.tobytes().hex()}"
+        )
+        return hashlib.sha256(key_data.encode()).hexdigest()[:16]
+
+    def _cache_path(self) -> Path:
+        """Return the path to the feature cache file."""
+        cache_dir = self.study_dir / "cache"
+        kind = type(self).__name__.lower()
+        key = self._cache_key()
+        return cache_dir / f"{kind}_{self.split}_{key}.pt"
+
+    def _load_or_build_cache(self, force_recompute: bool) -> dict:
+        """Load features from cache or build and save them."""
+        path = self._cache_path()
+
+        if not force_recompute and path.exists():
+            print(f"Loading cached features from {path}")
+            return torch.load(path, weights_only=True)
+
+        print(f"Building feature cache ({len(self.sample_indices)} samples)...")
+        cache = self._build_feature_cache()
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(cache, path)
+        print(f"Saved feature cache to {path}")
+
+        return cache
+
+    def _build_feature_cache(self) -> dict:
+        """Compute env features for all samples and return as a dict of tensors."""
+        N = self.num_candidates + 1
+        n_samples = len(self.sample_indices)
+
+        all_step_pixels = torch.zeros(n_samples, self._total_channels, N)
+        all_valid_pixels = torch.zeros(n_samples, self._total_channels, N, dtype=torch.bool)
+
+        for idx in range(n_samples):
+            if idx % 50 == 0:
+                print(f"  Processing sample {idx}/{n_samples}")
+
+            orig_idx = int(self.sample_indices[idx])
+            row = self.df.loc[orig_idx]
+            point_id = int(row[POINT_ID_COL])
+            timestamp = row['timestamp']
+
+            # _compute_candidate_points returns at least (lons, lats, xs, ys, bounds_4326);
+            # iSSFDataset adds (step_lengths, turn_angles) — only env features are cached.
+            result = self._compute_candidate_points(idx)
+            lons, lats, xs, ys, bounds_4326 = result[:5]
+
+            step_pixels, valid_pixels = self._load_and_extract_all_layers(
+                point_id, timestamp, lons, lats, bounds_4326
+            )
+
+            all_step_pixels[idx] = step_pixels
+            all_valid_pixels[idx] = valid_pixels
+
+        return {
+            'step_pixels': all_step_pixels,
+            'valid_pixels': all_valid_pixels,
+        }
 
     def _precompute_all_samples(self) -> dict:
         """Pre-sample step lengths and turn angles for all indices."""
@@ -549,18 +625,8 @@ class SSFDataset(Dataset):
                 - None: Placeholder for transform
                 - str: TARGET_CRS
         """
-        orig_idx = int(self.sample_indices[idx])
-        row = self.df.loc[orig_idx]
-        point_id = int(row[POINT_ID_COL])
-        timestamp = row['timestamp']
-
-        # Compute candidate points
-        lons, lats, xs, ys, bounds_4326 = self._compute_candidate_points(idx)
-
-        # Load and extract all layer values
-        step_pixels, valid_pixels = self._load_and_extract_all_layers(
-            point_id, timestamp, lons, lats, bounds_4326
-        )
+        step_pixels = self._feature_cache['step_pixels'][idx].clone()
+        valid_pixels = self._feature_cache['valid_pixels'][idx].clone()
 
         # Apply normalization
         if self.normalizer is not None:
@@ -826,20 +892,14 @@ class iSSFDataset(SSFDataset):
                 - {}: Empty dict placeholder
                 - str: TARGET_CRS
         """
-        orig_idx = int(self.sample_indices[idx])
-        row = self.df.loc[orig_idx]
-        point_id = int(row[POINT_ID_COL])
-        timestamp = row['timestamp']
-
-        # Compute candidate points + movement data
+        # Compute candidate points + movement data (always needed for movement features)
         lons, lats, xs, ys, bounds_4326, step_lengths, turn_angles = (
             self._compute_candidate_points(idx)
         )
 
-        # Load and extract all environmental layer values (72, N)
-        env_pixels, env_valid = self._load_and_extract_all_layers(
-            point_id, timestamp, lons, lats, bounds_4326
-        )
+        # Load env features from cache
+        env_pixels = self._feature_cache['step_pixels'][idx].clone()
+        env_valid = self._feature_cache['valid_pixels'][idx].clone()
 
         # Apply normalization to env features only
         if self.normalizer is not None:
@@ -847,7 +907,7 @@ class iSSFDataset(SSFDataset):
 
         N = len(lons)
 
-        # Compute movement features (3, N) — NOT normalized
+        # Compute movement features (3, N)
         move_feats = self._compute_movement_features(step_lengths, turn_angles)
 
         # Compute interactions (216, N)
@@ -855,7 +915,6 @@ class iSSFDataset(SSFDataset):
 
         # Build validity masks
         move_valid = torch.ones(3, N, dtype=torch.bool)
-        # Interaction validity: invalid if the corresponding env channel is invalid
         interact_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * self._total_channels, N)
 
         # Concatenate → (291, N)
