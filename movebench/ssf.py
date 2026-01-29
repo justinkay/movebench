@@ -624,12 +624,39 @@ class iSSFDataset(SSFDataset):
     (step length, log step length, cos turn angle) and their interactions
     with all environmental features.
 
-    Each sample returns:
-        - step_pixels: Tensor (291, 101) with env + movement + interaction values
-        - valid_pixels: Tensor (291, 101) validity mask
-        - {}: Empty dict placeholder
-        - str: TARGET_CRS
+    Args:
+        normalize_movement: If True (default), z-score movement features using
+            statistics computed from the training DataFrame. This puts them on
+            the same scale as the normalized environmental features, which is
+            important for stable optimization. Set to False to keep raw values
+            (needed for amt-style coefficient interpretation).
     """
+
+    def __init__(self, *args, normalize_movement: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.normalize_movement = normalize_movement
+        if normalize_movement:
+            self._movement_stats = self._compute_movement_stats()
+        else:
+            self._movement_stats = None
+
+    def _compute_movement_stats(self) -> dict:
+        """Compute mean/std for sl_, log_sl_, cos_ta_ from training data."""
+        valid_lengths = self.df.loc[self.df['valid_step'], 'step_length_m'].values
+        valid_turns = self.df['turn_angle_rad'].dropna().values
+
+        sl = valid_lengths.astype(np.float64)
+        log_sl = np.log(sl + 1e-8)
+        cos_ta = np.cos(valid_turns.astype(np.float64))
+
+        return {
+            'sl_mean': float(np.mean(sl)),
+            'sl_std': float(max(np.std(sl), 1e-8)),
+            'log_sl_mean': float(np.mean(log_sl)),
+            'log_sl_std': float(max(np.std(log_sl), 1e-8)),
+            'cos_ta_mean': float(np.mean(cos_ta)),
+            'cos_ta_std': float(max(np.std(cos_ta), 1e-8)),
+        }
 
     def _precompute_all_samples(self) -> dict:
         """Pre-sample from fitted gamma (step) and von Mises (turn) distributions."""
@@ -746,10 +773,9 @@ class iSSFDataset(SSFDataset):
         """
         Compute movement feature tensor from step lengths and turn angles.
 
-        Movement features are NOT normalized (per amt conventions):
-        - beta_sl updates gamma scale parameter
-        - beta_log_sl updates gamma shape parameter
-        - beta_cos_ta updates von Mises concentration parameter
+        If normalize_movement is True, features are z-scored using statistics
+        computed from the training DataFrame. Otherwise raw values are returned
+        (for amt-style coefficient interpretation).
 
         Args:
             step_lengths: Array of shape (N,) in meters
@@ -761,6 +787,13 @@ class iSSFDataset(SSFDataset):
         sl = torch.from_numpy(step_lengths.astype(np.float32))
         log_sl = torch.log(sl + 1e-8)
         cos_ta = torch.cos(torch.from_numpy(turn_angles.astype(np.float32)))
+
+        if self._movement_stats is not None:
+            s = self._movement_stats
+            sl = (sl - s['sl_mean']) / s['sl_std']
+            log_sl = (log_sl - s['log_sl_mean']) / s['log_sl_std']
+            cos_ta = (cos_ta - s['cos_ta_mean']) / s['cos_ta_std']
+
         return torch.stack([sl, log_sl, cos_ta], dim=0)
 
     def _compute_interactions(

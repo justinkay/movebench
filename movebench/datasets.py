@@ -3,21 +3,17 @@
 import os
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
-import torch.nn.functional as F
-import rasterio
-from pyproj import Transformer
 
-from movebench.config import PATHS, LAYERS, LON_COL, LAT_COL, POINT_ID_COL
+from movebench.config import PATHS, LAYERS, POINT_ID_COL
 from movebench.utils import lat_lon_to_modis_tiles
 from movebench.loaders import (
     ChipLoader, TileLoader, get_loader,
     SlopeLoader, AspectLoader, RugosityLoader,
     OrographicUpliftLoader, ThermalUpliftLoader,
 )
-from movebench.transforms import reproject_to_meters, Normalizer, one_hot_encode
+from movebench.transforms import reproject_to_meters, one_hot_encode
 
 
 class ChipDataset(Dataset):
