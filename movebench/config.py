@@ -171,6 +171,47 @@ ERA5 = LayerConfig(
     gee_collection="ECMWF/ERA5/HOURLY",
 )
 
+ERA5_LAND_DAILY = LayerConfig(
+    name="era5_land_daily",
+    source="gee_chip",
+    bands=[
+        "temperature_2m",
+        "dewpoint_temperature_2m",
+        "total_precipitation_sum",
+        "surface_pressure",
+        "u_component_of_wind_10m",
+        "v_component_of_wind_10m",
+        "surface_solar_radiation_downwards_sum",
+        "surface_thermal_radiation_downwards_sum",
+        "surface_net_solar_radiation_sum",
+        "surface_net_thermal_radiation_sum",
+        "surface_latent_heat_flux_sum",
+        "surface_sensible_heat_flux_sum",
+    ],
+    native_scale_m=11132.0,
+    temporal="daily",
+    gee_collection="ECMWF/ERA5_LAND/DAILY_AGGR",
+)
+
+ERA5_DAILY = LayerConfig(
+    name="era5_daily",
+    source="gee_chip",
+    bands=[
+        "mean_sea_level_pressure",
+        "total_precipitation",
+        "mean_2m_air_temperature",
+        "minimum_2m_air_temperature",
+        "maximum_2m_air_temperature",
+        "dewpoint_2m_temperature",
+        "u_component_of_wind_10m",
+        "v_component_of_wind_10m",
+        "surface_pressure",
+    ],
+    native_scale_m=27830.0,  # ~0.25 degree
+    temporal="daily",
+    gee_collection="ECMWF/ERA5/DAILY",
+)
+
 MODIS_LST = LayerConfig(
     name="modis_lst",
     source="gee_chip",
@@ -215,7 +256,6 @@ MODIS_BAI = LayerConfig(
     gee_collection="MODIS/MCD43A4_006_BAI",
 )
 
-# Dynamic World (currently disabled in original code)
 DYNAMIC_WORLD = LayerConfig(
     name="dynamic_world",
     source="gee_chip",
@@ -250,9 +290,18 @@ DEM = LayerConfig(
     gee_collection="COPERNICUS/DEM/GLO30",
 )
 
+DIST_WATER = LayerConfig(
+    name="dist_water",
+    source="gee_tile",
+    bands=["dist_water"],
+    native_scale_m=30.0,
+    temporal="static",
+    gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
+)
+
 
 # -----------------------------------------------------------------------------
-# DEM-Derived Layers (computed on-load from DEM tiles)
+# Derived Layers (computed on the fly from other downloaded layers)
 # -----------------------------------------------------------------------------
 
 SLOPE = LayerConfig(
@@ -282,25 +331,6 @@ RUGOSITY = LayerConfig(
     derived_from=["dem"],
 )
 
-
-# -----------------------------------------------------------------------------
-# GEE Tile Distance Layers (downloaded as tiles covering study extent)
-# -----------------------------------------------------------------------------
-
-DIST_WATER = LayerConfig(
-    name="dist_water",
-    source="gee_tile",
-    bands=["dist_water"],
-    native_scale_m=30.0,
-    temporal="static",
-    gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
-)
-
-
-# -----------------------------------------------------------------------------
-# Uplift Layers (computed on-load from DEM-derived + ERA5)
-# -----------------------------------------------------------------------------
-
 OROGRAPHIC_UPLIFT = LayerConfig(
     name="orographic_uplift",
     source="derived",
@@ -321,7 +351,7 @@ THERMAL_UPLIFT = LayerConfig(
 
 
 # -----------------------------------------------------------------------------
-# Local HDF Layers (MODIS products from local archive)
+# Local Layers (downloaded separately as larger files)
 # -----------------------------------------------------------------------------
 
 MODIS_LC = LayerConfig(
@@ -374,11 +404,6 @@ MODIS_CVF_NONVEG = LayerConfig(
     year_bounds=(2015, 2025),
 )
 
-
-# -----------------------------------------------------------------------------
-# Local GeoTIFF Layers
-# -----------------------------------------------------------------------------
-
 HII = LayerConfig(
     name="hii",
     source="local_tiff",
@@ -403,39 +428,40 @@ BIOCLIM = LayerConfig(
 # LAYER REGISTRY
 # =============================================================================
 
-# All available layers
+# IMPORTANT: Insertion order defines canonical channel indices.
+# New layers must be added at the correct position.
+# Use get_channel_indices() to see current channel assignments.
 LAYERS: dict[str, LayerConfig] = {
-    # GEE chips
-    "era5_land": ERA5_LAND,
-    "era5": ERA5,
-    "modis_lst": MODIS_LST,
-    "modis_vi": MODIS_VI,
-    "modis_ndsi": MODIS_NDSI,
-    "modis_bai": MODIS_BAI,
-    "dynamic_world": DYNAMIC_WORLD,
-
-    # GEE tiles
-    "dem": DEM,
-    "dist_water": DIST_WATER,
-
-    # DEM-derived
-    "slope": SLOPE,
-    "aspect": ASPECT,
-    "rugosity": RUGOSITY,
-
+    # MODIS chip layers (~250m-1km)
+    "modis_lst": MODIS_LST,          # 2 bands  → channels 0-1
+    "modis_vi": MODIS_VI,            # 2 bands  → channels 2-3
+    "modis_ndsi": MODIS_NDSI,        # 1 band   → channel 4
+    "modis_bai": MODIS_BAI,          # 1 band   → channel 5
+    # ERA5 hourly (~11km)
+    "era5_land": ERA5_LAND,          # 12 bands → channels 6-17
+    "era5": ERA5,                    # 3 bands  → channels 18-20
+    # ERA5 daily (~11km)
+    "era5_land_daily": ERA5_LAND_DAILY,  # 12 bands → channels 21-32
+    "era5_daily": ERA5_DAILY,        # 9 bands  → channels 33-41
+    # GEE tiles + DEM-derived
+    "dem": DEM,                      # 1 band   → channel 42
+    "slope": SLOPE,                  # 1 band   → channel 43
+    "aspect": ASPECT,                # 2 bands  → channels 44-45
+    "rugosity": RUGOSITY,            # 1 band   → channel 46
+    "dist_water": DIST_WATER,        # 1 band   → channel 47
     # Uplift (derived)
-    "orographic_uplift": OROGRAPHIC_UPLIFT,
-    "thermal_uplift": THERMAL_UPLIFT,
-
-    # Local HDF
-    "modis_lc": MODIS_LC,
-    "modis_cvf_tree": MODIS_CVF_TREE,
-    "modis_cvf_nontree": MODIS_CVF_NONTREE,
-    "modis_cvf_nonveg": MODIS_CVF_NONVEG,
-
+    "orographic_uplift": OROGRAPHIC_UPLIFT,  # 1 band → channel 48
+    "thermal_uplift": THERMAL_UPLIFT,        # 1 band → channel 49
+    # Local HDF (MODIS products)
+    "modis_lc": MODIS_LC,            # 1→18 (one-hot) → channels 50-67
+    "modis_cvf_tree": MODIS_CVF_TREE,        # 1 band → channel 68
+    "modis_cvf_nontree": MODIS_CVF_NONTREE,  # 1 band → channel 69
+    "modis_cvf_nonveg": MODIS_CVF_NONVEG,    # 1 band → channel 70
     # Local GeoTIFF
-    "hii": HII,
-    "bioclim": BIOCLIM,
+    "hii": HII,                      # 1 band   → channel 71
+    "bioclim": BIOCLIM,              # 19 bands → channels 72-90
+    # Dynamic World (10m, probabilities)
+    "dynamic_world": DYNAMIC_WORLD,  # 9 bands  → channels 91-99
 }
 
 
@@ -446,9 +472,9 @@ LAYERS: dict[str, LayerConfig] = {
 # Grouping is based on similar native resolution to minimize resampling.
 
 CHIP_GROUPS = {
-    # "Big" group: coarse resolution atmospheric data (~11km)
+    # "Coarse" group: all ERA5 atmospheric data (~11km), hourly + daily
     "era5": {
-        "layers": ["era5_land", "era5"],
+        "layers": ["era5_land", "era5", "era5_land_daily", "era5_daily"],
         "target_scale_m": 11132.0,
     },
 
@@ -458,97 +484,16 @@ CHIP_GROUPS = {
         "target_scale_m": 250.0,
     },
 
-    # Dynamic World: high-res land cover probabilities (~10m, resampled to 30m)
+    # "High-res" group: right now just Dynamic World land cover probabilities (~10m, resampled to 30m)
     "dynamic_world": {
         "layers": ["dynamic_world"],
         "target_scale_m": 30.0,  # Resample 10m to 30m for reasonable file sizes
     },
 }
 
-# All downloadable GEE layers (chip groups + tile layers)
-GEE_LAYERS = list(CHIP_GROUPS.keys()) + ["dem", "dist_water"]
-
-
-# -----------------------------------------------------------------------------
-# Default Layer Sets
-# -----------------------------------------------------------------------------
-
-# Layers to load by default (all currently working layers)
-DEFAULT_LAYERS = [
-    # GEE chips
-    "era5_land",
-    "era5",
-    "modis_lst",
-    "modis_vi",
-    "modis_ndsi",
-    "modis_bai",
-
-    # GEE tiles
-    "dem",
-
-    # DEM-derived
-    "slope",
-    "aspect",
-    "rugosity",
-
-    # Distance tiles
-    "dist_water",
-
-    # Uplift (derived)
-    "orographic_uplift",
-    "thermal_uplift",
-
-    # Local layers
-    "modis_lc",
-    "modis_cvf_tree",
-    "modis_cvf_nontree",
-    "modis_cvf_nonveg",
-    "hii",
-    "bioclim",
-
-    # Dynamic World
-    "dynamic_world",
-]
-
-# -----------------------------------------------------------------------------
-# Canonical Layer Loading Order
-# -----------------------------------------------------------------------------
-# This defines the canonical order for loading layers, which determines
-# channel indices. Important for computing categorical indices deterministically.
-# This order matches ChipDataset's actual loading order.
-
-LAYER_ORDER = [
-    # Medium chip (MODIS products at ~250m)
-    "modis_lst",         # 2 bands  → channels 0-1
-    "modis_vi",          # 2 bands  → channels 2-3
-    "modis_ndsi",        # 1 band   → channel 4
-    "modis_bai",         # 1 band   → channel 5
-    # Big chip (ERA5 at ~11km)
-    "era5_land",         # 12 bands → channels 6-17
-    "era5",              # 3 bands  → channels 18-20
-    # Other layers
-    "dem",               # 1 band   → channel 21
-    "slope",             # 1 band   → channel 22
-    "aspect",            # 2 bands  → channels 23-24
-    "rugosity",          # 1 band   → channel 25
-    "dist_water",        # 1 band   → channel 26
-    "orographic_uplift", # 1 band   → channel 27
-    "thermal_uplift",    # 1 band   → channel 28
-    "modis_lc",          # 1→18 (one-hot) → channels 29-46
-    "modis_cvf_tree",    # 1 band   → channel 40
-    "modis_cvf_nontree", # 1 band   → channel 41
-    "modis_cvf_nonveg",  # 1 band   → channel 42
-    "hii",               # 1 band   → channel 43
-    "bioclim",           # 19 bands → channels 44-62
-    "dynamic_world",     # 9 bands  → channels 63-71
-]
-
-# Minimal layer set for quick testing
-MINIMAL_LAYERS = [
-    "era5_land",
-    "dem",
-    "modis_lc",
-]
+# Canonical layer order — derived from LAYERS dict insertion order.
+# Channel indices are determined by this order (see get_channel_indices()).
+LAYER_ORDER = list(LAYERS.keys())
 
 
 # =============================================================================

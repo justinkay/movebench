@@ -27,7 +27,6 @@ from retry import retry
 from movebench.config import (
     PATHS,
     CHIP_GROUPS,
-    GEE_LAYERS,
     LAYERS,
     REGION_MULTIPLIER,
     GEE_MAX_DOWNLOAD_SIZE_MB,
@@ -306,6 +305,72 @@ def make_era5_stack(timestamp: str):
     ).rename(["era5_" + b for b in era5_bands])
 
     return era5l_img.addBands(era5_img).toFloat()
+
+
+def _nearest_daily_image(collection_id: str, timestamp: str, band_list: list):
+    """Get nearest daily aggregate image from a collection."""
+    ee = ensure_ee_initialized()
+    ts = ee.Date(timestamp)
+    # Daily images: filter ±1 day window, take nearest
+    start = ts.advance(-1, "day")
+    end = ts.advance(1, "day")
+
+    col = (ee.ImageCollection(collection_id)
+           .select(band_list)
+           .filterDate(start, end)
+           .sort("system:time_start"))
+    return ee.Image(col.first())
+
+
+def make_era5_stack(timestamp: str):
+    """
+    Build combined ERA5 hourly + daily image stack for a timestamp.
+
+    Returns an ee.Image with:
+      - ERA5-Land hourly (12 bands)
+      - ERA5 hourly (3 bands)
+      - ERA5-Land daily aggregate (12 bands)
+      - ERA5 daily aggregate (9 bands)
+    """
+    ee = ensure_ee_initialized()
+
+    # ERA5-Land hourly bands
+    era5l_config = LAYERS["era5_land"]
+    era5l_bands = era5l_config.bands
+    era5l_img = _nearest_hourly_image(
+        era5l_config.gee_collection,
+        timestamp,
+        era5l_bands
+    ).rename(["era5l_" + b for b in era5l_bands])
+
+    # ERA5 hourly bands
+    era5_config = LAYERS["era5"]
+    era5_bands = era5_config.bands
+    era5_img = _nearest_hourly_image(
+        era5_config.gee_collection,
+        timestamp,
+        era5_bands
+    ).rename(["era5_" + b for b in era5_bands])
+
+    # ERA5-Land daily bands
+    era5ld_config = LAYERS["era5_land_daily"]
+    era5ld_bands = era5ld_config.bands
+    era5ld_img = _nearest_daily_image(
+        era5ld_config.gee_collection,
+        timestamp,
+        era5ld_bands
+    ).rename(["era5ld_" + b for b in era5ld_bands])
+
+    # ERA5 daily bands
+    era5d_config = LAYERS["era5_daily"]
+    era5d_bands = era5d_config.bands
+    era5d_img = _nearest_daily_image(
+        era5d_config.gee_collection,
+        timestamp,
+        era5d_bands
+    ).rename(["era5d_" + b for b in era5d_bands])
+
+    return era5l_img.addBands(era5_img).addBands(era5ld_img).addBands(era5d_img).toFloat()
 
 
 def make_modis_stack(timestamp: str):
@@ -948,7 +1013,9 @@ def download_study_rasters(
 
     # Normalize layers - default to all GEE layers
     if layers is None:
-        layers = GEE_LAYERS
+        layers = list(CHIP_GROUPS.keys()) + [
+            name for name, cfg in LAYERS.items() if cfg.source == "gee_tile"
+        ]
 
     # Partition into chip groups vs tile layers
     chip_groups = [l for l in layers if l in CHIP_GROUPS]

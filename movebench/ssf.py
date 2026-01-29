@@ -523,19 +523,18 @@ class SSFDataset(Dataset):
             hvs.update(lat_lon_to_modis_tiles(lat, lon))
         hvs = list(hvs)
 
-        # ERA5 chip
+        # ERA5 chip (hourly + daily in single chip)
         try:
             era5_chip = loaders["era5"].load(point_id=point_id)
             vals, valid = self._extract_from_gee_chip(era5_chip, lons, lats, bilinear=True)
-            # ERA5 chip contains era5_land (12 bands) then era5 (3 bands)
-            era5_land_start, era5_land_end = self._channel_indices["era5_land"]
-            era5_start, era5_end = self._channel_indices["era5"]
-            n_era5_land = era5_land_end - era5_land_start
-            n_era5 = era5_end - era5_start
-            all_values[era5_land_start:era5_land_end] = vals[:n_era5_land]
-            all_valid[era5_land_start:era5_land_end] = valid[:n_era5_land]
-            all_values[era5_start:era5_end] = vals[n_era5_land:n_era5_land + n_era5]
-            all_valid[era5_start:era5_end] = valid[n_era5_land:n_era5_land + n_era5]
+            # ERA5 chip contains era5_land (12) + era5 (3) + era5_land_daily (12) + era5_daily (9)
+            chip_offset = 0
+            for layer_name in ["era5_land", "era5", "era5_land_daily", "era5_daily"]:
+                start, end = self._channel_indices[layer_name]
+                n_bands = end - start
+                all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
+                all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
+                chip_offset += n_bands
         except FileNotFoundError:
             pass
 
