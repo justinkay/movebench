@@ -41,6 +41,7 @@ from movebench.config import (
     get_chip_path,
     get_tile_dir,
 )
+from movebench.utils import get_buffer_m_for_study
 
 
 # =============================================================================
@@ -561,66 +562,6 @@ _TILE_IMAGE_BUILDERS = {
     "dem": make_dem_image,
     "dist_water": make_dist_water_image,
 }
-
-
-# =============================================================================
-# MOVEMENT ANALYSIS (for buffer computation)
-# =============================================================================
-
-def get_buffer_m_for_study(df: pd.DataFrame, step_q: float = 0.95, step_multiplier: int = 2) -> float:
-    """
-    Compute appropriate buffer for a study based on movement data.
-
-    Args:
-        df: DataFrame with movement data
-        step_q: Quantile for step length calculation (default 0.95)
-        step_multiplier: Multiplier for final buffer size (default 2)
-
-    Returns:
-        Buffer distance in meters
-    """
-    if TIME_COL not in df.columns:
-        raise RuntimeError(f"Expected a '{TIME_COL}' column in the data.")
-
-    df = df.copy()
-    df[TIME_COL] = pd.to_datetime(df[TIME_COL])
-
-    # Sort and compute time gaps
-    df = df.sort_values(['individual-local-identifier', TIME_COL])
-    df['time_since_last'] = df.groupby('individual-local-identifier')[TIME_COL].diff()
-
-    # Filter by per-individual time gap quantile
-    gap_q = 0.999
-    per_indiv_cutoff = (
-        df.groupby('individual-local-identifier')['time_since_last']
-        .transform(lambda s: s.dropna().quantile(gap_q))
-    )
-    df_filtered = df[
-        df['time_since_last'].notna() &
-        (df['time_since_last'] <= per_indiv_cutoff)
-    ].copy()
-
-    # Compute step lengths using Haversine formula
-    lat_rad = np.radians(df_filtered[LAT_COL])
-    lon_rad = np.radians(df_filtered[LON_COL])
-
-    lat_prev = lat_rad.groupby(df_filtered['individual-local-identifier']).shift()
-    lon_prev = lon_rad.groupby(df_filtered['individual-local-identifier']).shift()
-
-    dlat = lat_rad - lat_prev
-    dlon = lon_rad - lon_prev
-
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat_prev) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
-    c = 2 * np.arcsin(np.sqrt(a))
-
-    R = 6371000  # Earth radius in meters
-    df_filtered['step_length'] = R * c
-    df_filtered = df_filtered.dropna(subset=['step_length'])
-
-    if len(df_filtered) == 0:
-        raise ValueError("No valid step lengths computed")
-
-    return step_multiplier * np.quantile(df_filtered['step_length'].values, q=step_q)
 
 
 # =============================================================================

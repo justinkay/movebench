@@ -38,7 +38,7 @@ def lat_lon_to_modis_tiles(lat, lon):
 lat_lon_to_modis = lat_lon_to_modis_tiles
 
 
-def get_buffer_m_for_study(df, step_q=0.95, step_multiplier=2):
+def get_buffer_m_for_study(df, step_q=0.95, step_multiplier=2, gap_q=0.999):
     """
     Compute buffer size from movement data.
 
@@ -48,14 +48,28 @@ def get_buffer_m_for_study(df, step_q=0.95, step_multiplier=2):
         df: DataFrame with location columns
         step_q: Quantile of step lengths to use
         step_multiplier: Multiply quantile by this factor
+        gap_q: Quantile of per-individual time gaps to retain
 
     Returns:
         Buffer size in meters
     """
+    if TIME_COL not in df.columns:
+        raise RuntimeError(f"Expected a '{TIME_COL}' column in the data.")
+
     df = df.copy()
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors='coerce')
     df = df.dropna(subset=[TIME_COL])
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL])
+
+    df['time_since_last'] = df.groupby(INDIVIDUAL_COL)[TIME_COL].diff()
+    per_indiv_cutoff = (
+        df.groupby(INDIVIDUAL_COL)['time_since_last']
+        .transform(lambda s: s.dropna().quantile(gap_q))
+    )
+    df = df[
+        df['time_since_last'].notna()
+        & (df['time_since_last'] <= per_indiv_cutoff)
+    ].copy()
 
     df['lat_rad'] = np.deg2rad(df[LAT_COL])
     df['lon_rad'] = np.deg2rad(df[LON_COL])
@@ -77,6 +91,9 @@ def get_buffer_m_for_study(df, step_q=0.95, step_multiplier=2):
 
     valid_steps = df['step_length_m'].dropna()
     valid_steps = valid_steps[valid_steps > 0]
+
+    if len(valid_steps) == 0:
+        raise ValueError("No valid step lengths computed")
 
     buffer_m = step_multiplier * np.nanquantile(valid_steps, q=step_q)
     return buffer_m
