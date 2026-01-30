@@ -243,13 +243,20 @@ class ChipDataset(Dataset):
             hr_array = hr_chip['array']
             n_dw = len(LAYERS["dynamic_world"].bands)
             n_ndwi = len(LAYERS["landsat_ndwi"].bands)
+            expected_hr_bands = n_dw + n_ndwi
+
+            # Guard against broken chips with wrong band count
+            if hr_array.shape[0] < expected_hr_bands:
+                raise ValueError(
+                    f"high_res chip has {hr_array.shape[0]} bands, expected {expected_hr_bands}"
+                )
 
             # Split into DW and NDWI sub-chips
             dw_chip = {**hr_chip, 'array': hr_array[:n_dw], 'bands': LAYERS["dynamic_world"].bands}
             ndwi_chip = {**hr_chip, 'array': hr_array[n_dw:n_dw + n_ndwi], 'bands': LAYERS["landsat_ndwi"].bands}
             all_layers.extend([dw_chip, ndwi_chip])
             layer_names.extend(["dynamic_world", "landsat_ndwi"])
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             H, W = med_chip['array'].shape[1:]
             dw_placeholder = {
                 'array': np.full((len(LAYERS["dynamic_world"].bands), H, W), np.nan, dtype=np.float32),

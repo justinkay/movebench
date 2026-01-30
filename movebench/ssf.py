@@ -642,13 +642,16 @@ class SSFDataset(Dataset):
 
 
 MOVEMENT_FEATURES = ["sl_", "log_sl_", "cos_ta_"]
+TIME_FEATURES = ["sin_doy", "cos_doy", "sin_tod", "cos_tod"]
 
 
-def get_issf_channel_info(n_env_channels=None):
+def get_issf_channel_info(n_env_channels=None, include_time=False):
     """Return dict with channel ranges for env, movement, interactions, and total.
 
     Args:
         n_env_channels: Number of environmental channels. Defaults to get_total_channels().
+        include_time: If True, include cyclical time-of-year and time-of-day features
+            and their interactions with env and movement features.
 
     Returns:
         Dict with keys: env, movement, interactions, total, and per-feature details.
@@ -657,30 +660,55 @@ def get_issf_channel_info(n_env_channels=None):
         n_env_channels = get_total_channels()
 
     n_move = len(MOVEMENT_FEATURES)
-    n_interact = n_move * n_env_channels
-    total = n_env_channels + n_move + n_interact
+    n_time = len(TIME_FEATURES) if include_time else 0
 
-    return {
+    # Channel layout: env | movement | time | move×env | time×env | time×move
+    n_move_env = n_move * n_env_channels
+    n_time_env = n_time * n_env_channels
+    n_time_move = n_time * n_move
+    n_interact = n_move_env + n_time_env + n_time_move
+    total = n_env_channels + n_move + n_time + n_interact
+
+    offset = n_env_channels
+    info = {
         "env": (0, n_env_channels),
-        "sl_": (n_env_channels, n_env_channels + 1),
-        "log_sl_": (n_env_channels + 1, n_env_channels + 2),
-        "cos_ta_": (n_env_channels + 2, n_env_channels + 3),
-        "movement": (n_env_channels, n_env_channels + n_move),
-        "sl_interactions": (n_env_channels + n_move, n_env_channels + n_move + n_env_channels),
-        "log_sl_interactions": (
-            n_env_channels + n_move + n_env_channels,
-            n_env_channels + n_move + 2 * n_env_channels,
-        ),
-        "cos_ta_interactions": (
-            n_env_channels + n_move + 2 * n_env_channels,
-            n_env_channels + n_move + 3 * n_env_channels,
-        ),
-        "interactions": (n_env_channels + n_move, total),
-        "total": total,
-        "n_env": n_env_channels,
-        "n_movement": n_move,
-        "n_interactions": n_interact,
+        "sl_": (offset, offset + 1),
+        "log_sl_": (offset + 1, offset + 2),
+        "cos_ta_": (offset + 2, offset + 3),
+        "movement": (offset, offset + n_move),
     }
+    offset += n_move
+
+    if include_time:
+        info["sin_doy"] = (offset, offset + 1)
+        info["cos_doy"] = (offset + 1, offset + 2)
+        info["sin_tod"] = (offset + 2, offset + 3)
+        info["cos_tod"] = (offset + 3, offset + 4)
+        info["time"] = (offset, offset + n_time)
+        offset += n_time
+
+    # move × env interactions
+    move_env_start = offset
+    info["sl_interactions"] = (offset, offset + n_env_channels)
+    info["log_sl_interactions"] = (offset + n_env_channels, offset + 2 * n_env_channels)
+    info["cos_ta_interactions"] = (offset + 2 * n_env_channels, offset + 3 * n_env_channels)
+    info["move_env_interactions"] = (offset, offset + n_move_env)
+    offset += n_move_env
+
+    if include_time:
+        info["time_env_interactions"] = (offset, offset + n_time_env)
+        offset += n_time_env
+        info["time_move_interactions"] = (offset, offset + n_time_move)
+        offset += n_time_move
+
+    info["interactions"] = (move_env_start, total)
+    info["total"] = total
+    info["n_env"] = n_env_channels
+    info["n_movement"] = n_move
+    info["n_time"] = n_time
+    info["n_interactions"] = n_interact
+
+    return info
 
 
 class iSSFDataset(SSFDataset):
@@ -700,7 +728,8 @@ class iSSFDataset(SSFDataset):
             (needed for amt-style coefficient interpretation).
     """
 
-    def __init__(self, *args, normalize_movement: bool = True, **kwargs):
+    def __init__(self, *args, normalize_movement: bool = True, include_time: bool = False, **kwargs):
+        self.include_time = include_time
         super().__init__(*args, **kwargs)
         self.normalize_movement = normalize_movement
         if normalize_movement:
@@ -725,6 +754,39 @@ class iSSFDataset(SSFDataset):
             'cos_ta_mean': float(np.mean(cos_ta)),
             'cos_ta_std': float(max(np.std(cos_ta), 1e-8)),
         }
+
+    def _cache_key(self) -> str:
+        """Include include_time in the cache key to avoid collisions."""
+        base = super()._cache_key()
+        key_data = f"{base}|include_time={self.include_time}"
+        return hashlib.sha256(key_data.encode()).hexdigest()[:16]
+
+    def _compute_time_features(self, idx: int) -> torch.Tensor:
+        """Compute cyclical time-of-year and time-of-day features for a sample.
+
+        Features are constant across all candidate points since they depend
+        only on the step's start timestamp.
+
+        Args:
+            idx: Dataset index
+
+        Returns:
+            Tensor of shape (4, N) with [sin_doy, cos_doy, sin_tod, cos_tod]
+        """
+        orig_idx = int(self.sample_indices[idx])
+        ts = self.df.loc[orig_idx, 'timestamp']
+        N = self.num_candidates + 1
+
+        doy = ts.timetuple().tm_yday
+        hour_frac = ts.hour + ts.minute / 60 + ts.second / 3600
+
+        sin_doy = np.sin(2 * np.pi * doy / 365.25)
+        cos_doy = np.cos(2 * np.pi * doy / 365.25)
+        sin_tod = np.sin(2 * np.pi * hour_frac / 24)
+        cos_tod = np.cos(2 * np.pi * hour_frac / 24)
+
+        feats = torch.tensor([sin_doy, cos_doy, sin_tod, cos_tod], dtype=torch.float32)
+        return feats.unsqueeze(1).expand(4, N)
 
     def _precompute_all_samples(self) -> dict:
         """Pre-sample from fitted gamma (step) and von Mises (turn) distributions."""
@@ -865,32 +927,32 @@ class iSSFDataset(SSFDataset):
         return torch.stack([sl, log_sl, cos_ta], dim=0)
 
     def _compute_interactions(
-        self, env_features: torch.Tensor, movement_features: torch.Tensor
+        self, features_a: torch.Tensor, features_b: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute interaction terms between movement and environmental features.
+        Compute interaction terms between two sets of features.
 
         Args:
-            env_features: Tensor of shape (n_env, N) — possibly normalized
-            movement_features: Tensor of shape (3, N) — raw values
+            features_a: Tensor of shape (K, N)
+            features_b: Tensor of shape (M, N)
 
         Returns:
-            Tensor of shape (3 * n_env, N)
+            Tensor of shape (K * M, N)
         """
-        # movement: (3, 1, N) * env: (1, n_env, N) -> (3, n_env, N) -> (3*n_env, N)
-        n_env, N = env_features.shape
-        interactions = movement_features.unsqueeze(1) * env_features.unsqueeze(0)
-        return interactions.reshape(3 * n_env, N)
+        K, N = features_a.shape
+        M = features_b.shape[0]
+        interactions = features_a.unsqueeze(1) * features_b.unsqueeze(0)
+        return interactions.reshape(K * M, N)
 
     def __getitem__(self, idx) -> tuple:
         """
         Load and process all layers for a single sample, including movement
-        features and interaction terms.
+        features, optional time features, and interaction terms.
 
         Returns:
             Tuple of:
-                - step_pixels: Tensor (291, 101) with env + movement + interactions
-                - valid_pixels: Tensor (291, 101) validity mask
+                - step_pixels: Tensor (C, 101) with env + movement [+ time] + interactions
+                - valid_pixels: Tensor (C, 101) validity mask
                 - {}: Empty dict placeholder
                 - str: TARGET_CRS
         """
@@ -908,20 +970,40 @@ class iSSFDataset(SSFDataset):
             env_pixels = self.normalizer(env_pixels)
 
         N = len(lons)
+        n_env = self._total_channels
 
         # Compute movement features (3, N)
         move_feats = self._compute_movement_features(step_lengths, turn_angles)
-
-        # Compute interactions (216, N)
-        interactions = self._compute_interactions(env_pixels, move_feats)
-
-        # Build validity masks
         move_valid = torch.ones(3, N, dtype=torch.bool)
-        interact_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * self._total_channels, N)
 
-        # Concatenate → (291, N)
-        step_pixels = torch.cat([env_pixels, move_feats, interactions], dim=0)
-        valid_pixels = torch.cat([env_valid, move_valid, interact_valid], dim=0)
+        # move × env interactions
+        move_env_inter = self._compute_interactions(move_feats, env_pixels)
+        move_env_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * n_env, N)
+
+        if self.include_time:
+            # Time features (4, N) — constant across candidates
+            time_feats = self._compute_time_features(idx)
+            time_valid = torch.ones(4, N, dtype=torch.bool)
+
+            # time × env interactions (4 * n_env, N)
+            time_env_inter = self._compute_interactions(time_feats, env_pixels)
+            time_env_valid = env_valid.unsqueeze(0).expand(4, -1, -1).reshape(4 * n_env, N)
+
+            # time × move interactions (4 * 3, N)
+            time_move_inter = self._compute_interactions(time_feats, move_feats)
+            time_move_valid = torch.ones(4 * 3, N, dtype=torch.bool)
+
+            step_pixels = torch.cat([
+                env_pixels, move_feats, time_feats,
+                move_env_inter, time_env_inter, time_move_inter,
+            ], dim=0)
+            valid_pixels = torch.cat([
+                env_valid, move_valid, time_valid,
+                move_env_valid, time_env_valid, time_move_valid,
+            ], dim=0)
+        else:
+            step_pixels = torch.cat([env_pixels, move_feats, move_env_inter], dim=0)
+            valid_pixels = torch.cat([env_valid, move_valid, move_env_valid], dim=0)
 
         return step_pixels, valid_pixels, {}, TARGET_CRS
 

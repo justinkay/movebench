@@ -14,6 +14,7 @@ import math
 import multiprocessing as mp
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from functools import wraps
 
@@ -428,7 +429,17 @@ def make_landsat_ndwi_image(timestamp: str, region):
            .filterBounds(region)
            .select(ndwi_config.bands))
 
-    ndwi_img = col.median().rename("landsat_NDWI")
+    # Zero-image fallback for empty collections (no Landsat coverage)
+    zero_img = ee.Image(0).rename(ndwi_config.bands).toFloat()
+    ndwi_img = ee.Image(
+        ee.Algorithms.If(col.size().gt(0), col.median(), zero_img)
+    ).unmask(0).rename("landsat_NDWI")
+
+    # Warn if fallback triggered (actual spatial/temporal coverage gap)
+    col_size = col.size().getInfo()
+    if col_size == 0:
+        print(f"[WARN] No Landsat NDWI imagery for timestamp={timestamp}")
+
     return ndwi_img.toFloat()
 
 
@@ -441,6 +452,7 @@ def make_high_res_stack(timestamp: str, region):
 
     Uses a 30-day median composite for Dynamic World to handle
     Sentinel-2 gaps from clouds. Falls back to 60-day window if needed.
+    Timestamps before DW availability (2015-06-23) are clamped forward.
 
     Args:
         timestamp: ISO format timestamp string
@@ -450,34 +462,51 @@ def make_high_res_stack(timestamp: str, region):
         ee.Image with 10 bands (9 DW probability + 1 NDWI)
     """
     ee = ensure_ee_initialized()
-    ts = ee.Date(timestamp)
 
     dw_config = LAYERS["dynamic_world"]
     dw_bands = dw_config.bands
 
-    # Primary: 30-day window median composite
-    dw_col_30 = (ee.ImageCollection(dw_config.gee_collection)
-                 .filterDate(ts.advance(-15, "day"), ts.advance(15, "day"))
-                 .filterBounds(region)
-                 .select(dw_bands))
+    # Clamp DW query timestamp to earliest availability (2015-06-23)
+    DW_START = "2015-06-23"
+    try:
+        ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        dw_start_dt = datetime(2015, 6, 23, tzinfo=ts_dt.tzinfo)
+        was_clamped = ts_dt < dw_start_dt
+    except (ValueError, AttributeError):
+        was_clamped = False
 
-    # Fallback: 60-day window if 30-day is empty
-    dw_col_60 = (ee.ImageCollection(dw_config.gee_collection)
-                 .filterDate(ts.advance(-30, "day"), ts.advance(30, "day"))
-                 .filterBounds(region)
-                 .select(dw_bands))
-
-    # Use conditional to pick appropriate collection
-    dw_col = ee.ImageCollection(
-        ee.Algorithms.If(
-            dw_col_30.size().gt(0),
-            dw_col_30,
-            dw_col_60
+    if was_clamped:
+        # Pre-DW timestamp: use first year of DW for robust spatial coverage
+        dw_col = (ee.ImageCollection(dw_config.gee_collection)
+                  .filterDate(DW_START, "2016-06-23")
+                  .filterBounds(region)
+                  .select(dw_bands))
+    else:
+        ts = ee.Date(timestamp)
+        # Primary: 30-day window median composite
+        dw_col_30 = (ee.ImageCollection(dw_config.gee_collection)
+                     .filterDate(ts.advance(-15, "day"), ts.advance(15, "day"))
+                     .filterBounds(region)
+                     .select(dw_bands))
+        # Fallback: 60-day window if 30-day is empty
+        dw_col_60 = (ee.ImageCollection(dw_config.gee_collection)
+                     .filterDate(ts.advance(-30, "day"), ts.advance(30, "day"))
+                     .filterBounds(region)
+                     .select(dw_bands))
+        dw_col = ee.ImageCollection(
+            ee.Algorithms.If(dw_col_30.size().gt(0), dw_col_30, dw_col_60)
         )
-    )
 
-    # Median composite (robust to clouds and outliers)
-    dw_img = dw_col.median()
+    # Zero-image fallback for truly empty collections
+    zero_img = ee.Image([0] * len(dw_bands)).rename(dw_bands).toFloat()
+    dw_img = ee.Image(
+        ee.Algorithms.If(dw_col.size().gt(0), dw_col.median(), zero_img)
+    ).unmask(0)
+
+    # Warn only on zero-image fallback (no data even with widened window)
+    col_size = dw_col.size().getInfo()
+    if col_size == 0:
+        print(f"[WARN] No Dynamic World imagery found for region around timestamp={timestamp}")
 
     # Rename bands for clarity
     dw_img = dw_img.rename(["dw_" + b for b in dw_bands])
@@ -689,7 +718,6 @@ def _download_chip_worker(args: tuple) -> dict:
             download_tiled_image(img, region, scale, out_path, crs="EPSG:4326")
 
             results["files"][group_name] = {"path": str(out_path), "status": "downloaded"}
-            print(f"[OK] point={point_id} group={group_name}")
 
         except Exception as e:
             results["files"][group_name] = {"path": None, "status": "failed", "error": str(e)}
@@ -760,8 +788,14 @@ def download_chips(
     (study_dir / "chips" / split).mkdir(parents=True, exist_ok=True)
 
     # Download with multiprocessing (lazy GEE init in each worker)
+    from tqdm import tqdm
     with mp.Pool(n_workers) as pool:
-        results = pool.map(_download_chip_worker, enumerate(requests))
+        results = list(tqdm(
+            pool.imap_unordered(_download_chip_worker, enumerate(requests)),
+            total=len(requests),
+            desc=f"Downloading {split} chips",
+            unit="chip",
+        ))
 
     # Aggregate statistics
     stats = {

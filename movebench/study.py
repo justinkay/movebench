@@ -303,7 +303,7 @@ class Study:
             **kwargs
         )
 
-    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, **kwargs):
+    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, include_time: bool = False, **kwargs):
         """
         Create iSSFDataset for this study.
 
@@ -311,6 +311,8 @@ class Study:
             split: "train" or "test"
             auto_normalize: If True, ensure normalization exists and apply it.
             force_normalize: If True, recompute normalization statistics.
+            include_time: If True, include cyclical time-of-year and time-of-day
+                features and their interactions.
             **kwargs: Additional arguments passed to iSSFDataset
 
         Returns:
@@ -328,6 +330,7 @@ class Study:
             df=df,
             split=split,
             study_dir=self._study_dir,
+            include_time=include_time,
             **kwargs
         )
 

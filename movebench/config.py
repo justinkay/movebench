@@ -76,10 +76,10 @@ MAX_PIXELS = 100
 TARGET_CRS = "EPSG:3857"  # Web Mercator
 
 # Region multipliers for train vs test
-# Test regions are larger to allow simulation/forecasting
+# Test regions will be (TODO) larger to allow simulation/forecasting
 REGION_MULTIPLIER = {
     "train": 1.0,   # 2x 95th percentile step size (from buffer computation)
-    "test": 15.0,   # 30x 95th percentile step size
+    "test":  1.0,   # originally 15.0 (30x 95th percentile step size) but massive download size
 }
 
 # GEE download settings
@@ -276,6 +276,7 @@ DYNAMIC_WORLD = LayerConfig(
     temporal="daily",
     gee_collection="GOOGLE/DYNAMICWORLD/V1",
     normalize=False,  # Probabilities already 0-1
+    year_bounds=(2015, 2025),  # DW starts 2015-06-23
 )
 
 LANDSAT_NDWI = LayerConfig( # note: lot of missing values even in the 32 day composite
