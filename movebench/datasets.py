@@ -131,12 +131,8 @@ class ChipDataset(Dataset):
         all_layers.extend([med_chip, big_chip])
         layer_names.extend(["modis", "era5"])
 
-        # Get bounds and center from medium chip
-        bounds = med_chip['bounds']
-        center_lon = (bounds[0] + bounds[2]) / 2
-        center_lat = (bounds[1] + bounds[3]) / 2
-
         # DEM tile (load all tiles intersecting bounds and merge)
+        bounds = med_chip['bounds']
         dem_raster = self._loaders["dem"].load(bounds=bounds)
         all_layers.append(dem_raster)
         layer_names.append("dem")

@@ -1,6 +1,7 @@
 """Raster transformation utilities."""
 
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -179,6 +180,7 @@ class Normalizer:
             path: Path to JSON file
         """
         import json
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(stats, f, indent=2)
 

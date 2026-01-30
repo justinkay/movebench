@@ -89,7 +89,7 @@ class SSFDataset(Dataset):
         self.dem_dir = self.study_dir / "tiles" / "dem"
 
         # Prepare SSF DataFrame
-        self.df = setup_df_for_ssf(df.copy())
+        self.df = setup_df_for_ssf(df.copy()) # TODO this should probably be in this file
         self.sample_indices = self.df.index[self.df['can_be_ssf_start']].to_numpy()
 
         # Pre-compute all pseudo-step samples for reproducibility
