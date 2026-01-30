@@ -34,6 +34,16 @@ def lat_lon_to_modis_tiles(lat, lon):
     return list(zip(rows.ih.values, rows.iv.values))
 
 
+def modis_tiles_for_bounds(bounds):
+    """Get MODIS tiles (h, v) intersecting a bounding box."""
+    grid = _load_modis_grid()
+    lon_min, lat_min, lon_max, lat_max = bounds
+    rows = grid[(grid.lon_min <= lon_max) & (grid.lon_max >= lon_min) &
+                (grid.lat_min <= lat_max) & (grid.lat_max >= lat_min)]
+    rows = rows.sort_values(["iv", "ih"])
+    return list(zip(rows.ih.values, rows.iv.values))
+
+
 # Alias for backward compatibility
 lat_lon_to_modis = lat_lon_to_modis_tiles
 

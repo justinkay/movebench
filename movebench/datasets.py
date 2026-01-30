@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 from movebench.config import PATHS, LAYERS, POINT_ID_COL
-from movebench.utils import lat_lon_to_modis_tiles
+from movebench.utils import modis_tiles_for_bounds
 from movebench.loaders import (
     ChipLoader, TileLoader, get_loader,
     SlopeLoader, AspectLoader, RugosityLoader,
@@ -210,10 +210,7 @@ class ChipDataset(Dataset):
         layer_names.append("thermal_uplift")
 
         # Compute MODIS tile coordinates for bounds
-        hvs = []
-        for lat in [bounds[1], bounds[3]]:
-            for lon in [bounds[0], bounds[2]]:
-                hvs.extend(lat_lon_to_modis_tiles(lat, lon))
+        hvs = modis_tiles_for_bounds(bounds)
 
         # MODIS land cover
         lc_raster = self._loaders["modis_lc"].load(bounds=bounds, timestamp=timestamp, hvs=hvs)

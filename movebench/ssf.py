@@ -32,7 +32,7 @@ from movebench.config import (
     get_channel_indices,
     get_total_channels,
 )
-from movebench.utils import lat_lon_to_modis_tiles, setup_df_for_ssf
+from movebench.utils import modis_tiles_for_bounds, setup_df_for_ssf
 from movebench.loaders import ChipLoader, TileLoader, get_loader
 from movebench.transforms import Normalizer
 
@@ -515,13 +515,7 @@ class SSFDataset(Dataset):
         tile_bounds = chip_bounds if chip_bounds is not None else bounds_4326
 
         # Prepare MODIS tile coordinates from tile bounds
-        hvs = set()
-        for lat, lon in [(tile_bounds[1], tile_bounds[0]),
-                         (tile_bounds[1], tile_bounds[2]),
-                         (tile_bounds[3], tile_bounds[0]),
-                         (tile_bounds[3], tile_bounds[2])]:
-            hvs.update(lat_lon_to_modis_tiles(lat, lon))
-        hvs = list(hvs)
+        hvs = modis_tiles_for_bounds(tile_bounds)
 
         # ERA5 chip (hourly + daily in single chip)
         try:
