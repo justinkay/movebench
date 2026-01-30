@@ -285,24 +285,26 @@ class ChipDataset(Dataset):
         reprojected, final_transform, final_crs = reproject_to_meters(all_layers)
         reprojected_t = [torch.from_numpy(layer) for layer in reprojected]
 
+        def _compute_nodata_mask(layer: torch.Tensor, nodata_val):
+            if nodata_val is None:
+                return torch.isfinite(layer)
+            if isinstance(nodata_val, float) and np.isnan(nodata_val):
+                return ~torch.isnan(layer)
+            return layer != nodata_val
+
         # Convert land cover to one-hot
         lc_idx = layer_names.index("modis_lc")
         lc_nc = LAYERS["modis_lc"].num_classes
+        lc_nodata_val = all_layers[lc_idx]['nodata']
+        lc_valid_mask = _compute_nodata_mask(reprojected_t[lc_idx], lc_nodata_val)
         reprojected_t[lc_idx] = one_hot_encode(reprojected_t[lc_idx], lc_nc)
 
         # Compute nodata masks (handle NaN nodata values specially)
         valid_masks = []
         for layer, layer_dict in zip(reprojected_t, all_layers):
             nodata_val = layer_dict['nodata']
-            if nodata_val is None:
-                # No nodata defined - all finite values are valid
-                valid_masks.append(torch.isfinite(layer))
-            elif isinstance(nodata_val, float) and np.isnan(nodata_val):
-                # NaN nodata - use isnan for proper detection
-                valid_masks.append(~torch.isnan(layer))
-            else:
-                # Regular nodata value
-                valid_masks.append(layer != nodata_val)
+            valid_masks.append(_compute_nodata_mask(layer, nodata_val))
+        valid_masks[lc_idx] = lc_valid_mask.repeat(lc_nc, 1, 1)
 
         # Apply valid_range constraints from config
         for i, name in enumerate(layer_names):
