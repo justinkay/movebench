@@ -6,7 +6,7 @@ from io import StringIO
 import numpy as np
 import pandas as pd
 
-from movebench.config import PATHS, LON_COL, LAT_COL, TIME_COL, INDIVIDUAL_COL
+from movebench.config import PATHS, LON_COL, LAT_COL, TIME_COL, INDIVIDUAL_COL, LayerConfig
 
 # Lazy-loaded MODIS grid
 _modis_grid = None
@@ -42,6 +42,43 @@ def modis_tiles_for_bounds(bounds):
                 (grid.lat_min <= lat_max) & (grid.lat_max >= lat_min)]
     rows = rows.sort_values(["iv", "ih"])
     return list(zip(rows.ih.values, rows.iv.values))
+
+
+def make_placeholder(
+    layer_config: LayerConfig,
+    shape: tuple[int, int],
+    transform,
+    crs,
+    bounds,
+    nodata: float | None = np.nan,
+    bands: list[str] | None = None,
+) -> dict:
+    """
+    Build a NaN-filled placeholder raster for a layer.
+
+    Args:
+        layer_config: LayerConfig for the layer.
+        shape: (height, width) for the placeholder array.
+        transform: Rasterio transform to attach.
+        crs: Coordinate reference system to attach.
+        bounds: Bounds tuple to attach.
+        nodata: Nodata value to use (defaults to NaN).
+        bands: Optional band names override (defaults to layer_config.bands).
+
+    Returns:
+        Placeholder raster dict.
+    """
+    band_names = bands or layer_config.bands
+    height, width = shape
+    array = np.full((len(band_names), height, width), np.nan, dtype=np.float32)
+    return {
+        "array": array,
+        "transform": transform,
+        "crs": crs,
+        "nodata": nodata,
+        "bounds": bounds,
+        "bands": band_names,
+    }
 
 
 # Alias for backward compatibility

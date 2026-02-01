@@ -1,19 +1,12 @@
 """PyTorch datasets for movement ecology."""
 
-import os
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 from movebench.config import PATHS, LAYERS, POINT_ID_COL
-from movebench.utils import modis_tiles_for_bounds
-from movebench.loaders import (
-    ChipLoader, TileLoader, get_loader,
-    SlopeLoader, AspectLoader, RugosityLoader,
-    OrographicUpliftLoader, ThermalUpliftLoader,
-)
 from movebench.transforms import reproject_to_meters, one_hot_encode
+from movebench.layer_pipeline import LayerPipeline
 
 
 class ChipDataset(Dataset):
@@ -50,53 +43,14 @@ class ChipDataset(Dataset):
         self.dem_dir = study_dir / "tiles" / "dem"
 
         # Initialize loaders
-        self._loaders = self._init_loaders()
+        self._pipeline = LayerPipeline(self.study_dir, self.chip_dir)
+        self._layer_order = self._pipeline.layer_order
 
         # Normalizer: use provided one or None (should be provided by Study)
         self.normalizer = normalizer
         self._normalizer_provided = normalizer is not None
         self._lc_nc = LAYERS["modis_lc"].num_classes
         self._categorical_start_idx = None
-
-    def _init_loaders(self) -> dict:
-        """Initialize layer loaders from config."""
-        loaders = {}
-
-        # GEE chip loaders
-        loaders["era5"] = ChipLoader(str(self.chip_dir), "era5")
-        loaders["modis"] = ChipLoader(str(self.chip_dir), "modis")
-        loaders["high_res"] = ChipLoader(str(self.chip_dir), "high_res")
-
-        # GEE tile loader (DEM)
-        loaders["dem"] = TileLoader(str(self.dem_dir), "dem")
-
-        # DEM-derived loaders
-        loaders["slope"] = SlopeLoader(LAYERS["slope"])
-        loaders["aspect"] = AspectLoader(LAYERS["aspect"])
-        loaders["rugosity"] = RugosityLoader(LAYERS["rugosity"])
-
-        # Distance tile loaders (gracefully handle missing tiles)
-        for dist_layer in ["dist_water"]:
-            tile_dir = self.study_dir / "tiles" / dist_layer
-            index_path = tile_dir / "index.json"
-            if index_path.exists():
-                loaders[dist_layer] = TileLoader(str(tile_dir), dist_layer)
-
-        # Uplift derived loaders
-        loaders["orographic_uplift"] = OrographicUpliftLoader(LAYERS["orographic_uplift"])
-        loaders["thermal_uplift"] = ThermalUpliftLoader(LAYERS["thermal_uplift"])
-
-        # Local HDF loaders (MODIS products)
-        loaders["modis_lc"] = get_loader("modis_lc")
-        loaders["modis_cvf_tree"] = get_loader("modis_cvf_tree")
-        loaders["modis_cvf_nontree"] = get_loader("modis_cvf_nontree")
-        loaders["modis_cvf_nonveg"] = get_loader("modis_cvf_nonveg")
-
-        # Local GeoTIFF loaders
-        loaders["hii"] = get_loader("hii")
-        loaders["bioclim"] = get_loader("bioclim")
-
-        return loaders
 
     def __getitem__(self, idx):
         """Load and process all layers for a single sample."""
@@ -119,162 +73,7 @@ class ChipDataset(Dataset):
 
     def _load_all_layers(self, context: dict) -> tuple[list[dict], list[str]]:
         """Load all layers for a sample using configured loaders."""
-        point_id = context["point_id"]
-        timestamp = context["timestamp"]
-
-        all_layers = []
-        layer_names = []
-
-        # GEE chips (MODIS and ERA5)
-        med_chip = self._loaders["modis"].load(point_id=point_id)
-        big_chip = self._loaders["era5"].load(point_id=point_id)
-        all_layers.extend([med_chip, big_chip])
-        layer_names.extend(["modis", "era5"])
-
-        # Get bounds and center from medium chip
-        bounds = med_chip['bounds']
-        center_lon = (bounds[0] + bounds[2]) / 2
-        center_lat = (bounds[1] + bounds[3]) / 2
-
-        # DEM tile (load all tiles intersecting bounds and merge)
-        dem_raster = self._loaders["dem"].load(bounds=bounds)
-        all_layers.append(dem_raster)
-        layer_names.append("dem")
-
-        # DEM-derived layers (slope, aspect, rugosity)
-        dem_parent = {"dem": dem_raster}
-        slope_raster = self._loaders["slope"].compute(dem_parent)
-        all_layers.append(slope_raster)
-        layer_names.append("slope")
-
-        aspect_raster = self._loaders["aspect"].compute(dem_parent)
-        all_layers.append(aspect_raster)
-        layer_names.append("aspect")
-
-        rugosity_raster = self._loaders["rugosity"].compute(dem_parent)
-        all_layers.append(rugosity_raster)
-        layer_names.append("rugosity")
-
-        # Distance tile layers (NaN placeholder if not downloaded)
-        for dist_layer in ["dist_water"]:
-            if dist_layer in self._loaders:
-                try:
-                    dist_raster = self._loaders[dist_layer].load(bounds=bounds)
-                except (ValueError, FileNotFoundError):
-                    H, W = dem_raster['array'].shape[1:]
-                    dist_raster = {
-                        'array': np.full((1, H, W), np.nan, dtype=np.float32),
-                        'transform': dem_raster['transform'],
-                        'crs': dem_raster['crs'],
-                        'nodata': np.nan,
-                        'bounds': dem_raster['bounds'],
-                        'bands': LAYERS[dist_layer].bands,
-                    }
-            else:
-                H, W = dem_raster['array'].shape[1:]
-                dist_raster = {
-                    'array': np.full((1, H, W), np.nan, dtype=np.float32),
-                    'transform': dem_raster['transform'],
-                    'crs': dem_raster['crs'],
-                    'nodata': np.nan,
-                    'bounds': dem_raster['bounds'],
-                    'bands': LAYERS[dist_layer].bands,
-                }
-            all_layers.append(dist_raster)
-            layer_names.append(dist_layer)
-
-        # Orographic uplift (requires slope, aspect, ERA5 wind)
-        oro_parent = {
-            "slope": slope_raster,
-            "aspect": aspect_raster,
-            "era5_land": big_chip,  # ERA5 chip contains era5_land bands (first 12)
-        }
-        oro_raster = self._loaders["orographic_uplift"].compute(oro_parent)
-        all_layers.append(oro_raster)
-        layer_names.append("orographic_uplift")
-
-        # Thermal uplift (requires ERA5-Land + ERA5)
-        # big_chip has era5_land (12) + era5 (3) + era5_land_daily (12) + era5_daily (9)
-        n_era5l = len(LAYERS["era5_land"].bands)
-        n_era5 = len(LAYERS["era5"].bands)
-        era5l_array = big_chip['array'][:n_era5l]
-        era5_array = big_chip['array'][n_era5l:n_era5l + n_era5]
-        era5l_data = {**big_chip, 'array': era5l_array}
-        era5_data = {**big_chip, 'array': era5_array}
-        therm_parent = {
-            "era5_land": era5l_data,
-            "era5": era5_data,
-        }
-        therm_raster = self._loaders["thermal_uplift"].compute(therm_parent)
-        all_layers.append(therm_raster)
-        layer_names.append("thermal_uplift")
-
-        # Compute MODIS tile coordinates for bounds
-        hvs = modis_tiles_for_bounds(bounds)
-
-        # MODIS land cover
-        lc_raster = self._loaders["modis_lc"].load(bounds=bounds, timestamp=timestamp, hvs=hvs)
-        all_layers.append(lc_raster)
-        layer_names.append("modis_lc")
-
-        # MODIS vegetation cover (3 bands as separate layers)
-        for cvf_name in ["modis_cvf_tree", "modis_cvf_nontree", "modis_cvf_nonveg"]:
-            cvf_raster = self._loaders[cvf_name].load(bounds=bounds, timestamp=timestamp, hvs=hvs)
-            all_layers.append(cvf_raster)
-            layer_names.append(cvf_name)
-
-        # Human Impact Index
-        hii_raster = self._loaders["hii"].load(bounds=bounds, timestamp=timestamp)
-        all_layers.append(hii_raster)
-        layer_names.append("hii")
-
-        # BioClim (19 bands)
-        for i in range(1, 20):
-            bioclim_raster = self._loaders["bioclim"].load(bounds=bounds, band_num=i)
-            all_layers.append(bioclim_raster)
-            layer_names.append(f"bioclim_{i}")
-
-        # High-res chip (Dynamic World 9 bands + Landsat NDWI 1 band)
-        try:
-            hr_chip = self._loaders["high_res"].load(point_id=point_id)
-            hr_array = hr_chip['array']
-            n_dw = len(LAYERS["dynamic_world"].bands)
-            n_ndwi = len(LAYERS["landsat_ndwi"].bands)
-            expected_hr_bands = n_dw + n_ndwi
-
-            # Guard against broken chips with wrong band count
-            if hr_array.shape[0] < expected_hr_bands:
-                raise ValueError(
-                    f"high_res chip has {hr_array.shape[0]} bands, expected {expected_hr_bands}"
-                )
-
-            # Split into DW and NDWI sub-chips
-            dw_chip = {**hr_chip, 'array': hr_array[:n_dw], 'bands': LAYERS["dynamic_world"].bands}
-            ndwi_chip = {**hr_chip, 'array': hr_array[n_dw:n_dw + n_ndwi], 'bands': LAYERS["landsat_ndwi"].bands}
-            all_layers.extend([dw_chip, ndwi_chip])
-            layer_names.extend(["dynamic_world", "landsat_ndwi"])
-        except (FileNotFoundError, ValueError):
-            H, W = med_chip['array'].shape[1:]
-            dw_placeholder = {
-                'array': np.full((len(LAYERS["dynamic_world"].bands), H, W), np.nan, dtype=np.float32),
-                'transform': med_chip['transform'],
-                'crs': med_chip['crs'],
-                'nodata': np.nan,
-                'bounds': med_chip['bounds'],
-                'bands': LAYERS["dynamic_world"].bands,
-            }
-            ndwi_placeholder = {
-                'array': np.full((len(LAYERS["landsat_ndwi"].bands), H, W), np.nan, dtype=np.float32),
-                'transform': med_chip['transform'],
-                'crs': med_chip['crs'],
-                'nodata': np.nan,
-                'bounds': med_chip['bounds'],
-                'bands': LAYERS["landsat_ndwi"].bands,
-            }
-            all_layers.extend([dw_placeholder, ndwi_placeholder])
-            layer_names.extend(["dynamic_world", "landsat_ndwi"])
-
-        return all_layers, layer_names
+        return self._pipeline.load_all(context)
 
     def _apply_transforms(self, all_layers: list[dict], layer_names: list[str]) -> tuple:
         """Reproject layers, encode categoricals, compute masks."""
@@ -290,7 +89,7 @@ class ChipDataset(Dataset):
             return layer != nodata_val
 
         # Convert land cover to one-hot
-        lc_idx = layer_names.index("modis_lc")
+        lc_idx = self._layer_order.index("modis_lc")
         lc_nc = LAYERS["modis_lc"].num_classes
         lc_nodata_val = all_layers[lc_idx]['nodata']
         lc_valid_mask = _compute_nodata_mask(reprojected_t[lc_idx], lc_nodata_val)
@@ -313,7 +112,7 @@ class ChipDataset(Dataset):
 
         # Concatenate and set up normalization mask
         final_t = torch.cat(reprojected_t)
-        lc_start_idx = sum([a['array'].shape[0] for a in all_layers[:lc_idx]])
+        lc_start_idx = sum(a['array'].shape[0] for a in all_layers[:lc_idx])
 
         if self._categorical_start_idx is None:
             num_channels = final_t.shape[0]
