@@ -19,7 +19,9 @@ import os
 # =============================================================================
 
 # Root can be overridden via environment variable
-DATA_ROOT = Path(os.environ.get("MOVEBENCH_DATA_ROOT", Path(__file__).parent.parent))
+DATA_ROOT = Path(os.environ.get("MOVEBENCH_DATA_ROOT", 
+                        "/archive/vision/beery/movebench" # Path(__file__).parent.parent)
+                ))
 
 # Shared data (global layers used across all studies)
 SHARED_ROOT = Path(os.environ.get(
@@ -30,7 +32,7 @@ SHARED_ROOT = Path(os.environ.get(
 # Directory structure within DATA_ROOT
 PATHS = {
     # Per-study data
-    "studies": DATA_ROOT / "studies",
+    "studies": DATA_ROOT / "studies_10ind", # subsampled dataset for dev
 
     # Shared/global layers
     "modis_lc": SHARED_ROOT / "modis_lc2015-2025",
@@ -193,25 +195,6 @@ ERA5_LAND_DAILY = LayerConfig(
     native_scale_m=11132.0,
     temporal="daily",
     gee_collection="ECMWF/ERA5_LAND/DAILY_AGGR",
-)
-
-ERA5_DAILY = LayerConfig(
-    name="era5_daily",
-    source="gee_chip",
-    bands=[
-        "mean_sea_level_pressure",
-        "total_precipitation",
-        "mean_2m_air_temperature",
-        "minimum_2m_air_temperature",
-        "maximum_2m_air_temperature",
-        "dewpoint_2m_temperature",
-        "u_component_of_wind_10m",
-        "v_component_of_wind_10m",
-        "surface_pressure",
-    ],
-    native_scale_m=27830.0,  # ~0.25 degree
-    temporal="daily",
-    gee_collection="ECMWF/ERA5/DAILY",
 )
 
 MODIS_LST = LayerConfig(
@@ -454,27 +437,26 @@ LAYERS: dict[str, LayerConfig] = {
     "era5": ERA5,                    # 3 bands  → channels 19-21
     # ERA5 daily (~11km)
     "era5_land_daily": ERA5_LAND_DAILY,  # 13 bands → channels 22-34
-    "era5_daily": ERA5_DAILY,        # 9 bands  → channels 35-43
     # GEE tiles + DEM-derived
-    "dem": DEM,                      # 1 band   → channel 44
-    "slope": SLOPE,                  # 1 band   → channel 45
-    "aspect": ASPECT,                # 2 bands  → channels 46-47
-    "rugosity": RUGOSITY,            # 1 band   → channel 48
-    "dist_water": DIST_WATER,        # 1 band   → channel 49
+    "dem": DEM,                      # 1 band   → channel 35
+    "slope": SLOPE,                  # 1 band   → channel 36
+    "aspect": ASPECT,                # 2 bands  → channels 37-38
+    "rugosity": RUGOSITY,            # 1 band   → channel 39
+    "dist_water": DIST_WATER,        # 1 band   → channel 40
     # Uplift (derived)
-    "orographic_uplift": OROGRAPHIC_UPLIFT,  # 1 band → channel 50
-    "thermal_uplift": THERMAL_UPLIFT,        # 1 band → channel 51
+    "orographic_uplift": OROGRAPHIC_UPLIFT,  # 1 band → channel 41
+    "thermal_uplift": THERMAL_UPLIFT,        # 1 band → channel 42
     # Local HDF (MODIS products)
-    "modis_lc": MODIS_LC,            # 1→18 (one-hot) → channels 52-69
-    "modis_cvf_tree": MODIS_CVF_TREE,        # 1 band → channel 70
-    "modis_cvf_nontree": MODIS_CVF_NONTREE,  # 1 band → channel 71
-    "modis_cvf_nonveg": MODIS_CVF_NONVEG,    # 1 band → channel 72
+    "modis_lc": MODIS_LC,            # 1→18 (one-hot) → channels 43-60
+    "modis_cvf_tree": MODIS_CVF_TREE,        # 1 band → channel 61
+    "modis_cvf_nontree": MODIS_CVF_NONTREE,  # 1 band → channel 62
+    "modis_cvf_nonveg": MODIS_CVF_NONVEG,    # 1 band → channel 63
     # Local GeoTIFF
-    "hii": HII,                      # 1 band   → channel 73
-    "bioclim": BIOCLIM,              # 19 bands → channels 74-92
+    "hii": HII,                      # 1 band   → channel 64
+    "bioclim": BIOCLIM,              # 19 bands → channels 65-83
     # Dynamic World (10m, probabilities) + Landsat NDWI (30m)
-    "dynamic_world": DYNAMIC_WORLD,  # 9 bands  → channels 93-101
-    "landsat_ndwi": LANDSAT_NDWI,    # 1 band   → channel 102
+    "dynamic_world": DYNAMIC_WORLD,  # 9 bands  → channels 84-92
+    "landsat_ndwi": LANDSAT_NDWI,    # 1 band   → channel 93
 }
 
 
@@ -487,7 +469,7 @@ LAYERS: dict[str, LayerConfig] = {
 CHIP_GROUPS = {
     # "Coarse" group: all ERA5 atmospheric data (~11km), hourly + daily
     "era5": {
-        "layers": ["era5_land", "era5", "era5_land_daily", "era5_daily"],
+        "layers": ["era5_land", "era5", "era5_land_daily"],
         "target_scale_m": 11132.0,
     },
 

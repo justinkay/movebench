@@ -190,7 +190,7 @@ class ChipDataset(Dataset):
         layer_names.append("orographic_uplift")
 
         # Thermal uplift (requires ERA5-Land + ERA5)
-        # big_chip has era5_land (12) + era5 (3) + era5_land_daily (12) + era5_daily (9)
+        # big_chip has era5_land (12) + era5 (3) + era5_land_daily (12)
         n_era5l = len(LAYERS["era5_land"].bands)
         n_era5 = len(LAYERS["era5"].bands)
         era5l_array = big_chip['array'][:n_era5l]

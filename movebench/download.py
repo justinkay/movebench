@@ -300,10 +300,9 @@ def make_era5_stack(timestamp: str):
     Build combined ERA5 hourly + daily image stack for a timestamp.
 
     Returns an ee.Image with:
-      - ERA5-Land hourly (12 bands)
+      - ERA5-Land hourly (13 bands)
       - ERA5 hourly (3 bands)
-      - ERA5-Land daily aggregate (12 bands)
-      - ERA5 daily aggregate (9 bands)
+      - ERA5-Land daily aggregate (13 bands)
     """
     ee = ensure_ee_initialized()
 
@@ -334,16 +333,7 @@ def make_era5_stack(timestamp: str):
         era5ld_bands
     ).rename(["era5ld_" + b for b in era5ld_bands])
 
-    # ERA5 daily bands
-    era5d_config = LAYERS["era5_daily"]
-    era5d_bands = era5d_config.bands
-    era5d_img = _nearest_daily_image(
-        era5d_config.gee_collection,
-        timestamp,
-        era5d_bands
-    ).rename(["era5d_" + b for b in era5d_bands])
-
-    return era5l_img.addBands(era5_img).addBands(era5ld_img).addBands(era5d_img).toFloat()
+    return era5l_img.addBands(era5_img).addBands(era5ld_img).toFloat()
 
 
 def make_modis_stack(timestamp: str):

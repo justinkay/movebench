@@ -10,6 +10,7 @@ the minimal region needed for the ~101 candidate points instead of full chips.
 """
 
 import hashlib
+import multiprocessing
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from pyproj import Transformer
 from rasterio.warp import transform_bounds
 from rasterio.windows import from_bounds
 import rasterio
+from tqdm import tqdm
 
 from movebench.config import (
     PATHS,
@@ -35,6 +37,413 @@ from movebench.config import (
 from movebench.utils import modis_tiles_for_bounds, setup_df_for_ssf
 from movebench.loaders import ChipLoader, TileLoader, get_loader
 from movebench.transforms import Normalizer
+
+
+def _create_loaders(study_dir: Path, split: str) -> dict:
+    """Create fresh loaders for a study (used by worker processes).
+
+    Args:
+        study_dir: Path to study directory
+        split: Data split ("train" or "test")
+
+    Returns:
+        Dict mapping loader names to loader instances
+    """
+    chip_dir = study_dir / "chips" / split
+    dem_dir = study_dir / "tiles" / "dem"
+
+    loaders = {}
+
+    # GEE chip loaders
+    loaders["era5"] = ChipLoader(str(chip_dir), "era5")
+    loaders["modis"] = ChipLoader(str(chip_dir), "modis")
+    loaders["high_res"] = ChipLoader(str(chip_dir), "high_res")
+
+    # GEE tile loader (DEM)
+    loaders["dem"] = TileLoader(str(dem_dir), "dem")
+
+    # Local HDF loaders (MODIS products)
+    loaders["modis_lc"] = get_loader("modis_lc")
+    loaders["modis_cvf_tree"] = get_loader("modis_cvf_tree")
+    loaders["modis_cvf_nontree"] = get_loader("modis_cvf_nontree")
+    loaders["modis_cvf_nonveg"] = get_loader("modis_cvf_nonveg")
+
+    # Local GeoTIFF loaders
+    loaders["hii"] = get_loader("hii")
+    loaders["bioclim"] = get_loader("bioclim")
+
+    return loaders
+
+
+def _extract_sample_worker(args: tuple) -> tuple:
+    """Worker function for parallel feature extraction.
+
+    Must be module-level to be picklable for multiprocessing.
+
+    Args:
+        args: Tuple of (idx, worker_args_dict) where worker_args_dict contains
+            all data needed to extract features for sample idx
+
+    Returns:
+        Tuple of (idx, step_pixels_np, valid_pixels_np) - numpy arrays to avoid
+        PyTorch tensor serialization issues across processes
+    """
+    idx, worker_args = args
+
+    study_dir = Path(worker_args["study_dir"])
+    split = worker_args["split"]
+    point_id = worker_args["point_id"]
+    timestamp = worker_args["timestamp"]
+    lons = worker_args["lons"]
+    lats = worker_args["lats"]
+    bounds_4326 = worker_args["bounds_4326"]
+    channel_indices = worker_args["channel_indices"]
+    total_channels = worker_args["total_channels"]
+    lc_num_classes = worker_args["lc_num_classes"]
+
+    # Create fresh loaders in worker process
+    loaders = _create_loaders(study_dir, split)
+
+    # Extract features using the same logic as _load_and_extract_all_layers
+    step_pixels, valid_pixels = _extract_all_layers_standalone(
+        loaders=loaders,
+        point_id=point_id,
+        timestamp=timestamp,
+        lons=lons,
+        lats=lats,
+        bounds_4326=bounds_4326,
+        channel_indices=channel_indices,
+        total_channels=total_channels,
+        lc_num_classes=lc_num_classes,
+    )
+
+    # Convert to numpy to avoid PyTorch tensor serialization issues
+    return idx, step_pixels.numpy(), valid_pixels.numpy()
+
+
+def _extract_all_layers_standalone(
+    loaders: dict,
+    point_id: int,
+    timestamp,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    bounds_4326: tuple,
+    channel_indices: dict,
+    total_channels: int,
+    lc_num_classes: int,
+) -> tuple:
+    """Standalone feature extraction function for use in worker processes.
+
+    This duplicates the logic from SSFDataset._load_and_extract_all_layers
+    but works with passed-in loaders rather than instance attributes.
+
+    Args:
+        loaders: Dict of layer loaders
+        point_id: Point ID for GEE chips
+        timestamp: Timestamp for temporal layers
+        lons, lats: Point coordinates in EPSG:4326
+        bounds_4326: Bounding box in EPSG:4326
+        channel_indices: Dict mapping layer names to (start, end) indices
+        total_channels: Total number of channels
+        lc_num_classes: Number of land cover classes
+
+    Returns:
+        Tuple of (step_pixels, valid_pixels) with shape (total_channels, N)
+    """
+    N = len(lons)
+
+    # Allocate output tensors
+    all_values = torch.zeros(total_channels, N)
+    all_valid = torch.zeros(total_channels, N, dtype=torch.bool)
+
+    # --- GEE Chips ---
+    # MODIS chip (load first to get chip bounds for other layers)
+    chip_bounds = None
+    try:
+        modis_chip = loaders["modis"].load(point_id=point_id)
+        chip_bounds = modis_chip['bounds']
+        vals, valid = _extract_from_chip(modis_chip, lons, lats, bilinear=True)
+        chip_start = 0
+        for layer_name in ["modis_lst", "modis_vi", "modis_ndsi", "modis_bai"]:
+            start, end = channel_indices[layer_name]
+            n_bands = end - start
+            all_values[start:end] = vals[chip_start:chip_start + n_bands]
+            all_valid[start:end] = valid[chip_start:chip_start + n_bands]
+            chip_start += n_bands
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Use chip bounds for tile/local layers
+    tile_bounds = chip_bounds if chip_bounds is not None else bounds_4326
+
+    # Prepare MODIS tile coordinates
+    hvs = modis_tiles_for_bounds(tile_bounds)
+
+    # ERA5 chip
+    try:
+        era5_chip = loaders["era5"].load(point_id=point_id)
+        vals, valid = _extract_from_chip(era5_chip, lons, lats, bilinear=True)
+        chip_offset = 0
+        for layer_name in ["era5_land", "era5", "era5_land_daily"]:
+            start, end = channel_indices[layer_name]
+            n_bands = end - start
+            all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
+            all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
+            chip_offset += n_bands
+    except (FileNotFoundError, OSError):
+        pass
+
+    # --- DEM (tile) ---
+    try:
+        dem_start, dem_end = channel_indices["dem"]
+        vals, valid = _extract_from_tiled(
+            loaders["dem"], tile_bounds, lons, lats, bilinear=True
+        )
+        all_values[dem_start:dem_end] = vals
+        all_valid[dem_start:dem_end] = valid
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+    # --- MODIS Land Cover (categorical) ---
+    try:
+        lc_start, lc_end = channel_indices["modis_lc"]
+        vals, valid = _extract_categorical_standalone(
+            loaders["modis_lc"], tile_bounds, lons, lats,
+            lc_num_classes, timestamp=timestamp, hvs=hvs
+        )
+        all_values[lc_start:lc_end] = vals
+        all_valid[lc_start:lc_end] = valid
+    except (FileNotFoundError, OSError):
+        pass
+
+    # --- MODIS CVF (3 layers) ---
+    for cvf_name in ["modis_cvf_tree", "modis_cvf_nontree", "modis_cvf_nonveg"]:
+        try:
+            start, end = channel_indices[cvf_name]
+            vals, valid = _extract_from_tiled(
+                loaders[cvf_name], tile_bounds, lons, lats,
+                timestamp=timestamp, hvs=hvs, bilinear=True
+            )
+            all_values[start:end] = vals
+            all_valid[start:end] = valid
+        except (FileNotFoundError, OSError):
+            pass
+
+    # --- HII ---
+    try:
+        hii_start, hii_end = channel_indices["hii"]
+        vals, valid = _extract_from_tiled(
+            loaders["hii"], tile_bounds, lons, lats,
+            timestamp=timestamp, bilinear=True
+        )
+        all_values[hii_start:hii_end] = vals
+        all_valid[hii_start:hii_end] = valid
+    except (FileNotFoundError, OSError):
+        pass
+
+    # --- BioClim (19 bands) ---
+    bioclim_start, bioclim_end = channel_indices["bioclim"]
+    for i in range(1, 20):
+        try:
+            vals, valid = _extract_from_tiled(
+                loaders["bioclim"], tile_bounds, lons, lats,
+                band_num=i, bilinear=True
+            )
+            ch = bioclim_start + (i - 1)
+            all_values[ch:ch + 1] = vals
+            all_valid[ch:ch + 1] = valid
+        except (FileNotFoundError, OSError):
+            pass
+
+    # --- High-res chip (Dynamic World 9 bands + Landsat NDWI 1 band) ---
+    try:
+        hr_chip = loaders["high_res"].load(point_id=point_id)
+        vals, valid = _extract_from_chip(hr_chip, lons, lats, bilinear=False)
+        chip_offset = 0
+        for layer_name in ["dynamic_world", "landsat_ndwi"]:
+            start, end = channel_indices[layer_name]
+            n_bands = end - start
+            all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
+            all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
+            chip_offset += n_bands
+    except (FileNotFoundError, OSError):
+        pass
+
+    return all_values, all_valid
+
+
+def _extract_from_chip(
+    chip_dict: dict,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    bilinear: bool = True,
+) -> tuple:
+    """Sample points from GEE chip in native coords (standalone version).
+
+    Args:
+        chip_dict: Dict with array, transform, crs, nodata
+        lons, lats: Point coordinates in EPSG:4326
+        bilinear: Use bilinear interpolation (True) or nearest neighbor (False)
+
+    Returns:
+        Tuple of (values, valid_mask) with shape (C, N)
+    """
+    arr = chip_dict['array'].copy()
+    transform = chip_dict['transform']
+    src_crs = chip_dict['crs']
+    nodata = chip_dict.get('nodata')
+
+    C, H, W = arr.shape
+    N = len(lons)
+
+    # Transform points to chip CRS
+    transformer = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
+    xs, ys = transformer.transform(lons, lats)
+
+    # Convert to pixel coordinates
+    inv_transform = ~transform
+    cols, rows = inv_transform * (xs, ys)
+    cols = np.asarray(cols)
+    rows = np.asarray(rows)
+
+    # Create nodata mask (True where data is valid)
+    if nodata is not None:
+        if isinstance(nodata, float) and np.isnan(nodata):
+            nodata_mask = ~np.isnan(arr)
+        elif np.isinf(nodata):
+            nodata_mask = ~np.isinf(arr)
+        else:
+            nodata_mask = arr != nodata
+    else:
+        nodata_mask = np.isfinite(arr)
+
+    if bilinear:
+        arr_clean = np.where(nodata_mask, arr, 0.0).astype(np.float32)
+        arr_t = torch.from_numpy(arr_clean)
+
+        in_bounds = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
+        rows_clamped = np.clip(rows, 0, H - 1)
+        cols_clamped = np.clip(cols, 0, W - 1)
+
+        x_norm = 2.0 * (cols_clamped / max(W - 1, 1)) - 1.0
+        y_norm = 2.0 * (rows_clamped / max(H - 1, 1)) - 1.0
+
+        grid = torch.stack([
+            torch.tensor(x_norm, dtype=torch.float32),
+            torch.tensor(y_norm, dtype=torch.float32),
+        ], dim=-1).view(1, N, 1, 2)
+
+        samples = torch.nn.functional.grid_sample(
+            arr_t.unsqueeze(0),
+            grid,
+            mode='bilinear',
+            align_corners=True,
+            padding_mode='zeros',
+        ).squeeze(0).squeeze(-1)
+
+        mask_t = torch.from_numpy(nodata_mask.astype(np.float32))
+        mask_interp = torch.nn.functional.grid_sample(
+            mask_t.unsqueeze(0),
+            grid,
+            mode='bilinear',
+            align_corners=True,
+            padding_mode='zeros',
+        ).squeeze(0).squeeze(-1)
+
+        valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(C, -1)
+        valid_t = valid_t & (mask_interp > 0.99)
+
+        return samples, valid_t
+
+    else:
+        rows_int = np.clip(np.round(rows).astype(int), 0, H - 1)
+        cols_int = np.clip(np.round(cols).astype(int), 0, W - 1)
+        in_bounds = (rows >= -0.5) & (rows < H - 0.5) & (cols >= -0.5) & (cols < W - 0.5)
+
+        samples = torch.from_numpy(arr[:, rows_int, cols_int]).float()
+        valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(C, -1)
+        valid_t = valid_t & torch.from_numpy(nodata_mask[:, rows_int, cols_int])
+
+        return samples, valid_t
+
+
+def _extract_from_tiled(
+    loader,
+    bounds: tuple,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    timestamp=None,
+    hvs=None,
+    band_num: int = None,
+    bilinear: bool = True,
+) -> tuple:
+    """Load minimal window from tiled layer and extract points (standalone version).
+
+    Args:
+        loader: Layer loader instance
+        bounds: (min_lon, min_lat, max_lon, max_lat) in EPSG:4326
+        lons, lats: Point coordinates in EPSG:4326
+        timestamp: Optional timestamp for temporal layers
+        hvs: Optional MODIS tile coordinates
+        band_num: Optional band number (for bioclim)
+        bilinear: Use bilinear interpolation
+
+    Returns:
+        Tuple of (values, valid_mask) with shape (C, N)
+    """
+    kwargs = {}
+    if timestamp is not None:
+        kwargs['timestamp'] = timestamp
+    if hvs is not None:
+        kwargs['hvs'] = hvs
+    if band_num is not None:
+        kwargs['band_num'] = band_num
+
+    raster = loader.load(bounds=bounds, **kwargs)
+    return _extract_from_chip(raster, lons, lats, bilinear=bilinear)
+
+
+def _extract_categorical_standalone(
+    loader,
+    bounds: tuple,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    num_classes: int,
+    timestamp=None,
+    hvs=None,
+) -> tuple:
+    """Extract and one-hot encode categorical layer (standalone version).
+
+    Args:
+        loader: Layer loader instance
+        bounds: Bounding box in EPSG:4326
+        lons, lats: Point coordinates
+        num_classes: Number of classes for one-hot encoding
+        timestamp: Optional timestamp
+        hvs: Optional MODIS tile coordinates
+
+    Returns:
+        Tuple of (one_hot, valid_mask) with shape (num_classes, N)
+    """
+    kwargs = {'timestamp': timestamp}
+    if hvs is not None:
+        kwargs['hvs'] = hvs
+
+    raster = loader.load(bounds=bounds, **kwargs)
+
+    # Use nearest neighbor for categorical
+    values, valid = _extract_from_chip(raster, lons, lats, bilinear=False)
+
+    # values shape: (1, N), convert to one-hot (num_classes, N)
+    class_vals = values.squeeze(0).long()
+    class_vals = torch.clamp(class_vals, 0, num_classes - 1)
+
+    one_hot = torch.nn.functional.one_hot(class_vals, num_classes).T.float()
+
+    # Expand valid mask to all classes
+    valid_expanded = valid.expand(num_classes, -1)
+
+    return one_hot, valid_expanded
 
 
 class SSFDataset(Dataset):
@@ -62,6 +471,7 @@ class SSFDataset(Dataset):
         num_candidates: int = 100,
         normalizer: Normalizer = None,
         force_recompute: bool = False,
+        n_workers: int = 1,
     ):
         """
         Initialize SSFDataset.
@@ -76,12 +486,14 @@ class SSFDataset(Dataset):
             normalizer: Optional pre-computed Normalizer instance
             force_recompute: If True, recompute and re-cache features even if a
                 cache file already exists (e.g. after re-downloading rasters)
+            n_workers: Number of parallel workers for feature extraction (default 1)
         """
         self.study_id = study_id
         self.split = split
         self.random_seed = random_seed
         self.num_candidates = num_candidates
         self.normalizer = normalizer
+        self.n_workers = n_workers
 
         # Set up directory paths
         self.study_dir = Path(study_dir or (PATHS["studies"] / study_id))
@@ -144,6 +556,39 @@ class SSFDataset(Dataset):
 
         return cache
 
+    def _build_worker_args(self, idx: int) -> tuple:
+        """Build arguments tuple for parallel worker.
+
+        Args:
+            idx: Sample index
+
+        Returns:
+            Tuple of (idx, worker_args_dict) for _extract_sample_worker
+        """
+        orig_idx = int(self.sample_indices[idx])
+        row = self.df.loc[orig_idx]
+        point_id = int(row[POINT_ID_COL])
+        timestamp = row['timestamp']
+
+        # Compute candidate points
+        result = self._compute_candidate_points(idx)
+        lons, lats, xs, ys, bounds_4326 = result[:5]
+
+        worker_args = {
+            "study_dir": str(self.study_dir),
+            "split": self.split,
+            "point_id": point_id,
+            "timestamp": timestamp,
+            "lons": lons,
+            "lats": lats,
+            "bounds_4326": bounds_4326,
+            "channel_indices": self._channel_indices,
+            "total_channels": self._total_channels,
+            "lc_num_classes": self._lc_num_classes,
+        }
+
+        return (idx, worker_args)
+
     def _build_feature_cache(self) -> dict:
         """Compute env features for all samples and return as a dict of tensors."""
         N = self.num_candidates + 1
@@ -152,26 +597,49 @@ class SSFDataset(Dataset):
         all_step_pixels = torch.zeros(n_samples, self._total_channels, N)
         all_valid_pixels = torch.zeros(n_samples, self._total_channels, N, dtype=torch.bool)
 
-        for idx in range(n_samples):
-            if idx % 50 == 0:
-                print(f"  Processing sample {idx}/{n_samples}")
+        if self.n_workers > 1:
+            # Parallel processing with multiprocessing
+            print(f"  Building feature cache with {self.n_workers} workers...")
 
-            orig_idx = int(self.sample_indices[idx])
-            row = self.df.loc[orig_idx]
-            point_id = int(row[POINT_ID_COL])
-            timestamp = row['timestamp']
+            # Build args for all samples
+            args_list = [self._build_worker_args(idx) for idx in range(n_samples)]
 
-            # _compute_candidate_points returns at least (lons, lats, xs, ys, bounds_4326);
-            # iSSFDataset adds (step_lengths, turn_angles) — only env features are cached.
-            result = self._compute_candidate_points(idx)
-            lons, lats, xs, ys, bounds_4326 = result[:5]
+            # Use spawn context to avoid fork issues with torch
+            # maxtasksperchild restarts workers periodically to prevent FD/memory leaks
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(self.n_workers, maxtasksperchild=200) as pool:
+                results = list(tqdm(
+                    pool.imap(_extract_sample_worker, args_list, chunksize=10),
+                    total=n_samples,
+                    desc="  Extracting features"
+                ))
 
-            step_pixels, valid_pixels = self._load_and_extract_all_layers(
-                point_id, timestamp, lons, lats, bounds_4326
-            )
+            # Reassemble into tensors (workers return numpy arrays)
+            for idx, step_pixels_np, valid_pixels_np in results:
+                all_step_pixels[idx] = torch.from_numpy(step_pixels_np)
+                all_valid_pixels[idx] = torch.from_numpy(valid_pixels_np)
+        else:
+            # Sequential processing (original behavior)
+            for idx in range(n_samples):
+                if idx % 50 == 0:
+                    print(f"  Processing sample {idx}/{n_samples}")
 
-            all_step_pixels[idx] = step_pixels
-            all_valid_pixels[idx] = valid_pixels
+                orig_idx = int(self.sample_indices[idx])
+                row = self.df.loc[orig_idx]
+                point_id = int(row[POINT_ID_COL])
+                timestamp = row['timestamp']
+
+                # _compute_candidate_points returns at least (lons, lats, xs, ys, bounds_4326);
+                # iSSFDataset adds (step_lengths, turn_angles) — only env features are cached.
+                result = self._compute_candidate_points(idx)
+                lons, lats, xs, ys, bounds_4326 = result[:5]
+
+                step_pixels, valid_pixels = self._load_and_extract_all_layers(
+                    point_id, timestamp, lons, lats, bounds_4326
+                )
+
+                all_step_pixels[idx] = step_pixels
+                all_valid_pixels[idx] = valid_pixels
 
         return {
             'step_pixels': all_step_pixels,
@@ -507,7 +975,7 @@ class SSFDataset(Dataset):
                 all_values[start:end] = vals[chip_start:chip_start + n_bands]
                 all_valid[start:end] = valid[chip_start:chip_start + n_bands]
                 chip_start += n_bands
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             pass  # Leave as zeros/invalid
 
         # Use chip bounds for tile/local layers to ensure pixel grid alignment
@@ -521,15 +989,15 @@ class SSFDataset(Dataset):
         try:
             era5_chip = loaders["era5"].load(point_id=point_id)
             vals, valid = self._extract_from_gee_chip(era5_chip, lons, lats, bilinear=True)
-            # ERA5 chip contains era5_land (12) + era5 (3) + era5_land_daily (12) + era5_daily (9)
+            # ERA5 chip contains era5_land (12) + era5 (3) + era5_land_daily (12)
             chip_offset = 0
-            for layer_name in ["era5_land", "era5", "era5_land_daily", "era5_daily"]:
+            for layer_name in ["era5_land", "era5", "era5_land_daily"]:
                 start, end = self._channel_indices[layer_name]
                 n_bands = end - start
                 all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
                 all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
                 chip_offset += n_bands
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             pass
 
         # --- DEM (tile) ---
@@ -540,7 +1008,7 @@ class SSFDataset(Dataset):
             )
             all_values[dem_start:dem_end] = vals
             all_valid[dem_start:dem_end] = valid
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, OSError, ValueError):
             pass
 
         # --- MODIS Land Cover (categorical) ---
@@ -552,7 +1020,7 @@ class SSFDataset(Dataset):
             )
             all_values[lc_start:lc_end] = vals
             all_valid[lc_start:lc_end] = valid
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             pass
 
         # --- MODIS CVF (3 layers) ---
@@ -565,7 +1033,7 @@ class SSFDataset(Dataset):
                 )
                 all_values[start:end] = vals
                 all_valid[start:end] = valid
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 pass
 
         # --- HII ---
@@ -577,7 +1045,7 @@ class SSFDataset(Dataset):
             )
             all_values[hii_start:hii_end] = vals
             all_valid[hii_start:hii_end] = valid
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             pass
 
         # --- BioClim (19 bands) ---
@@ -591,7 +1059,7 @@ class SSFDataset(Dataset):
                 ch = bioclim_start + (i - 1)
                 all_values[ch:ch + 1] = vals
                 all_valid[ch:ch + 1] = valid
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 pass
 
         # --- High-res chip (Dynamic World 9 bands + Landsat NDWI 1 band) ---
@@ -605,7 +1073,7 @@ class SSFDataset(Dataset):
                 all_values[start:end] = vals[chip_offset:chip_offset + n_bands]
                 all_valid[start:end] = valid[chip_offset:chip_offset + n_bands]
                 chip_offset += n_bands
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             pass
 
         return all_values, all_valid

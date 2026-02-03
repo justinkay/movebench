@@ -275,7 +275,7 @@ class Study:
 
         return result
 
-    def ssf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, **kwargs):
+    def ssf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, n_workers: int = 1, **kwargs):
         """
         Create SSFDataset for this study.
 
@@ -283,6 +283,7 @@ class Study:
             split: "train" or "test"
             auto_normalize: If True, ensure normalization exists and apply it.
             force_normalize: If True, recompute normalization statistics.
+            n_workers: Number of parallel workers for feature extraction (default 1)
             **kwargs: Additional arguments passed to SSFDataset
 
         Returns:
@@ -300,10 +301,11 @@ class Study:
             df=df,
             split=split,
             study_dir=self._study_dir,
+            n_workers=n_workers,
             **kwargs
         )
 
-    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, include_time: bool = False, **kwargs):
+    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, include_time: bool = False, n_workers: int = 1, **kwargs):
         """
         Create iSSFDataset for this study.
 
@@ -313,6 +315,7 @@ class Study:
             force_normalize: If True, recompute normalization statistics.
             include_time: If True, include cyclical time-of-year and time-of-day
                 features and their interactions.
+            n_workers: Number of parallel workers for feature extraction (default 1)
             **kwargs: Additional arguments passed to iSSFDataset
 
         Returns:
@@ -331,6 +334,7 @@ class Study:
             split=split,
             study_dir=self._study_dir,
             include_time=include_time,
+            n_workers=n_workers,
             **kwargs
         )
 
