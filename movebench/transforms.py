@@ -100,6 +100,60 @@ class Normalizer:
         self.normalize_mask = normalize_mask
 
     @classmethod
+    def from_issf_cache(cls, cache: dict, layer_order: list[str] = None) -> "Normalizer":
+        """Create normalizer from cached iSSF feature tensors.
+
+        Computes per-channel mean/std from valid pixels only. Categorical
+        layers (e.g., modis_lc one-hot) and layers with normalize=False
+        in config are excluded from normalization.
+
+        Args:
+            cache: Dict with 'step_pixels' (n, C, N) and 'valid_pixels' (n, C, N, bool)
+            layer_order: Layer order for channel mapping (default: LAYER_ORDER)
+
+        Returns:
+            Normalizer instance
+        """
+        from movebench.config import LAYERS, LAYER_ORDER, get_channel_indices
+
+        if layer_order is None:
+            layer_order = LAYER_ORDER
+
+        step_pixels = cache['step_pixels']  # (n_samples, C, N)
+        valid_pixels = cache['valid_pixels']  # (n_samples, C, N)
+        C = step_pixels.shape[1]
+
+        # Compute per-channel statistics over valid pixels
+        means = torch.zeros(C)
+        stds = torch.zeros(C)
+        for c in range(C):
+            valid_mask = valid_pixels[:, c, :]  # (n_samples, N)
+            values = step_pixels[:, c, :]  # (n_samples, N)
+            valid_values = values[valid_mask]
+            if len(valid_values) > 0:
+                means[c] = valid_values.mean()
+                stds[c] = valid_values.std()
+                if stds[c] < 1e-8:
+                    stds[c] = 1.0  # Avoid division by zero
+            else:
+                means[c] = 0.0
+                stds[c] = 1.0
+
+        # Build normalize mask (False for categorical and normalize=False layers)
+        channel_indices = get_channel_indices(layer_order)
+        normalize_mask = torch.ones(C, dtype=torch.bool)
+        for layer_name in layer_order:
+            layer = LAYERS[layer_name]
+            start, end = channel_indices[layer_name]
+            if layer.categorical or not layer.normalize:
+                normalize_mask[start:end] = False
+                # Reset stats to identity for non-normalized channels
+                means[start:end] = 0.0
+                stds[start:end] = 1.0
+
+        return cls(means, stds, normalize_mask)
+
+    @classmethod
     def from_per_layer_stats(cls, stats: dict, layer_order: list[str]):
         """
         Assemble normalizer from per-layer/per-band statistics.

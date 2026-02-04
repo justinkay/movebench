@@ -29,6 +29,7 @@ from movebench.config import (
     LON_COL,
     LAT_COL,
     POINT_ID_COL,
+    INDIVIDUAL_COL,
     TARGET_CRS,
     LAYER_ORDER,
     get_channel_indices,
@@ -841,19 +842,27 @@ class iSSFDataset(SSFDataset):
             the same scale as the normalized environmental features, which is
             important for stable optimization. Set to False to keep raw values
             (needed for amt-style coefficient interpretation).
+        movement_stats: Optional pre-computed movement statistics dict. Use this
+            to pass training statistics to a test dataset to avoid train/test
+            leakage. If None and normalize_movement=True, stats are computed
+            from this dataset's DataFrame.
     """
 
-    def __init__(self, *args, normalize_movement: bool = True, include_time: bool = False, **kwargs):
+    def __init__(self, *args, normalize_movement: bool = True, include_time: bool = False,
+                 movement_stats: dict = None, **kwargs):
         self.include_time = include_time
         super().__init__(*args, **kwargs)
         self.normalize_movement = normalize_movement
         if normalize_movement:
-            self._movement_stats = self._compute_movement_stats()
+            if movement_stats is not None:
+                self._movement_stats = movement_stats
+            else:
+                self._movement_stats = self._compute_movement_stats()
         else:
             self._movement_stats = None
 
     def _compute_movement_stats(self) -> dict:
-        """Compute mean/std for sl_, log_sl_, cos_ta_ from training data."""
+        """Compute mean/std for sl_, log_sl_, cos_ta_ from this dataset's DataFrame."""
         valid_lengths = self.df.loc[self.df['valid_step'], 'step_length_m'].values
         valid_turns = self.df['turn_angle_rad'].dropna().values
 
@@ -1150,3 +1159,67 @@ def grouped_nll(beta_vec, X_t, y_t, starts_t, ends_t):
         total = total - (logits[jstar] - logZ)
 
     return total / max(len(starts_t), 1)
+
+
+def grouped_nll_vectorized(beta_vec, X_t, K):
+    """
+    Vectorized grouped NLL for conditional logistic regression.
+
+    Assumes data is structured as N groups of K candidates each, where the
+    last candidate in each group (index K-1) is the true choice.
+
+    Args:
+        beta_vec: Parameter vector of shape (C,)
+        X_t: Feature matrix of shape (N * K, C)
+        K: Number of candidates per group (e.g., 101)
+
+    Returns:
+        Mean NLL across groups
+    """
+    # Compute all logits at once: (N * K,)
+    logits = X_t @ beta_vec
+
+    # Reshape to (N, K) where each row is a choice set
+    N = logits.shape[0] // K
+    logits = logits.view(N, K)
+
+    # True choice is always the last column (index K-1)
+    true_logits = logits[:, -1]  # (N,)
+
+    # Log-sum-exp over candidates (dim=1)
+    logZ = torch.logsumexp(logits, dim=1)  # (N,)
+
+    # NLL = -sum(true_logit - logZ) / N
+    return -(true_logits - logZ).mean()
+
+
+def grouped_nll_mlp_vectorized(model, X_t, K):
+    """
+    Vectorized grouped NLL for MLP model.
+
+    Assumes data is structured as N groups of K candidates each, where the
+    last candidate in each group (index K-1) is the true choice.
+
+    Args:
+        model: MLP model that outputs scores
+        X_t: Feature matrix of shape (N * K, C)
+        K: Number of candidates per group (e.g., 101)
+
+    Returns:
+        Mean NLL across groups
+    """
+    # Compute all scores at once: (N * K,)
+    scores = model(X_t)
+
+    # Reshape to (N, K) where each row is a choice set
+    N = scores.shape[0] // K
+    logits = scores.view(N, K)
+
+    # True choice is always the last column (index K-1)
+    true_logits = logits[:, -1]  # (N,)
+
+    # Log-sum-exp over candidates (dim=1)
+    logZ = torch.logsumexp(logits, dim=1)  # (N,)
+
+    # NLL = -sum(true_logit - logZ) / N
+    return -(true_logits - logZ).mean()
