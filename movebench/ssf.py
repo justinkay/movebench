@@ -761,13 +761,15 @@ MOVEMENT_FEATURES = ["sl_", "log_sl_", "cos_ta_"]
 TIME_FEATURES = ["sin_doy", "cos_doy", "sin_tod", "cos_tod"]
 
 
-def get_issf_channel_info(n_env_channels=None, include_time=False):
+def get_issf_channel_info(n_env_channels=None, include_time=False, include_individual_id=False, n_individuals=0):
     """Return dict with channel ranges for env, movement, interactions, and total.
 
     Args:
         n_env_channels: Number of environmental channels. Defaults to get_total_channels().
         include_time: If True, include cyclical time-of-year and time-of-day features
             and their interactions with env and movement features.
+        include_individual_id: If True, include one-hot encoded individual ID features.
+        n_individuals: Number of individuals (required if include_individual_id=True).
 
     Returns:
         Dict with keys: env, movement, interactions, total, and per-feature details.
@@ -777,13 +779,14 @@ def get_issf_channel_info(n_env_channels=None, include_time=False):
 
     n_move = len(MOVEMENT_FEATURES)
     n_time = len(TIME_FEATURES) if include_time else 0
+    n_indiv = n_individuals if include_individual_id else 0
 
-    # Channel layout: env | movement | time | move×env | time×env | time×move
+    # Channel layout: env | movement | time | individual_id | move×env | time×env | time×move
     n_move_env = n_move * n_env_channels
     n_time_env = n_time * n_env_channels
     n_time_move = n_time * n_move
     n_interact = n_move_env + n_time_env + n_time_move
-    total = n_env_channels + n_move + n_time + n_interact
+    total = n_env_channels + n_move + n_time + n_indiv + n_interact
 
     offset = n_env_channels
     info = {
@@ -802,6 +805,10 @@ def get_issf_channel_info(n_env_channels=None, include_time=False):
         info["cos_tod"] = (offset + 3, offset + 4)
         info["time"] = (offset, offset + n_time)
         offset += n_time
+
+    if include_individual_id:
+        info["individual_id"] = (offset, offset + n_indiv)
+        offset += n_indiv
 
     # move × env interactions
     move_env_start = offset
@@ -822,6 +829,7 @@ def get_issf_channel_info(n_env_channels=None, include_time=False):
     info["n_env"] = n_env_channels
     info["n_movement"] = n_move
     info["n_time"] = n_time
+    info["n_individual_id"] = n_indiv
     info["n_interactions"] = n_interact
 
     return info
@@ -849,8 +857,9 @@ class iSSFDataset(SSFDataset):
     """
 
     def __init__(self, *args, normalize_movement: bool = True, include_time: bool = False,
-                 movement_stats: dict = None, **kwargs):
+                 include_individual_id: bool = False, movement_stats: dict = None, **kwargs):
         self.include_time = include_time
+        self.include_individual_id = include_individual_id
         super().__init__(*args, **kwargs)
         self.normalize_movement = normalize_movement
         if normalize_movement:
@@ -860,6 +869,15 @@ class iSSFDataset(SSFDataset):
                 self._movement_stats = self._compute_movement_stats()
         else:
             self._movement_stats = None
+
+        # Build individual-to-index mapping for one-hot encoding
+        if include_individual_id:
+            unique_individuals = self.df[INDIVIDUAL_COL].unique()
+            self._individual_to_idx = {ind: i for i, ind in enumerate(sorted(unique_individuals))}
+            self._n_individuals = len(unique_individuals)
+        else:
+            self._individual_to_idx = {}
+            self._n_individuals = 0
 
     def _compute_movement_stats(self) -> dict:
         """Compute mean/std for sl_, log_sl_, cos_ta_ from this dataset's DataFrame."""
@@ -911,6 +929,26 @@ class iSSFDataset(SSFDataset):
 
         feats = torch.tensor([sin_doy, cos_doy, sin_tod, cos_tod], dtype=torch.float32)
         return feats.unsqueeze(1).expand(4, N)
+
+    def _compute_individual_id_features(self, idx: int) -> torch.Tensor:
+        """Compute one-hot encoded individual ID features for a sample.
+
+        Features are constant across all candidate points since they depend
+        only on the individual that made this step.
+
+        Args:
+            idx: Dataset index
+
+        Returns:
+            Tensor of shape (n_individuals, N) with one-hot encoding
+        """
+        orig_idx = int(self.sample_indices[idx])
+        individual = self.df.loc[orig_idx, INDIVIDUAL_COL]
+        N = self.num_candidates + 1
+        indiv_idx = self._individual_to_idx[individual]
+        one_hot = torch.zeros(self._n_individuals, dtype=torch.float32)
+        one_hot[indiv_idx] = 1.0
+        return one_hot.unsqueeze(1).expand(-1, N)
 
     def _precompute_all_samples(self) -> dict:
         """Pre-sample from fitted gamma (step) and von Mises (turn) distributions."""
@@ -1068,6 +1106,16 @@ class iSSFDataset(SSFDataset):
         interactions = features_a.unsqueeze(1) * features_b.unsqueeze(0)
         return interactions.reshape(K * M, N)
 
+    @property
+    def individual_mapping(self) -> dict:
+        """Return a copy of the individual-to-index mapping."""
+        return self._individual_to_idx.copy()
+
+    @property
+    def n_individuals(self) -> int:
+        """Return the number of unique individuals in the dataset."""
+        return self._n_individuals
+
     def __getitem__(self, idx) -> tuple:
         """
         Load and process all layers for a single sample, including movement
@@ -1104,30 +1152,53 @@ class iSSFDataset(SSFDataset):
         move_env_inter = self._compute_interactions(move_feats, env_pixels)
         move_env_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * n_env, N)
 
+        # Optional time features
         if self.include_time:
-            # Time features (4, N) — constant across candidates
             time_feats = self._compute_time_features(idx)
             time_valid = torch.ones(4, N, dtype=torch.bool)
+        else:
+            time_feats = None
+            time_valid = None
 
+        # Optional individual ID features
+        if self.include_individual_id:
+            indiv_feats = self._compute_individual_id_features(idx)
+            indiv_valid = torch.ones(self._n_individuals, N, dtype=torch.bool)
+        else:
+            indiv_feats = None
+            indiv_valid = None
+
+        # Build feature list: env | movement | time | individual_id | interactions
+        feat_parts = [env_pixels, move_feats]
+        valid_parts = [env_valid, move_valid]
+
+        if self.include_time:
+            feat_parts.append(time_feats)
+            valid_parts.append(time_valid)
+
+        if self.include_individual_id:
+            feat_parts.append(indiv_feats)
+            valid_parts.append(indiv_valid)
+
+        # move × env interactions
+        feat_parts.append(move_env_inter)
+        valid_parts.append(move_env_valid)
+
+        if self.include_time:
             # time × env interactions (4 * n_env, N)
             time_env_inter = self._compute_interactions(time_feats, env_pixels)
             time_env_valid = env_valid.unsqueeze(0).expand(4, -1, -1).reshape(4 * n_env, N)
+            feat_parts.append(time_env_inter)
+            valid_parts.append(time_env_valid)
 
             # time × move interactions (4 * 3, N)
             time_move_inter = self._compute_interactions(time_feats, move_feats)
             time_move_valid = torch.ones(4 * 3, N, dtype=torch.bool)
+            feat_parts.append(time_move_inter)
+            valid_parts.append(time_move_valid)
 
-            step_pixels = torch.cat([
-                env_pixels, move_feats, time_feats,
-                move_env_inter, time_env_inter, time_move_inter,
-            ], dim=0)
-            valid_pixels = torch.cat([
-                env_valid, move_valid, time_valid,
-                move_env_valid, time_env_valid, time_move_valid,
-            ], dim=0)
-        else:
-            step_pixels = torch.cat([env_pixels, move_feats, move_env_inter], dim=0)
-            valid_pixels = torch.cat([env_valid, move_valid, move_env_valid], dim=0)
+        step_pixels = torch.cat(feat_parts, dim=0)
+        valid_pixels = torch.cat(valid_parts, dim=0)
 
         return step_pixels, valid_pixels, {}, TARGET_CRS
 

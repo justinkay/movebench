@@ -305,7 +305,7 @@ class Study:
             **kwargs
         )
 
-    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, include_time: bool = False, n_workers: int = 1, **kwargs):
+    def issf_dataset(self, split: str = "train", auto_normalize: bool = True, force_normalize: bool = False, include_time: bool = False, include_individual_id: bool = False, n_workers: int = 1, **kwargs):
         """
         Create iSSFDataset for this study.
 
@@ -315,6 +315,8 @@ class Study:
             force_normalize: If True, recompute normalization statistics.
             include_time: If True, include cyclical time-of-year and time-of-day
                 features and their interactions.
+            include_individual_id: If True, include one-hot encoded individual ID
+                features (length N_individuals).
             n_workers: Number of parallel workers for feature extraction (default 1)
             **kwargs: Additional arguments passed to iSSFDataset
 
@@ -334,6 +336,7 @@ class Study:
             split=split,
             study_dir=self._study_dir,
             include_time=include_time,
+            include_individual_id=include_individual_id,
             n_workers=n_workers,
             **kwargs
         )
