@@ -3,11 +3,6 @@
 Manifests make on-disk feature stores self-describing and reproducible. They
 record the layer/channel mapping (via an embedded `LayerPlan`) and the sampling
 procedure used to generate candidate points.
-
-Policies are intentionally fixed in code rather than configurable:
-- Scale factors are applied at read/extraction time (never during download).
-- `valid_range` is enforced by masking out-of-range values in the valid mask.
-- Categorical layers are stored as one-hot channels.
 """
 
 from __future__ import annotations
