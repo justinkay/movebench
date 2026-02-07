@@ -1,0 +1,44 @@
+layers:
+  - modis_lst
+  - modis_vi
+  - modis_ndsi
+  - modis_bai
+  - era5_land
+  - era5
+  - era5_land_daily
+  - dem
+  - slope
+  - aspect
+  - rugosity
+  - dist_water
+  - orographic_uplift
+  - thermal_uplift
+  - modis_lc
+  - modis_cvf_tree
+  - modis_cvf_nontree
+  - modis_cvf_nonveg
+  - hii
+  - bioclim
+  - dynamic_world
+  - landsat_ndwi
+
+chip_groups:
+  era5:
+    layers:
+      - era5_land
+      - era5
+      - era5_land_daily
+    target_scale_m: 11132.0
+  modis:
+    layers:
+      - modis_lst
+      - modis_vi
+      - modis_ndsi
+      - modis_bai
+    target_scale_m: 250.0
+  high_res:
+    layers:
+      - dynamic_world
+      - landsat_ndwi
+    target_scale_m: 30.0
+

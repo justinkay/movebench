@@ -1,3 +1,9 @@
+"""Built-in layer registry for movebench2.
+
+This is the canonical set of layer specs keyed by stable layer names.
+Layer configs (YAML) refer to these keys; band lists live here in the registry.
+"""
+
 from __future__ import annotations
 
 from movebench2.layers.config import LayersConfig, config_hash

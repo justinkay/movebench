@@ -1,3 +1,5 @@
+"""YAML config loading."""
+
 from __future__ import annotations
 
 import hashlib
@@ -67,6 +69,9 @@ def load_layers_config(path: str | Path) -> LayersConfig:
     if not p.exists():
         raise FileNotFoundError(str(p))
 
+    with open(p, "r") as f:
+        data_text = f.read()
+
     try:
         import yaml  # type: ignore
     except ModuleNotFoundError as e:
@@ -74,8 +79,8 @@ def load_layers_config(path: str | Path) -> LayersConfig:
             "PyYAML is required to load YAML configs. Install with: pip install PyYAML"
         ) from e
 
-    with open(p, "r") as f:
-        data = yaml.safe_load(f)
+    data = yaml.safe_load(data_text)
+
     if not isinstance(data, dict):
         raise ValueError(f"Expected YAML mapping at top-level in {p}")
     return parse_layers_config(data)
