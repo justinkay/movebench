@@ -30,6 +30,14 @@ class LayerSpec:
     source: LayerSource
     bands: list[str]
 
+    # Data access metadata. These are populated for built-in layers but are not
+    # required for all registries (e.g., tests).
+    gee_collection: str = ""
+    temporal: str = ""
+    path_pattern: str = ""
+    hdf_path_suffix: str = ""
+    year_bounds: tuple[int, int] | None = None
+
     categorical: bool = False
     num_classes: int = 0
     normalize: bool = True
@@ -45,23 +53,31 @@ LAYERS: dict[str, LayerSpec] = {
         name="modis_lst",
         source="gee_chip",
         bands=["LST_Day_1km", "LST_Night_1km"],
+        gee_collection="MODIS/061/MOD11A2",
+        temporal="8day",
         scale_factor=0.02,
     ),
     "modis_vi": LayerSpec(
         name="modis_vi",
         source="gee_chip",
         bands=["NDVI", "EVI"],
+        gee_collection="MODIS/061/MOD13Q1",
+        temporal="16day",
         scale_factor=0.0001,
     ),
     "modis_ndsi": LayerSpec(
         name="modis_ndsi",
         source="gee_chip",
         bands=["NDSI"],
+        gee_collection="MODIS/MCD43A4_006_NDSI",
+        temporal="daily",
     ),
     "modis_bai": LayerSpec(
         name="modis_bai",
         source="gee_chip",
         bands=["BAI"],
+        gee_collection="MODIS/MCD43A4_006_BAI",
+        temporal="daily",
     ),
     "era5_land": LayerSpec(
         name="era5_land",
@@ -81,11 +97,15 @@ LAYERS: dict[str, LayerSpec] = {
             "surface_sensible_heat_flux",
             "snow_depth",
         ],
+        gee_collection="ECMWF/ERA5_LAND/HOURLY",
+        temporal="hourly",
     ),
     "era5": LayerSpec(
         name="era5",
         source="gee_chip",
         bands=["boundary_layer_height", "total_cloud_cover", "mean_sea_level_pressure"],
+        gee_collection="ECMWF/ERA5/HOURLY",
+        temporal="hourly",
     ),
     "era5_land_daily": LayerSpec(
         name="era5_land_daily",
@@ -105,51 +125,66 @@ LAYERS: dict[str, LayerSpec] = {
             "surface_sensible_heat_flux_sum",
             "snow_depth",
         ],
+        gee_collection="ECMWF/ERA5_LAND/DAILY_AGGR",
+        temporal="daily",
     ),
     "dem": LayerSpec(
         name="dem",
         source="gee_tile",
         bands=["elevation"],
+        gee_collection="COPERNICUS/DEM/GLO30",
+        temporal="static",
     ),
     "dist_water": LayerSpec(
         name="dist_water",
         source="gee_tile",
         bands=["dist_water"],
+        gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
+        temporal="static",
     ),
     "slope": LayerSpec(
         name="slope",
         source="derived",
         bands=["slope"],
+        temporal="static",
         derived_from=["dem"],
     ),
     "aspect": LayerSpec(
         name="aspect",
         source="derived",
         bands=["aspect_sin", "aspect_cos"],
+        temporal="static",
         derived_from=["dem"],
     ),
     "rugosity": LayerSpec(
         name="rugosity",
         source="derived",
         bands=["tri"],
+        temporal="static",
         derived_from=["dem"],
     ),
     "orographic_uplift": LayerSpec(
         name="orographic_uplift",
         source="derived",
         bands=["orographic_uplift"],
+        temporal="hourly",
         derived_from=["slope", "aspect", "era5_land"],
     ),
     "thermal_uplift": LayerSpec(
         name="thermal_uplift",
         source="derived",
         bands=["thermal_uplift"],
+        temporal="hourly",
         derived_from=["era5_land", "era5"],
     ),
     "modis_lc": LayerSpec(
         name="modis_lc",
         source="local_hdf",
         bands=["LC_Type1"],
+        temporal="annual",
+        path_pattern="{modis_lc}/MCD12Q1.A{year}001.h{h:02d}v{v:02d}.061.*.hdf",
+        hdf_path_suffix=":MCD12Q1:LC_Type1",
+        year_bounds=(2015, 2025),
         categorical=True,
         num_classes=18,
         normalize=False,
@@ -158,29 +193,46 @@ LAYERS: dict[str, LayerSpec] = {
         name="modis_cvf_tree",
         source="local_hdf",
         bands=["Percent_Tree_Cover"],
+        temporal="annual",
+        path_pattern="{modis_cvf}/MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf",
+        hdf_path_suffix=":MOD44B_250m_GRID:Percent_Tree_Cover",
+        year_bounds=(2015, 2025),
         valid_range=(0.0, 100.0),
     ),
     "modis_cvf_nontree": LayerSpec(
         name="modis_cvf_nontree",
         source="local_hdf",
         bands=["Percent_NonTree_Vegetation"],
+        temporal="annual",
+        path_pattern="{modis_cvf}/MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf",
+        hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonTree_Vegetation",
+        year_bounds=(2015, 2025),
         valid_range=(0.0, 100.0),
     ),
     "modis_cvf_nonveg": LayerSpec(
         name="modis_cvf_nonveg",
         source="local_hdf",
         bands=["Percent_NonVegetated"],
+        temporal="annual",
+        path_pattern="{modis_cvf}/MOD44B.A{year}001.h{h:02d}v{v:02d}.061.*.hdf",
+        hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonVegetated",
+        year_bounds=(2015, 2025),
         valid_range=(0.0, 100.0),
     ),
     "hii": LayerSpec(
         name="hii",
         source="local_tiff",
         bands=["hii"],
+        temporal="annual",
+        path_pattern="{hii}/hii_{year}-01-01.tif",
+        year_bounds=(2015, 2020),
     ),
     "bioclim": LayerSpec(
         name="bioclim",
         source="local_tiff",
         bands=[f"bio_{i}" for i in range(1, 20)],
+        temporal="static",
+        path_pattern="{bioclim}/wc2.1_30s_bio_{band_num}.tif",
     ),
     "dynamic_world": LayerSpec(
         name="dynamic_world",
@@ -196,12 +248,17 @@ LAYERS: dict[str, LayerSpec] = {
             "bare",
             "snow_and_ice",
         ],
+        gee_collection="GOOGLE/DYNAMICWORLD/V1",
+        temporal="daily",
+        year_bounds=(2015, 2025),
         normalize=False,
     ),
     "landsat_ndwi": LayerSpec(
         name="landsat_ndwi",
         source="gee_chip",
         bands=["NDWI"],
+        gee_collection="LANDSAT/COMPOSITES/C02/T1_L2_32DAY_NDWI",
+        temporal="32day",
     ),
 }
 
