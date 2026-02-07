@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import yaml
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,7 +15,7 @@ def data_root() -> Path:
     env = os.environ.get("MOVEBENCH2_DATA_ROOT")
     if env:
         return Path(env)
-    return repo_root() / "data" / "movebench2"
+    return "/archive/vision/beery/movebench/" # repo_root() / "data" / "movebench2"
 
 
 def studies_root() -> Path:
@@ -40,8 +41,6 @@ def paths_config() -> dict[str, str]:
             f"paths config not found: {p}. Set MOVEBENCH2_PATHS_CONFIG to override."
         )
     
-    import yaml
-
     with open(p, "r") as f:
         data = yaml.safe_load(f.read())
 
