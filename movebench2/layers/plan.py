@@ -38,7 +38,6 @@ class Channel:
 class LayerPlan:
     """Resolved channel layout for a layers config."""
 
-    config_path: str | None
     config_hash: str
 
     # Ordered list of layer names included in the output tensor.
@@ -127,7 +126,6 @@ class LayerPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "config_path": self.config_path,
             "config_hash": self.config_hash,
             "layers_in_order": list(self.layers_in_order),
             "channels": [
@@ -166,7 +164,6 @@ class LayerPlan:
             chip_groups[name] = {"layers": list(cgd["layers"]), "target_scale_m": float(cgd["target_scale_m"])}
 
         return cls(
-            config_path=d.get("config_path"),
             config_hash=d["config_hash"],
             layers_in_order=list(d["layers_in_order"]),
             channels=channels,

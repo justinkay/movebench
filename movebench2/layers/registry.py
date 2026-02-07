@@ -221,7 +221,7 @@ class LayerRegistry:
         except KeyError as e:
             raise KeyError(f"Unknown layer: {name!r}") from e
 
-    def resolve(self, cfg: LayersConfig, *, config_path: str | None = None) -> LayerPlan:
+    def resolve(self, cfg: LayersConfig) -> LayerPlan:
         """Resolve a layers config into a concrete LayerPlan."""
         if len(cfg.layers) != len(set(cfg.layers)):
             dupes = [x for x in cfg.layers if cfg.layers.count(x) > 1]
@@ -237,7 +237,6 @@ class LayerRegistry:
         channels = self._build_channels(cfg.layers)
 
         return LayerPlan(
-            config_path=config_path,
             config_hash=config_hash(cfg),
             layers_in_order=list(cfg.layers),
             channels=channels,
