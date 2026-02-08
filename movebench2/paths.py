@@ -36,16 +36,8 @@ def paths_config_path() -> Path:
 @lru_cache(maxsize=1)
 def paths_config() -> dict[str, str]:
     p = paths_config_path()
-    if not p.exists():
-        raise FileNotFoundError(
-            f"paths config not found: {p}. Set MOVEBENCH2_PATHS_CONFIG to override."
-        )
-    
     with open(p, "r") as f:
         data = yaml.safe_load(f.read())
-
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected YAML mapping at top-level in {p}")
 
     cfg: dict[str, str] = {}
     for k, v in data.items():

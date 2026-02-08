@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,16 +71,7 @@ def load_layers_config(path: str | Path) -> LayersConfig:
         raise FileNotFoundError(str(p))
 
     with open(p, "r") as f:
-        data_text = f.read()
-
-    try:
-        import yaml  # type: ignore
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError(
-            "PyYAML is required to load YAML configs. Install with: pip install PyYAML"
-        ) from e
-
-    data = yaml.safe_load(data_text)
+        data = yaml.safe_load(f.read())
 
     if not isinstance(data, dict):
         raise ValueError(f"Expected YAML mapping at top-level in {p}")
