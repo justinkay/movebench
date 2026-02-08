@@ -159,3 +159,28 @@ class Study:
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
+
+    def compute_normalization_vals(
+        self,
+        *,
+        from_: str = "points",
+        config: str | Path = "configs/layers_all.yaml",
+        sampler_hash: str | None = None,
+        split: str = "train",
+        skip_existing: bool = True,
+    ) -> dict:
+        """Compute and cache normalization statistics for environmental features."""
+        if from_ != "points":
+            raise NotImplementedError(f"Unsupported from_={from_!r}. Only 'points' is implemented.")
+
+        plan = self.layer_plan(config)
+
+        from movebench2.features.normalization import compute_points_normalization_stats
+
+        return compute_points_normalization_stats(
+            study_dir=self.study_dir,
+            plan=plan,
+            sampler_hash=sampler_hash,
+            split=split,
+            skip_existing=skip_existing,
+        )
