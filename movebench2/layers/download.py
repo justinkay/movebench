@@ -2,8 +2,8 @@
 
 This module writes rasters to the on-disk layout expected by `movebench2.layers.io.LayerIO`:
 
-- Chips (per-point): `study_dir/rasters/<config_hash>/chips/<chip_group>/<point_id:05d>.tif`
-- Tiles (per-study): `study_dir/rasters/<config_hash>/tiles/<layer>/tile_XXX.tif` + `index.json`
+- Chips (per-point): `study_dir/rasters/<rasters_hash>/chips/<chip_group>/<point_id:05d>.tif`
+- Tiles (per-study): `study_dir/rasters/<rasters_hash>/tiles/<layer>/tile_XXX.tif` + `index.json`
 
 All masked pixels are materialized as the numeric sentinel `-9999` in GeoTIFFs.
 `LayerIO` converts this sentinel to NaN immediately after reading.
@@ -383,16 +383,16 @@ def _tile_image(layer: str, *, registry: LayerRegistry):
     raise ValueError(f"Unsupported gee_tile layer {layer!r}")
 
 
-def _rasters_root(study_dir: Path, config_hash: str) -> Path:
-    return Path(study_dir) / "rasters" / str(config_hash)
+def _rasters_root(study_dir: Path, rasters_hash: str) -> Path:
+    return Path(study_dir) / "rasters" / str(rasters_hash)
 
 
-def _chip_path(study_dir: Path, config_hash: str, chip_group: str, point_id: int) -> Path:
-    return _rasters_root(study_dir, config_hash) / "chips" / chip_group / f"{int(point_id):05d}.tif"
+def _chip_path(study_dir: Path, rasters_hash: str, chip_group: str, point_id: int) -> Path:
+    return _rasters_root(study_dir, rasters_hash) / "chips" / chip_group / f"{int(point_id):05d}.tif"
 
 
-def _tile_dir(study_dir: Path, config_hash: str, layer: str) -> Path:
-    return _rasters_root(study_dir, config_hash) / "tiles" / layer
+def _tile_dir(study_dir: Path, rasters_hash: str, layer: str) -> Path:
+    return _rasters_root(study_dir, rasters_hash) / "tiles" / layer
 
 
 def _expected_band_count_for_chip_group(plan: LayerPlan, chip_group: str, registry: LayerRegistry) -> int:
@@ -425,7 +425,6 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     idx, req, ctx = args
 
     study_dir = Path(ctx["study_dir"])
-    config_hash = str(ctx["config_hash"])
     buffer_km = float(ctx["buffer_km"])
     skip_existing = bool(ctx["skip_existing"])
     plan: LayerPlan = ctx["plan"]
@@ -437,7 +436,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     all_exist = True
     if skip_existing:
         for group_name in plan.chip_groups.keys():
-            out_path = _chip_path(study_dir, config_hash, group_name, req.point_id)
+            out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
             expected = _expected_band_count_for_chip_group(plan, group_name, registry)
             if not (out_path.exists() and _chip_is_current(out_path, expected)):
                 all_exist = False
@@ -447,7 +446,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
 
     if all_exist:
         for group_name in plan.chip_groups.keys():
-            out_path = _chip_path(study_dir, config_hash, group_name, req.point_id)
+            out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
             results["files"][group_name] = {"path": str(out_path), "status": "existing"}
         return results
 
@@ -457,7 +456,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     region = square_region_for_point(req.lon, req.lat, region_mult * buffer_km)
 
     for group_name, group in plan.chip_groups.items():
-        out_path = _chip_path(study_dir, config_hash, group_name, req.point_id)
+        out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
         expected = _expected_band_count_for_chip_group(plan, group_name, registry)
         if skip_existing and out_path.exists() and _chip_is_current(out_path, expected):
             results["files"][group_name] = {"path": str(out_path), "status": "existing"}
@@ -528,11 +527,10 @@ def download_chips(
 
     # Ensure output dirs exist up front (avoids races on first write).
     for group_name in plan.chip_groups.keys():
-        (_rasters_root(study_dir, plan.config_hash) / "chips" / group_name).mkdir(parents=True, exist_ok=True)
+        (_rasters_root(study_dir, plan.rasters_hash) / "chips" / group_name).mkdir(parents=True, exist_ok=True)
 
     ctx = {
         "study_dir": str(study_dir),
-        "config_hash": plan.config_hash,
         "buffer_km": float(buffer_km),
         "skip_existing": bool(skip_existing),
         "plan": plan,
@@ -625,7 +623,7 @@ def download_tile_layer(
     if spec.native_scale_m is None:
         raise ValueError(f"gee_tile layer {layer!r} missing spec.native_scale_m")
 
-    tile_dir = _tile_dir(study_dir, plan.config_hash, layer)
+    tile_dir = _tile_dir(study_dir, plan.rasters_hash, layer)
     index_path = tile_dir / "index.json"
 
     if skip_existing and index_path.exists():
@@ -733,4 +731,3 @@ def download_tiles(
             skip_existing=skip_existing,
         )
     return out
-

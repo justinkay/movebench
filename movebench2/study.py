@@ -68,7 +68,7 @@ class Study:
     ) -> dict:
         """Download all required GEE rasters for a layers config into this study directory.
 
-        Writes rasters to `study_dir/rasters/<config_hash>/...` as expected by `LayerIO`.
+        Writes rasters to `study_dir/rasters/<rasters_hash>/...` as expected by `LayerIO`.
         """
         plan = self.layer_plan(config)
 
@@ -108,7 +108,13 @@ class Study:
             skip_existing=skip_existing,
         )
 
-        return {"config_hash": plan.config_hash, "buffer_km": buffer_km, "chips": chip_stats, "tiles": tile_stats}
+        return {
+            "config_hash": plan.config_hash,
+            "rasters_hash": plan.rasters_hash,
+            "buffer_km": buffer_km,
+            "chips": chip_stats,
+            "tiles": tile_stats,
+        }
 
     def extract_point_features(
         self,

@@ -106,7 +106,7 @@ class LayerIO:
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
 
     def _rasters_root(self) -> Path:
-        return self.study_dir / "rasters" / self.plan.config_hash
+        return self.study_dir / "rasters" / self.plan.rasters_hash
 
     def _chip_path(self, chip_group: str, point_id: int) -> Path:
         return self._rasters_root() / "chips" / chip_group / f"{int(point_id):05d}.tif"

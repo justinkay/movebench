@@ -25,7 +25,7 @@ from pyproj import Transformer
 
 from movebench2.features.manifest import PointFeatureManifest, utc_now_iso, write_manifest
 from movebench2.layers.plan import LayerPlan
-from movebench2.layers.registry import LayerRegistry, REGISTRY
+from movebench2.layers.registry import REGISTRY
 from movebench2.rasters import Raster
 from movebench2.trajectories import (
     LAT_COL,
@@ -37,7 +37,9 @@ from movebench2.trajectories import (
 )
 
 
-TARGET_CRS = "EPSG:3857"
+TARGET_CRS = "EPSG:3857" # meters
+_T_4326_TO_TARGET = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+_T_TARGET_TO_4326 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True) # lat/lon
 
 
 def _stable_hash_dict(d: dict[str, Any]) -> str:
@@ -297,11 +299,8 @@ def _compute_candidates(
 ) -> _CandidateSet:
     pseudo_lens, pseudo_turns = _sample_pseudo_steps(sampler_state, req.point_id_start)
 
-    t_fwd = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
-    t_inv = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
-
-    x0, y0 = t_fwd.transform(float(req.start_lon), float(req.start_lat))
-    x1, y1 = t_fwd.transform(float(req.end_lon), float(req.end_lat))
+    x0, y0 = _T_4326_TO_TARGET.transform(float(req.start_lon), float(req.start_lat))
+    x1, y1 = _T_4326_TO_TARGET.transform(float(req.end_lon), float(req.end_lat))
 
     headings = float(req.start_bearing) + pseudo_turns
     headings = (headings + np.pi) % (2.0 * np.pi) - np.pi
@@ -324,7 +323,7 @@ def _compute_candidates(
     step_lengths = np.append(pseudo_lens, true_sl)
     turn_angles = np.append(pseudo_turns, true_ta)
 
-    lons, lats = t_inv.transform(xs, ys)
+    lons, lats = _T_TARGET_TO_4326.transform(xs, ys)
     lons = np.asarray(lons, dtype=np.float64)
     lats = np.asarray(lats, dtype=np.float64)
 
@@ -361,7 +360,6 @@ def _extract_one_step(
     layer_slices: dict[str, tuple[int, int]],
     sampler_state: dict[str, Any],
     bounds_buffer_deg: float,
-    registry: LayerRegistry,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     cand = _compute_candidates(req, sampler_state=sampler_state, bounds_buffer_deg=bounds_buffer_deg)
     P = int(len(cand.lons))
@@ -377,7 +375,7 @@ def _extract_one_step(
         if cached is not None:
             return cached
 
-        spec = registry.get(layer)
+        spec = REGISTRY.get(layer)
         if spec.source == "derived":
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
@@ -400,21 +398,14 @@ def _extract_one_step(
             cache[layer] = r
             return r
 
-        if spec.source == "gee_chip":
-            r = io.load_layer(layer, point_id=req.point_id_start)
-        elif spec.source == "gee_tile":
-            r = io.load_layer(layer, bounds_latlon=cand.bounds_4326)
-        elif spec.source in ("local_hdf", "local_tiff"):
-            r = io.load_layer(layer, bounds_latlon=cand.bounds_4326, timestamp=req.timestamp)
-        else:
-            raise ValueError(f"Unsupported layer source {spec.source!r} for layer {layer!r}")
+        r = io.load_layer(layer, point_id=req.point_id_start, bounds_latlon=cand.bounds_4326, timestamp=req.timestamp)
 
         cache[layer] = r
         return r
 
     for layer in plan.layers_in_order:
         start, end = layer_slices[layer]
-        spec = registry.get(layer)
+        spec = REGISTRY.get(layer)
 
         bilinear = (not spec.categorical) and (layer not in {"dynamic_world", "landsat_ndwi"})
 
@@ -457,11 +448,10 @@ _W_PLAN = None
 _W_LAYER_SLICES = None
 _W_SAMPLER_STATE = None
 _W_BOUNDS_BUFFER_DEG = None
-_W_REGISTRY = None
 
 
 def _worker_init(ctx: dict[str, Any]) -> None:
-    global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE, _W_BOUNDS_BUFFER_DEG, _W_REGISTRY
+    global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE, _W_BOUNDS_BUFFER_DEG
 
     from movebench2.layers.io import LayerIO
 
@@ -469,7 +459,6 @@ def _worker_init(ctx: dict[str, Any]) -> None:
     _W_LAYER_SLICES = {k: tuple(v) for k, v in ctx["layer_slices"].items()}
     _W_SAMPLER_STATE = ctx["sampler_state"]
     _W_BOUNDS_BUFFER_DEG = float(ctx["bounds_buffer_deg"])
-    _W_REGISTRY = REGISTRY
     _W_IO = LayerIO(study_dir=Path(ctx["study_dir"]), plan=_W_PLAN)
 
 
@@ -482,7 +471,6 @@ def _worker_run(args: tuple[int, _StepRequest]) -> tuple[int, np.ndarray, np.nda
         layer_slices=_W_LAYER_SLICES,
         sampler_state=_W_SAMPLER_STATE,
         bounds_buffer_deg=_W_BOUNDS_BUFFER_DEG,
-        registry=_W_REGISTRY,
     )
     return (idx,) + out
 
@@ -499,12 +487,9 @@ def extract_split_feature_store(
     sampler_state: dict[str, Any],
     sampler_hash: str,
     num_candidates: int,
-    parametric: bool,
-    random_seed: int,
     bounds_buffer_deg: float,
     n_workers: int,
     skip_existing: bool,
-    registry: LayerRegistry = REGISTRY,
 ) -> dict[str, Any]:
     """Extract one split into a point feature store on disk."""
     out_dir = (
@@ -556,7 +541,7 @@ def extract_split_feature_store(
     if n_workers <= 1:
         from movebench2.layers.io import LayerIO
 
-        io = LayerIO(study_dir=Path(study_dir), plan=plan, registry=registry)
+        io = LayerIO(study_dir=Path(study_dir), plan=plan)
         for i, req in enumerate(reqs):
             e, v, sl, ta, pid, tsn = _extract_one_step(
                 req,
@@ -565,7 +550,6 @@ def extract_split_feature_store(
                 layer_slices=layer_slices,
                 sampler_state=sampler_state,
                 bounds_buffer_deg=bounds_buffer_deg,
-                registry=registry,
             )
             env[i] = torch.from_numpy(e)
             valid[i] = torch.from_numpy(v)
@@ -655,13 +639,9 @@ def extract_point_feature_stores(
     step_q: float,
     gap_q: float,
     bounds_buffer_deg: float,
-    registry: LayerRegistry = REGISTRY,
 ) -> dict[str, Any]:
     """Extract point feature stores for one study."""
     df = pd.read_csv(Path(trajectories_path))
-    if TIME_COL in df.columns:
-        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
-        df = df.dropna(subset=[TIME_COL])
 
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
@@ -695,12 +675,9 @@ def extract_point_feature_stores(
             sampler_state=sampler_state,
             sampler_hash=sampler_hash,
             num_candidates=num_candidates,
-            parametric=parametric,
-            random_seed=random_seed,
             bounds_buffer_deg=bounds_buffer_deg,
             n_workers=n_workers,
             skip_existing=skip_existing,
-            registry=registry,
         )
 
     return {"study_id": str(study_id), "config_hash": plan.config_hash, "sampler_hash": sampler_hash, "splits": results}

@@ -15,23 +15,37 @@ class LayersConfig:
     layers: list[str]
     chip_groups: dict[str, dict[str, Any]]
 
+def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
+    return {
+        name: {
+            "layers": list(g["layers"]),
+            "target_scale_m": float(g["target_scale_m"]),
+        }
+        for name, g in sorted(cfg.chip_groups.items(), key=lambda kv: kv[0])
+    }
 
 def _canonical_dict(cfg: LayersConfig) -> dict[str, Any]:
     return {
         "layers": list(cfg.layers),
-        "chip_groups": {
-            name: {
-                "layers": list(g["layers"]),
-                "target_scale_m": float(g["target_scale_m"]),
-            }
-            for name, g in sorted(cfg.chip_groups.items(), key=lambda kv: kv[0])
-        },
+        "chip_groups": _canonical_chip_groups(cfg),
     }
 
 
 def config_hash(cfg: LayersConfig) -> str:
     """Stable hash for a layers config."""
     payload = json.dumps(_canonical_dict(cfg), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+def rasters_hash(cfg: LayersConfig) -> str:
+    """Stable hash for the on-disk rasters cache.
+
+    This is intentionally computed from only the config fields that affect
+    transferability of downloaded rasters across layer configs (e.g. between a
+    superset config and a strict subset config).
+    """
+    payload = json.dumps({"chip_groups": _canonical_chip_groups(cfg)}, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
