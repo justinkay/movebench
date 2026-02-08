@@ -109,3 +109,47 @@ class Study:
         )
 
         return {"config_hash": plan.config_hash, "buffer_km": buffer_km, "chips": chip_stats, "tiles": tile_stats}
+
+    def extract_point_features(
+        self,
+        *,
+        config: str | Path = "configs/layers_all.yaml",
+        splits: list[str] | None = None,
+        parametric: bool = False,
+        num_candidates: int = 100,
+        random_seed: int = 0,
+        n_workers: int = 16,
+        skip_existing: bool = True,
+        step_multiplier: float = 2.0,
+        step_q: float = 0.95,
+        gap_q: float = 0.999,
+        bounds_buffer_deg: float = 0.01,
+    ) -> dict:
+        """Extract SSF / iSSF point feature stores for a layers config.
+
+        Writes to:
+          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/features.pt`
+          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/manifest.json`
+        """
+        plan = self.layer_plan(config)
+
+        # Imported lazily: heavy deps (numpy/pandas/torch/scipy).
+        from movebench2.features.points import extract_point_feature_stores
+
+        return extract_point_feature_stores(
+            study_id=self.study_id,
+            study_dir=self.study_dir,
+            trajectories_path=self.trajectories_path,
+            plan=plan,
+            config_path=str(config),
+            splits=splits,
+            parametric=parametric,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            n_workers=n_workers,
+            skip_existing=skip_existing,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        )
