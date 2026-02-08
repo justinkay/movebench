@@ -162,6 +162,10 @@ class LayerIO:
 
         raise ValueError(f"Unknown LayerSource for {layer!r}: {spec.source!r}")
 
+    def load_chip_group(self, chip_group: str, *, point_id: int) -> Raster:
+        """Load the full stacked GeoTIFF for a chip group (all layers/bands in that group)."""
+        return self._load_gee_chip_group(chip_group, int(point_id))
+
     def _chip_group_for_layer(self, layer: str) -> str:
         group = self.plan.chip_group_for_layer(layer)
         if group is None:

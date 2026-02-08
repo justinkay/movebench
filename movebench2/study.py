@@ -160,6 +160,28 @@ class Study:
             bounds_buffer_deg=bounds_buffer_deg,
         )
 
+    def chip_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+    ):
+        """Create a ChipDataset for this study.
+
+        Loads full raster stacks around each point, aligned to a metric CRS.
+        """
+        plan = self.layer_plan(config)
+
+        # Imported lazily to avoid torch/rasterio imports when unused.
+        from movebench2.datasets.chips import ChipDataset
+
+        return ChipDataset(
+            study_dir=self.study_dir,
+            trajectories_path=self.trajectories_path,
+            split=split,
+            plan=plan,
+        )
+
     def compute_normalization_vals(
         self,
         *,

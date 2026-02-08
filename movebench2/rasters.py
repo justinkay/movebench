@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from rasterio.enums import Resampling
 from rasterio.merge import merge
-from rasterio.warp import transform_bounds
+from rasterio.warp import calculate_default_transform, reproject, transform_bounds
 from rasterio.windows import from_bounds
 
 
@@ -120,3 +120,56 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
         for ds in datasets:
             ds.close()
 
+
+def reproject_to_meters(layers: list[Raster], dst_crs: str = "EPSG:3857") -> tuple[list[np.ndarray], Any, str]:
+    """Reproject all layers to a metric CRS, aligned to the first layer's bounds.
+
+    This mirrors the legacy behavior in movebench, but works with `Raster` objects.
+    """
+    if not layers:
+        raise ValueError("reproject_to_meters requires at least one Raster")
+
+    ref = layers[0]
+    if ref.crs is None:
+        raise ValueError("Reference raster has no CRS; cannot reproject")
+
+    _, H_ref, W_ref = ref.array.shape
+
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        ref.crs,
+        dst_crs,
+        W_ref,
+        H_ref,
+        *ref.bounds,
+    )
+
+    aligned: list[np.ndarray] = []
+    for layer in layers:
+        if layer.crs is None:
+            raise ValueError("Raster has no CRS; cannot reproject")
+
+        C = int(layer.array.shape[0])
+        src_nodata = layer.nodata
+
+        # Preserve categorical nodata values when possible; otherwise use NaN.
+        if src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+            dst_nodata = src_nodata
+        else:
+            dst_nodata = np.nan
+
+        dst = np.full((C, int(dst_height), int(dst_width)), dst_nodata, dtype=np.float32)
+
+        reproject(
+            source=layer.array,
+            destination=dst,
+            src_transform=layer.transform,
+            src_crs=layer.crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            src_nodata=src_nodata if src_nodata is not None else np.nan,
+            dst_nodata=dst_nodata,
+        )
+        aligned.append(dst)
+
+    return aligned, dst_transform, str(dst_crs)
