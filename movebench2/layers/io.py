@@ -3,12 +3,14 @@ from __future__ import annotations
 import glob
 import json
 import os
+import numpy as np
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from movebench2 import paths
+from movebench2.layers.download import GEE_NODATA_SENTINEL
 from movebench2.layers.plan import LayerPlan
 from movebench2.layers.registry import LayerRegistry, REGISTRY
 from movebench2.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
@@ -184,11 +186,16 @@ class LayerIO:
 
         chip_path = self._chip_path(chip_group, point_id)
         r = read_geotiff(chip_path)
+        
+        # GEE downloads use a numeric sentinel for masked pixels. Convert it to NaN
+        # immediately so downstream valid masking and derived math are correct.
+        arr = r.array.astype(np.float32, copy=False)
+        arr[arr == GEE_NODATA_SENTINEL] = np.nan
         r = Raster(
-            array=r.array,
+            array=arr,
             transform=r.transform,
             crs=r.crs,
-            nodata=r.nodata,
+            nodata=float("nan"),
             bounds=r.bounds,
             band_ids=self._chip_group_band_ids(chip_group),
         )
@@ -261,12 +268,15 @@ class LayerIO:
                 for ds in datasets:
                     ds.close()
 
+        arr = base.array.astype(np.float32, copy=False)
+        arr[arr == GEE_NODATA_SENTINEL] = np.nan
+
         spec = self.registry.get(layer)
         return Raster(
-            array=base.array,
+            array=arr,
             transform=base.transform,
             crs=base.crs,
-            nodata=base.nodata,
+            nodata=float("nan"),
             bounds=base.bounds,
             band_ids=[f"{layer}.{b}" for b in spec.bands],
         )
@@ -288,8 +298,6 @@ class LayerIO:
             for r in rasters[1:]:
                 if r.array.shape[1:] != base.array.shape[1:] or r.transform != base.transform or r.crs != base.crs:
                     raise ValueError(f"Bioclim bands did not align for layer {layer!r}")
-
-            import numpy as np
 
             arr = np.concatenate([r.array for r in rasters], axis=0)
             return Raster(
@@ -405,4 +413,3 @@ class LayerIO:
             bounds=base.bounds,
             band_ids=[f"{layer}.{b}" for b in spec.bands],
         )
-
