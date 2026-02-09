@@ -182,6 +182,77 @@ class Study:
             plan=plan,
         )
 
+    def ssf_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+        normalize: bool = True,
+        num_candidates: int | None = None,
+        random_seed: int | None = None,
+        step_multiplier: float | None = None,
+        step_q: float | None = None,
+        gap_q: float | None = None,
+        bounds_buffer_deg: float | None = None,
+    ):
+        """Create an SSFDataset (empirical sampling) from extracted point features."""
+        plan = self.layer_plan(config)
+
+        from movebench2.datasets.ssf import SSFDataset
+
+        return SSFDataset(
+            study_dir=self.study_dir,
+            plan=plan,
+            split=split,
+            normalize=normalize,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        )
+
+    def issf_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+        normalize: bool = True,
+        normalize_movement: bool = True,
+        include_time: bool = False,
+        include_individual_id: bool = False,
+        movement_stats: dict[str, float] | None = None,
+        num_candidates: int | None = None,
+        random_seed: int | None = None,
+        step_multiplier: float | None = None,
+        step_q: float | None = None,
+        gap_q: float | None = None,
+        bounds_buffer_deg: float | None = None,
+    ):
+        """Create an iSSFDataset (parametric sampling) from extracted point features."""
+        plan = self.layer_plan(config)
+
+        from movebench2.datasets.ssf import iSSFDataset
+
+        return iSSFDataset(
+            study_dir=self.study_dir,
+            trajectories_path=self.trajectories_path,
+            plan=plan,
+            split=split,
+            normalize=normalize,
+            normalize_movement=normalize_movement,
+            include_time=include_time,
+            include_individual_id=include_individual_id,
+            movement_stats=movement_stats,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        )
+
     def compute_normalization_vals(
         self,
         *,

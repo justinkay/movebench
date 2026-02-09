@@ -23,7 +23,7 @@ from movebench2.rasters import Raster, reproject_to_meters
 from movebench2.trajectories import POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
 
 
-TARGET_CRS = "EPSG:3857"
+TARGET_CRS = "EPSG:3857" # meters
 
 
 def _compute_valid_mask(values: torch.Tensor, nodata: Any) -> torch.Tensor:
@@ -80,7 +80,7 @@ class ChipDataset(Dataset):
         for layer in self.plan.layers_in_order:
             if self.registry.get(layer).source == "gee_chip":
                 return layer
-        raise ValueError("ChipDataset requires at least one gee_chip layer in the LayerPlan")
+        raise ValueError("ChipDataset requires at least one gee_chip layer in the LayerPlan to define bounds.")
 
     def _build_chip_group_layer_slices(self) -> dict[str, dict[str, tuple[int, int]]]:
         out: dict[str, dict[str, tuple[int, int]]] = {}
