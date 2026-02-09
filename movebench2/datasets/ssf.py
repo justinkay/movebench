@@ -11,179 +11,21 @@ They do not perform raster IO or candidate generation. They:
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from movebench2.features.manifest import PointFeatureManifest, read_manifest
+from movebench2.features.normalization import load_points_normalization_mean_std
+from movebench2.features.points import select_point_store_dir
 from movebench2.layers.plan import LayerPlan
 from movebench2.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
 
 TARGET_CRS = "EPSG:3857" # meters
-SamplerType = Literal["empirical", "parametric"]
-
-
-def _point_store_base_dir(*, study_dir: Path, split: str, config_hash: str) -> Path:
-    return Path(study_dir) / "features" / "points" / str(split) / str(config_hash)
-
-
-def _iter_point_store_manifests(base_dir: Path) -> list[tuple[str, PointFeatureManifest]]:
-    if not base_dir.exists():
-        return []
-    out: list[tuple[str, PointFeatureManifest]] = []
-    for p in sorted(base_dir.iterdir()):
-        if not p.is_dir():
-            continue
-        mp = p / "manifest.json"
-        if not mp.exists():
-            continue
-        out.append((p.name, read_manifest(mp)))
-    return out
-
-
-def _manifest_matches(
-    m: PointFeatureManifest,
-    *,
-    expected_type: SamplerType,
-    config_hash: str,
-    num_candidates: int | None,
-    random_seed: int | None,
-    step_multiplier: float | None,
-    step_q: float | None,
-    gap_q: float | None,
-    bounds_buffer_deg: float | None,
-) -> bool:
-    if str(m.config_hash) != str(config_hash):
-        return False
-    if str(m.sampler.get("type")) != str(expected_type):
-        return False
-    if num_candidates is not None and int(m.sampler.get("num_candidates")) != int(num_candidates):
-        return False
-    if random_seed is not None and int(m.sampler.get("random_seed")) != int(random_seed):
-        return False
-    if step_multiplier is not None and float(m.sampler.get("step_multiplier")) != float(step_multiplier):
-        return False
-    if step_q is not None and float(m.sampler.get("step_q")) != float(step_q):
-        return False
-    if gap_q is not None and float(m.sampler.get("gap_q")) != float(gap_q):
-        return False
-    if bounds_buffer_deg is not None and float(m.extraction.get("bounds_buffer_deg")) != float(bounds_buffer_deg):
-        return False
-    return True
-
-
-def _select_point_store(
-    *,
-    study_dir: Path,
-    split: str,
-    config_hash: str,
-    expected_type: SamplerType,
-    num_candidates: int | None,
-    random_seed: int | None,
-    step_multiplier: float | None,
-    step_q: float | None,
-    gap_q: float | None,
-    bounds_buffer_deg: float | None,
-) -> tuple[Path, PointFeatureManifest]:
-    base_dir = _point_store_base_dir(study_dir=study_dir, split=split, config_hash=config_hash)
-    candidates = _iter_point_store_manifests(base_dir)
-    matches = [
-        (sampler_hash, m)
-        for sampler_hash, m in candidates
-        if _manifest_matches(
-            m,
-            expected_type=expected_type,
-            config_hash=config_hash,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        )
-    ]
-
-    if not matches:
-        raise FileNotFoundError(
-            "No extracted point feature store found for "
-            f"split={split!r}, config_hash={config_hash!r}, sampler_type={expected_type!r}. "
-            "Run Study.extract_point_features(...) first."
-        )
-
-    if len(matches) != 1:
-        lines = [
-            "Multiple matching point feature stores found. Disambiguate by passing one or more of:",
-            "num_candidates, random_seed, step_multiplier, step_q, gap_q, bounds_buffer_deg.",
-            "Found:",
-        ]
-        for sampler_hash, m in matches:
-            s = m.sampler
-            e = m.extraction
-            lines.append(
-                f"- store_dir={sampler_hash!r} created_at={m.created_at!r} "
-                f"num_candidates={s.get('num_candidates')!r} random_seed={s.get('random_seed')!r} "
-                f"step_multiplier={s.get('step_multiplier')!r} step_q={s.get('step_q')!r} gap_q={s.get('gap_q')!r} "
-                f"bounds_buffer_deg={e.get('bounds_buffer_deg')!r}"
-            )
-        raise ValueError("\n".join(lines))
-
-    sampler_hash, m = matches[0]
-    store_dir = base_dir / sampler_hash
-    if not (store_dir / "features.pt").exists():
-        raise FileNotFoundError(f"features.pt not found under: {store_dir}")
-    return store_dir, m
-
-
-def _load_env_normalizer(
-    *,
-    study_dir: Path,
-    plan: LayerPlan,
-    sampler_hash: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    stats_path = (
-        Path(study_dir)
-        / "normalization"
-        / "points"
-        / str(plan.config_hash)
-        / str(sampler_hash)
-        / "stats.json"
-    )
-    if not stats_path.exists():
-        raise FileNotFoundError(
-            "Normalization stats not found. Run "
-            "Study.compute_normalization_vals(from_='points', ...) first. "
-            f"Expected: {stats_path}"
-        )
-
-    with open(stats_path, "r") as f:
-        d = json.load(f)
-    band_stats: dict[str, Any] = dict(d.get("band_stats", {}))
-
-    band_ids = plan.band_ids_in_order()
-    C = int(plan.num_channels())
-    mean = torch.zeros(C, dtype=torch.float32)
-    std = torch.ones(C, dtype=torch.float32)
-
-    for i, ch in enumerate(plan.channels):
-        if not ch.normalize:
-            continue
-        band_id = band_ids[i]
-        st = band_stats.get(band_id)
-        if st is None:
-            raise ValueError(f"Missing normalization stats for band_id={band_id!r} in {stats_path}")
-        mean[i] = float(st["mean"])
-        s = float(st["std"])
-        if not math.isfinite(s) or s < 1e-8:
-            s = 1.0
-        std[i] = s
-
-    return mean, std
 
 
 def _compute_movement_stats(step_length_m: torch.Tensor, turn_angle_rad: torch.Tensor) -> dict[str, float]:
@@ -235,7 +77,7 @@ class SSFDataset(Dataset):
         self.study_dir = Path(study_dir)
         self.split = str(split)
 
-        store_dir, m = _select_point_store(
+        store_dir, m = select_point_store_dir(
             study_dir=self.study_dir,
             split=self.split,
             config_hash=str(plan.config_hash),
@@ -270,7 +112,7 @@ class SSFDataset(Dataset):
             raise ValueError(f"env.shape[1] ({self.env.shape[1]}) must match plan.num_channels() ({self.plan.num_channels()})")
 
         if self.normalize:
-            self._mean, self._std = _load_env_normalizer(
+            self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
                 sampler_hash=self.sampler_hash,
@@ -328,7 +170,7 @@ class iSSFDataset(SSFDataset):
         self.split = str(split)
         self.trajectories_path = Path(trajectories_path)
 
-        store_dir, m = _select_point_store(
+        store_dir, m = select_point_store_dir(
             study_dir=self.study_dir,
             split=self.split,
             config_hash=str(plan.config_hash),
@@ -359,7 +201,7 @@ class iSSFDataset(SSFDataset):
             raise ValueError("features.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
 
         if self.normalize:
-            self._mean, self._std = _load_env_normalizer(
+            self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
                 sampler_hash=self.sampler_hash,
@@ -514,4 +356,3 @@ class iSSFDataset(SSFDataset):
         step_pixels = torch.cat(parts, dim=0)
         valid_pixels = torch.cat(valids, dim=0)
         return step_pixels, valid_pixels, {}, TARGET_CRS
-

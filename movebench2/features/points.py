@@ -14,19 +14,18 @@ import hashlib
 import json
 import multiprocessing as mp
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from pyproj import Transformer
 
-from movebench2.features.manifest import PointFeatureManifest, utc_now_iso, write_manifest
+from movebench2.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
 from movebench2.layers.plan import LayerPlan
 from movebench2.layers.registry import REGISTRY
-from movebench2.rasters import Raster
 from movebench2.trajectories import (
     LAT_COL,
     LON_COL,
@@ -36,10 +35,18 @@ from movebench2.trajectories import (
     compute_movement_features,
 )
 
+TARGET_CRS = "EPSG:3857"  # meters
+SamplerType = Literal["empirical", "parametric"]
 
-TARGET_CRS = "EPSG:3857" # meters
-_T_4326_TO_TARGET = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
-_T_TARGET_TO_4326 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True) # lat/lon
+
+@lru_cache(maxsize=1)
+def _transformers():
+    """Construct cached CRS transformers lazily (pyproj is an optional dependency for readers)."""
+    from pyproj import Transformer  # imported lazily to avoid requiring pyproj for point-store readers
+
+    to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+    to_4326 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+    return to_target, to_4326
 
 
 def _stable_hash_dict(d: dict[str, Any]) -> str:
@@ -50,6 +57,125 @@ def _stable_hash_dict(d: dict[str, Any]) -> str:
 def _step_seed(random_seed: int, point_id_start: int) -> int:
     s = f"{int(random_seed)}|{int(point_id_start)}".encode("utf-8")
     return int(hashlib.sha256(s).hexdigest()[:8], 16)
+
+
+def point_stores_dir(*, study_dir: Path, split: str, config_hash: str) -> Path:
+    return Path(study_dir) / "features" / "points" / str(split) / str(config_hash)
+
+
+def point_store_dir(*, study_dir: Path, split: str, config_hash: str, sampler_hash: str) -> Path:
+    return point_stores_dir(study_dir=study_dir, split=split, config_hash=config_hash) / str(sampler_hash)
+
+
+def _iter_point_store_manifests(base_dir: Path) -> list[tuple[str, PointFeatureManifest]]:
+    if not base_dir.exists():
+        return []
+    out: list[tuple[str, PointFeatureManifest]] = []
+    for p in sorted(base_dir.iterdir()):
+        if not p.is_dir():
+            continue
+        mpth = p / "manifest.json"
+        if not mpth.exists():
+            continue
+        out.append((p.name, read_manifest(mpth)))
+    return out
+
+
+def _manifest_matches(
+    m: PointFeatureManifest,
+    *,
+    expected_type: SamplerType,
+    config_hash: str,
+    num_candidates: int | None,
+    random_seed: int | None,
+    step_multiplier: float | None,
+    step_q: float | None,
+    gap_q: float | None,
+    bounds_buffer_deg: float | None,
+) -> bool:
+    if str(m.config_hash) != str(config_hash):
+        return False
+    if str(m.sampler.get("type")) != str(expected_type):
+        return False
+    if num_candidates is not None and int(m.sampler.get("num_candidates")) != int(num_candidates):
+        return False
+    if random_seed is not None and int(m.sampler.get("random_seed")) != int(random_seed):
+        return False
+    if step_multiplier is not None and float(m.sampler.get("step_multiplier")) != float(step_multiplier):
+        return False
+    if step_q is not None and float(m.sampler.get("step_q")) != float(step_q):
+        return False
+    if gap_q is not None and float(m.sampler.get("gap_q")) != float(gap_q):
+        return False
+    if bounds_buffer_deg is not None and float(m.extraction.get("bounds_buffer_deg")) != float(bounds_buffer_deg):
+        return False
+    return True
+
+
+def select_point_store_dir(
+    *,
+    study_dir: Path,
+    split: str,
+    config_hash: str,
+    expected_type: SamplerType,
+    num_candidates: int | None = None,
+    random_seed: int | None = None,
+    step_multiplier: float | None = None,
+    step_q: float | None = None,
+    gap_q: float | None = None,
+    bounds_buffer_deg: float | None = None,
+) -> tuple[Path, PointFeatureManifest]:
+    """Select a point feature store directory by sampler semantics.
+
+    Returns (store_dir, manifest). Raises if missing or ambiguous.
+    """
+    base_dir = point_stores_dir(study_dir=study_dir, split=split, config_hash=config_hash)
+    candidates = _iter_point_store_manifests(base_dir)
+    matches = [
+        (sampler_hash, m)
+        for sampler_hash, m in candidates
+        if _manifest_matches(
+            m,
+            expected_type=expected_type,
+            config_hash=config_hash,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        )
+    ]
+
+    if not matches:
+        raise FileNotFoundError(
+            "No extracted point feature store found for "
+            f"split={split!r}, config_hash={config_hash!r}, sampler_type={expected_type!r}. "
+            "Run Study.extract_point_features(...) first."
+        )
+
+    if len(matches) != 1:
+        lines = [
+            "Multiple matching point feature stores found. Disambiguate by passing one or more of:",
+            "num_candidates, random_seed, step_multiplier, step_q, gap_q, bounds_buffer_deg.",
+            "Found:",
+        ]
+        for sampler_hash, m in matches:
+            s = m.sampler
+            e = m.extraction
+            lines.append(
+                f"- store_dir={sampler_hash!r} created_at={m.created_at!r} "
+                f"num_candidates={s.get('num_candidates')!r} random_seed={s.get('random_seed')!r} "
+                f"step_multiplier={s.get('step_multiplier')!r} step_q={s.get('step_q')!r} gap_q={s.get('gap_q')!r} "
+                f"bounds_buffer_deg={e.get('bounds_buffer_deg')!r}"
+            )
+        raise ValueError("\n".join(lines))
+
+    sampler_hash, m = matches[0]
+    store_dir = base_dir / sampler_hash
+    if not (store_dir / "features.pt").exists():
+        raise FileNotFoundError(f"features.pt not found under: {store_dir}")
+    return store_dir, m
 
 
 @dataclass(frozen=True)
@@ -164,6 +290,8 @@ def _sample_from_raster(
     bilinear: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample raster at point locations (EPSG:4326) in raster's native CRS."""
+    from pyproj import Transformer  # imported lazily to avoid requiring pyproj for point-store readers
+
     arr = raster.array
     transform = raster.transform
     src_crs = raster.crs
@@ -299,8 +427,9 @@ def _compute_candidates(
 ) -> _CandidateSet:
     pseudo_lens, pseudo_turns = _sample_pseudo_steps(sampler_state, req.point_id_start)
 
-    x0, y0 = _T_4326_TO_TARGET.transform(float(req.start_lon), float(req.start_lat))
-    x1, y1 = _T_4326_TO_TARGET.transform(float(req.end_lon), float(req.end_lat))
+    to_target, to_4326 = _transformers()
+    x0, y0 = to_target.transform(float(req.start_lon), float(req.start_lat))
+    x1, y1 = to_target.transform(float(req.end_lon), float(req.end_lat))
 
     headings = float(req.start_bearing) + pseudo_turns
     headings = (headings + np.pi) % (2.0 * np.pi) - np.pi
@@ -323,7 +452,7 @@ def _compute_candidates(
     step_lengths = np.append(pseudo_lens, true_sl)
     turn_angles = np.append(pseudo_turns, true_ta)
 
-    lons, lats = _T_TARGET_TO_4326.transform(xs, ys)
+    lons, lats = to_4326.transform(xs, ys)
     lons = np.asarray(lons, dtype=np.float64)
     lats = np.asarray(lats, dtype=np.float64)
 
@@ -387,6 +516,8 @@ def _extract_one_step(
                 raise ValueError(f"Missing derived compute function compute_{layer} in movebench2.layers.derived")
             arr = fn(**parents)
             base = parents[spec.derived_from[0]]
+            from movebench2.rasters import Raster
+
             r = Raster(
                 array=arr,
                 transform=base.transform,
@@ -492,13 +623,11 @@ def extract_split_feature_store(
     skip_existing: bool,
 ) -> dict[str, Any]:
     """Extract one split into a point feature store on disk."""
-    out_dir = (
-        Path(study_dir)
-        / "features"
-        / "points"
-        / str(split)
-        / str(plan.config_hash)
-        / str(sampler_hash)
+    out_dir = point_store_dir(
+        study_dir=Path(study_dir),
+        split=str(split),
+        config_hash=str(plan.config_hash),
+        sampler_hash=str(sampler_hash),
     )
     out_pt = out_dir / "features.pt"
     out_manifest = out_dir / "manifest.json"

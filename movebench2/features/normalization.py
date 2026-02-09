@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,53 @@ import torch
 
 from movebench2.features.manifest import read_manifest, utc_now_iso
 from movebench2.layers.plan import LayerPlan
+
+
+def load_points_normalization_mean_std(
+    *,
+    study_dir: Path,
+    plan: LayerPlan,
+    sampler_hash: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load per-channel mean/std vectors for env normalization from cached stats.json."""
+    stats_path = (
+        Path(study_dir)
+        / "normalization"
+        / "points"
+        / str(plan.config_hash)
+        / str(sampler_hash)
+        / "stats.json"
+    )
+    if not stats_path.exists():
+        raise FileNotFoundError(
+            "Normalization stats not found. Run "
+            "Study.compute_normalization_vals(from_='points', ...) first. "
+            f"Expected: {stats_path}"
+        )
+
+    with open(stats_path, "r") as f:
+        d = json.load(f)
+    band_stats: dict[str, Any] = dict(d.get("band_stats", {}))
+
+    band_ids = plan.band_ids_in_order()
+    C = int(plan.num_channels())
+    mean = torch.zeros(C, dtype=torch.float32)
+    std = torch.ones(C, dtype=torch.float32)
+
+    for i, ch in enumerate(plan.channels):
+        if not ch.normalize:
+            continue
+        band_id = band_ids[i]
+        st = band_stats.get(band_id)
+        if st is None:
+            raise ValueError(f"Missing normalization stats for band_id={band_id!r} in {stats_path}")
+        mean[i] = float(st["mean"])
+        s = float(st["std"])
+        if not math.isfinite(s) or s < 1e-8:
+            s = 1.0
+        std[i] = s
+
+    return mean, std
 
 
 def _select_sampler_dir(base_dir: Path, sampler_hash: str | None) -> tuple[str, Path]:
@@ -164,4 +212,3 @@ def compute_points_normalization_stats(
         "n_steps": int(env.shape[0]),
         "points_per_step": int(env.shape[2]),
     }
-
