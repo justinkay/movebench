@@ -23,6 +23,13 @@ SET_COL = "set"
 POINT_ID_COL = "point_id"
 
 
+def load_trajectories_csv(path: str) -> pd.DataFrame:
+    """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
+    df = pd.read_csv(path)
+    df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
+    return df.dropna(subset=[TIME_COL])
+
+
 def compute_movement_features(
     df: pd.DataFrame,
     *,
@@ -112,4 +119,3 @@ def compute_movement_features(
     )
 
     return df
-

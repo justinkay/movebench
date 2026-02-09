@@ -20,7 +20,7 @@ from movebench2.layers.io import LayerIO
 from movebench2.layers.plan import LayerPlan
 from movebench2.layers.registry import LayerRegistry, REGISTRY
 from movebench2.rasters import Raster, reproject_to_meters
-from movebench2.trajectories import POINT_ID_COL, SET_COL, TIME_COL
+from movebench2.trajectories import POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
 
 
 TARGET_CRS = "EPSG:3857"
@@ -61,9 +61,7 @@ class ChipDataset(Dataset):
 
         self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
 
-        df = pd.read_csv(self.trajectories_path)
-        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
-        df = df.dropna(subset=[TIME_COL])
+        df = load_trajectories_csv(str(self.trajectories_path))
         df = df[df[SET_COL] == self.split].copy()
         if len(df) == 0:
             raise ValueError(f"No rows found for split={split!r} in {self.trajectories_path}")
@@ -117,41 +115,13 @@ class ChipDataset(Dataset):
         cache: dict[str, Raster] = {}
 
         def get_raster(layer: str) -> Raster:
-            cached = cache.get(layer)
-            if cached is not None:
-                return cached
-
-            spec = self.registry.get(layer)
-            if spec.source == "derived":
-                if not spec.derived_from:
-                    raise ValueError(f"Derived layer {layer!r} must define derived_from")
-                parents = {p: get_raster(p) for p in spec.derived_from}
-
-                import movebench2.layers.derived as derived
-
-                fn = getattr(derived, f"compute_{layer}", None)
-                if fn is None:
-                    raise ValueError(f"Missing derived compute function compute_{layer} in movebench2.layers.derived")
-
-                arr = fn(**parents)
-                if arr.ndim != 3:
-                    raise ValueError(f"compute_{layer} must return shape (C,H,W), got {getattr(arr, 'shape', None)}")
-
-                base = parents[spec.derived_from[0]]
-                r = Raster(
-                    array=arr,
-                    transform=base.transform,
-                    crs=base.crs,
-                    nodata=float("nan"),
-                    bounds=base.bounds,
-                    band_ids=[f"{layer}.{b}" for b in spec.bands],
-                )
-                cache[layer] = r
-                return r
-
-            r = self.io.load_layer(layer, point_id=point_id, bounds_latlon=bounds_latlon, timestamp=timestamp)
-            cache[layer] = r
-            return r
+            return self.io.load_layer_cached(
+                layer,
+                cache=cache,
+                point_id=point_id,
+                bounds_latlon=bounds_latlon,
+                timestamp=timestamp,
+            )
 
         # Load and reproject chip-group stacks once each, then slice into layers.
         needed_chip_groups: list[str] = []

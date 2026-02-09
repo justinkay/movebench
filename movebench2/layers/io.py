@@ -162,6 +162,67 @@ class LayerIO:
 
         raise ValueError(f"Unknown LayerSource for {layer!r}: {spec.source!r}")
 
+    def load_layer_cached(
+        self,
+        layer: str,
+        *,
+        cache: dict[str, Raster],
+        point_id: int | None = None,
+        bounds_latlon: tuple[float, float, float, float] | None = None,
+        timestamp: Any | None = None,
+    ) -> Raster:
+        """Load a layer using a caller-provided per-request cache.
+
+        The cache is keyed by layer name. Callers should only reuse a cache
+        within a single request context where (point_id, bounds_latlon,
+        timestamp) are consistent.
+        """
+        cached = cache.get(layer)
+        if cached is not None:
+            return cached
+
+        spec = self.registry.get(layer)
+        if spec.source != "derived":
+            r = self.load_layer(layer, point_id=point_id, bounds_latlon=bounds_latlon, timestamp=timestamp)
+            cache[layer] = r
+            return r
+
+        if not spec.derived_from:
+            raise ValueError(f"Derived layer {layer!r} must define derived_from")
+
+        parents: dict[str, Raster] = {}
+        for parent in spec.derived_from:
+            parents[parent] = self.load_layer_cached(
+                parent,
+                cache=cache,
+                point_id=point_id,
+                bounds_latlon=bounds_latlon,
+                timestamp=timestamp,
+            )
+
+        import movebench2.layers.derived as derived
+
+        fn_name = f"compute_{layer}"
+        fn = getattr(derived, fn_name, None)
+        if fn is None:
+            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench2.layers.derived")
+
+        arr = fn(**parents)
+        if arr.ndim != 3:
+            raise ValueError(f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}")
+
+        base = parents[spec.derived_from[0]]
+        r = Raster(
+            array=arr,
+            transform=base.transform,
+            crs=base.crs,
+            nodata=float("nan"),
+            bounds=base.bounds,
+            band_ids=[f"{layer}.{b}" for b in spec.bands],
+        )
+        cache[layer] = r
+        return r
+
     def load_chip_group(self, chip_group: str, *, point_id: int) -> Raster:
         """Load the full stacked GeoTIFF for a chip group (all layers/bands in that group)."""
         return self._load_gee_chip_group(chip_group, int(point_id))
