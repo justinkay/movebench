@@ -7,8 +7,8 @@ from typing import Any
 
 import torch
 
-from movebench2.features.manifest import read_manifest, utc_now_iso
-from movebench2.layers.plan import LayerPlan
+from movebench.features.manifest import read_manifest, utc_now_iso
+from movebench.layers.plan import LayerPlan
 
 
 def load_points_normalization_mean_std(

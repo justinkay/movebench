@@ -9,11 +9,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from movebench2 import paths
-from movebench2.layers.download import GEE_NODATA_SENTINEL
-from movebench2.layers.plan import LayerPlan
-from movebench2.layers.registry import LayerRegistry, REGISTRY
-from movebench2.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
+from movebench import paths
+from movebench.layers.download import GEE_NODATA_SENTINEL
+from movebench.layers.plan import LayerPlan
+from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
 
 
 def _year_from_timestamp(ts: Any) -> int:
@@ -200,12 +200,12 @@ class LayerIO:
                 timestamp=timestamp,
             )
 
-        import movebench2.layers.derived as derived
+        import movebench.layers.derived as derived
 
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)
         if fn is None:
-            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench2.layers.derived")
+            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived")
 
         arr = fn(**parents)
         if arr.ndim != 3:
@@ -460,12 +460,12 @@ class LayerIO:
                 timestamp=timestamp,
             )
 
-        import movebench2.layers.derived as derived
+        import movebench.layers.derived as derived
 
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)
         if fn is None:
-            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench2.layers.derived")
+            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived")
 
         arr = fn(**parents)
         if arr.ndim != 3:

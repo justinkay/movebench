@@ -1,7 +1,7 @@
 """ChipDataset: raster stacks around each trajectory point.
 
 This is a refactor of the legacy `movebench.datasets.ChipDataset`, rewritten to
-use the movebench2 layer registry + LayerPlan + LayerIO.
+use the movebench layer registry + LayerPlan + LayerIO.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from movebench2.layers.io import LayerIO
-from movebench2.layers.plan import LayerPlan
-from movebench2.layers.registry import LayerRegistry, REGISTRY
-from movebench2.rasters import Raster, reproject_to_meters
-from movebench2.trajectories import POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
+from movebench.layers.io import LayerIO
+from movebench.layers.plan import LayerPlan
+from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.rasters import Raster, reproject_to_meters
+from movebench.trajectories import POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
 
 
 TARGET_CRS = "EPSG:3857" # meters

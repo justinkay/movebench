@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from movebench2.layers.plan import LayerPlan
+from movebench.layers.plan import LayerPlan
 
 
 def utc_now_iso() -> str:

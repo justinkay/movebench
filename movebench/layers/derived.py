@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from movebench2.rasters import Raster
+from movebench.rasters import Raster
 
 
 def _band_index(r: Raster, band_id: str) -> int:

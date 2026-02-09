@@ -1,13 +1,13 @@
 #!/usr/bin/env python
-"""Ingest a Movebank-formatted CSV into movebench2 as a new study.
+"""Ingest a Movebank-formatted CSV into movebench as a new study.
 
 This script creates:
-  data/movebench2/studies/<study_id>/trajectories.csv
-  data/movebench2/studies/<study_id>/manifest.json
+  data/movebench/studies/<study_id>/trajectories.csv
+  data/movebench/studies/<study_id>/manifest.json
 
 Unless overridden via:
   - `--data-root`, or
-  - `MOVEBENCH2_DATA_ROOT`
+  - `MOVEBENCH_DATA_ROOT`
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench2.trajectories import (
+    from movebench.trajectories import (
         INDIVIDUAL_COL,
         LAT_COL,
         LON_COL,
@@ -66,7 +66,7 @@ def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench2.trajectories import LAT_COL, LON_COL, TIME_COL
+    from movebench.trajectories import LAT_COL, LON_COL, TIME_COL
 
     df = df.copy()
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
@@ -75,7 +75,7 @@ def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench2.trajectories import INDIVIDUAL_COL, SET_COL, TIME_COL
+    from movebench.trajectories import INDIVIDUAL_COL, SET_COL, TIME_COL
 
     df = df.copy()
 
@@ -93,7 +93,7 @@ def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sort_and_assign_point_id(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench2.trajectories import INDIVIDUAL_COL, POINT_ID_COL, TIME_COL
+    from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, TIME_COL
 
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL]).reset_index(drop=True)
     df[POINT_ID_COL] = df.index.astype(int)
@@ -101,8 +101,8 @@ def _sort_and_assign_point_id(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_manifest(*, study_dir: Path, study_id: str, source_csv: str, df: pd.DataFrame) -> None:
-    from movebench2.features.manifest import utc_now_iso
-    from movebench2.trajectories import INDIVIDUAL_COL, SET_COL
+    from movebench.features.manifest import utc_now_iso
+    from movebench.trajectories import INDIVIDUAL_COL, SET_COL
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
@@ -126,10 +126,10 @@ def _write_manifest(*, study_dir: Path, study_id: str, source_csv: str, df: pd.D
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Ingest a Movebank CSV into movebench2.")
+    parser = argparse.ArgumentParser(description="Ingest a Movebank CSV into movebench.")
     parser.add_argument("csv_path", type=Path, help="Path to a Movebank-formatted CSV.")
     parser.add_argument("--study-id", type=str, default=None, help="Study id (default: CSV stem).")
-    parser.add_argument("--data-root", type=Path, default=None, help="Override MOVEBENCH2_DATA_ROOT for this run.")
+    parser.add_argument("--data-root", type=Path, default=None, help="Override MOVEBENCH_DATA_ROOT for this run.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing study directory.")
     parser.add_argument("--dry-run", action="store_true", help="Print what would happen without writing.")
     args = parser.parse_args(argv[1:])
@@ -137,10 +137,10 @@ def main(argv: list[str]) -> int:
     _insert_repo_root_on_path()
 
     if args.data_root is not None:
-        os.environ["MOVEBENCH2_DATA_ROOT"] = str(args.data_root)
+        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
 
-    from movebench2 import paths
-    from movebench2.trajectories import INDIVIDUAL_COL, SET_COL
+    from movebench import paths
+    from movebench.trajectories import INDIVIDUAL_COL, SET_COL
 
     csv_path = args.csv_path.expanduser().resolve()
     if not csv_path.exists():
@@ -194,4 +194,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
-

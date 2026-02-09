@@ -10,10 +10,10 @@ def repo_root() -> Path:
 
 
 def data_root() -> Path:
-    env = os.environ.get("MOVEBENCH2_DATA_ROOT") # TODO "/archive/vision/beery/movebench/"
+    env = os.environ.get("MOVEBENCH_DATA_ROOT")
     if env:
         return Path(env)
-    return  repo_root() / "data" / "movebench2"
+    return repo_root() / "data" / "movebench"
 
 
 def studies_root() -> Path:
@@ -25,7 +25,7 @@ def study_dir(study_id: str) -> Path:
 
 
 def paths_config_path() -> Path:
-    env = os.environ.get("MOVEBENCH2_PATHS_CONFIG")
+    env = os.environ.get("MOVEBENCH_PATHS_CONFIG")
     if env:
         return Path(env)
     return repo_root() / "configs" / "paths.yaml"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run MoveBench2 iSSF benchmark (linear + MLP) over one or more studies."""
+"""Run MoveBench iSSF benchmark (linear + MLP) over one or more studies."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ if str(_REPO_ROOT) not in sys.path:
     # Allow running this script without installing the repo as a package.
     sys.path.insert(0, str(_REPO_ROOT))
 
-from movebench2 import Study
-from movebench2.models import LinearStepSelect, MLPStepSelect, random_baseline_metrics
-from movebench2.train import collate_step_select, eval_step_select, fit_step_select
+from movebench import Study
+from movebench.models import LinearStepSelect, MLPStepSelect, random_baseline_metrics
+from movebench.train import collate_step_select, eval_step_select, fit_step_select
 
 
 TOP_K_VALUES = (1, 5, 10, 25, 50)
@@ -52,12 +52,12 @@ MLP_HPARAMS = {
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run iSSF benchmark for MoveBench2.")
+    p = argparse.ArgumentParser(description="Run iSSF benchmark for MoveBench.")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--study", type=str, help="Study id (single).")
     g.add_argument("--studies", type=str, help="Comma-separated list of study ids.")
     p.add_argument("--config", type=str, default="configs/layers_all.yaml", help="Layer config YAML.")
-    p.add_argument("--output-dir", type=str, default="results/mb2_issf", help="Output directory.")
+    p.add_argument("--output-dir", type=str, default="results/issf", help="Output directory.")
     p.add_argument("--device", type=str, default="cpu", help="cpu or cuda (or cuda:0, etc).")
     p.add_argument("--batch-size", type=int, default=32, help="Batch size.")
     p.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
@@ -96,7 +96,7 @@ def _ensure_study_ready(*, study: Study, config: str, setup_workers: int) -> Non
     """Ensure rasters, parametric point features, and normalization stats exist."""
     plan = study.layer_plan(config)
 
-    from movebench2.features.points import select_point_store_dir
+    from movebench.features.points import select_point_store_dir
 
     try:
         _train_dir, train_m = select_point_store_dir(

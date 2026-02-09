@@ -9,7 +9,7 @@ from pathlib import Path
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Download movebench2 rasters for a single study (integration test)."
+        description="Download movebench rasters for a single study (integration test)."
     )
     parser.add_argument("study_id", help="Study id (directory name under studies root).")
     parser.add_argument(
@@ -43,30 +43,30 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--data-root",
         default=None,
-        help="Override MOVEBENCH2_DATA_ROOT for this run.",
+        help="Override MOVEBENCH_DATA_ROOT for this run.",
     )
     parser.add_argument(
         "--paths-config",
         default=None,
-        help="Override MOVEBENCH2_PATHS_CONFIG for this run (not required for GEE downloads).",
+        help="Override MOVEBENCH_PATHS_CONFIG for this run (not required for GEE downloads).",
     )
 
     args = parser.parse_args(argv[1:])
 
     if args.data_root:
-        os.environ["MOVEBENCH2_DATA_ROOT"] = str(args.data_root)
+        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
     if args.paths_config:
-        os.environ["MOVEBENCH2_PATHS_CONFIG"] = str(args.paths_config)
+        os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
 
     try:
-        from movebench2.study import Study
+        from movebench.study import Study
     except ModuleNotFoundError as e:
         # Common missing deps: PyYAML (yaml), earthengine-api (ee), rasterio, pandas, requests, tqdm.
         print(f"Import failed: {e}")
-        print("Make sure movebench2 dependencies are installed in your environment.")
+        print("Make sure movebench dependencies are installed in your environment.")
         return 1
 
     study = Study(args.study_id)
@@ -86,4 +86,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
-

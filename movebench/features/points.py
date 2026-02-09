@@ -23,10 +23,10 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from movebench2.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
-from movebench2.layers.plan import LayerPlan
-from movebench2.layers.registry import REGISTRY
-from movebench2.trajectories import (
+from movebench.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
+from movebench.layers.plan import LayerPlan
+from movebench.layers.registry import REGISTRY
+from movebench.trajectories import (
     LAT_COL,
     LON_COL,
     POINT_ID_COL,
@@ -509,14 +509,14 @@ def _extract_one_step(
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
             parents = {p: get_raster(p) for p in spec.derived_from}
-            import movebench2.layers.derived as derived
+            import movebench.layers.derived as derived
 
             fn = getattr(derived, f"compute_{layer}", None)
             if fn is None:
-                raise ValueError(f"Missing derived compute function compute_{layer} in movebench2.layers.derived")
+                raise ValueError(f"Missing derived compute function compute_{layer} in movebench.layers.derived")
             arr = fn(**parents)
             base = parents[spec.derived_from[0]]
-            from movebench2.rasters import Raster
+            from movebench.rasters import Raster
 
             r = Raster(
                 array=arr,
@@ -584,7 +584,7 @@ _W_BOUNDS_BUFFER_DEG = None
 def _worker_init(ctx: dict[str, Any]) -> None:
     global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE, _W_BOUNDS_BUFFER_DEG
 
-    from movebench2.layers.io import LayerIO
+    from movebench.layers.io import LayerIO
 
     _W_PLAN = LayerPlan.from_dict(ctx["plan_dict"])
     _W_LAYER_SLICES = {k: tuple(v) for k, v in ctx["layer_slices"].items()}
@@ -668,7 +668,7 @@ def extract_split_feature_store(
     timestamp_ns = torch.zeros((n_steps,), dtype=torch.int64)
 
     if n_workers <= 1:
-        from movebench2.layers.io import LayerIO
+        from movebench.layers.io import LayerIO
 
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
         for i, req in enumerate(reqs):

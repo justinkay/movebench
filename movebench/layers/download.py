@@ -1,6 +1,6 @@
-"""Earth Engine raster downloads for movebench2.
+"""Earth Engine raster downloads for movebench.
 
-This module writes rasters to the on-disk layout expected by `movebench2.layers.io.LayerIO`:
+This module writes rasters to the on-disk layout expected by `movebench.layers.io.LayerIO`:
 
 - Chips (per-point): `study_dir/rasters/<rasters_hash>/chips/<chip_group>/<point_id:05d>.tif`
 - Tiles (per-study): `study_dir/rasters/<rasters_hash>/tiles/<layer>/tile_XXX.tif` + `index.json`
@@ -24,8 +24,8 @@ from typing import Any
 
 import pandas as pd
 
-from movebench2.layers.plan import LayerPlan
-from movebench2.layers.registry import LayerRegistry, REGISTRY
+from movebench.layers.plan import LayerPlan
+from movebench.layers.registry import LayerRegistry, REGISTRY
 
 
 # Movebank / trajectories.csv schema

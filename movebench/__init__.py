@@ -1,3 +1,9 @@
-"""MoveBench: Animal movement benchmark with environmental context."""
+"""Next-generation MoveBench pipeline (work-in-progress).
 
-__version__ = "0.2.0"
+This package is a greenfield implementation intended to provide a cleaner
+architecture (layer registry + YAML configs + feature store).
+"""
+
+from movebench.study import Study
+
+__all__ = ["Study"]

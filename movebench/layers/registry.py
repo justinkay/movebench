@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from movebench2.layers.config import LayersConfig, config_hash, rasters_hash
-from movebench2.layers.plan import Channel, LayerPlan
+from movebench.layers.config import LayersConfig, config_hash, rasters_hash
+from movebench.layers.plan import Channel, LayerPlan
 
 
 LayerSource = Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff", "derived"]

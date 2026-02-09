@@ -1,4 +1,4 @@
-# Shared/local raster dataset paths used by movebench2.
+# Shared/local raster dataset paths used by movebench.
 #
 # Values are intentionally user-specific. Point these at your local copies of
 # the datasets (directories or files).
@@ -7,4 +7,3 @@ modis_lc: /path/to/modis_lc2015-2025
 modis_cvf: /path/to/modis_cvf2015-2025
 hii: /path/to/human_impact_index
 bioclim: /path/to/bioclim
-

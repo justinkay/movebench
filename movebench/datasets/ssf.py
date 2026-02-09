@@ -19,10 +19,10 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from movebench2.features.normalization import load_points_normalization_mean_std
-from movebench2.features.points import select_point_store_dir
-from movebench2.layers.plan import LayerPlan
-from movebench2.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
+from movebench.features.normalization import load_points_normalization_mean_std
+from movebench.features.points import select_point_store_dir
+from movebench.layers.plan import LayerPlan
+from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
 
 TARGET_CRS = "EPSG:3857" # meters

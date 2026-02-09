@@ -13,4 +13,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["movebench", "movebench2"]
+include = ["movebench"]
