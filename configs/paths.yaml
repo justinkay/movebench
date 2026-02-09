@@ -2,8 +2,8 @@
 #
 # Values are intentionally user-specific. Point these at your local copies of
 # the datasets (directories or files).
-modis_grid: /path/to/sn_bound_10deg.txt
-modis_lc: /path/to/modis_lc2015-2025
-modis_cvf: /path/to/modis_cvf2015-2025
-hii: /path/to/human_impact_index
-bioclim: /path/to/bioclim
+modis_grid: /Users/justinkay/movebench/sn_bound_10deg.txt
+modis_lc: /Users/justinkay/movebench/data/movebench/modis_lc2015-2025
+modis_cvf: /Users/justinkay/movebench/data/movebench/modis_cvf2015-2025
+hii: /Users/justinkay/movebench/data/movebench/human_impact_index
+bioclim: /Users/justinkay/movebench/data/movebench/bioclim
