@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from movebench.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
 from movebench.layers.plan import LayerPlan
@@ -671,7 +672,7 @@ def extract_split_feature_store(
         from movebench.layers.io import LayerIO
 
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
-        for i, req in enumerate(reqs):
+        for i, req in enumerate(tqdm(reqs, total=n_steps, desc=f"{study_id}:{split} steps")):
             e, v, sl, ta, pid, tsn = _extract_one_step(
                 req,
                 io=io,
@@ -697,7 +698,11 @@ def extract_split_feature_store(
         }
 
         with ctx.Pool(processes=int(n_workers), initializer=_worker_init, initargs=(init_ctx,), maxtasksperchild=200) as pool:
-            for idx, e, v, sl, ta, pid, tsn in pool.imap_unordered(_worker_run, list(enumerate(reqs)), chunksize=10):
+            for idx, e, v, sl, ta, pid, tsn in tqdm(
+                pool.imap_unordered(_worker_run, list(enumerate(reqs)), chunksize=10),
+                total=n_steps,
+                desc=f"{study_id}:{split} steps",
+            ):
                 env[idx] = torch.from_numpy(e)
                 valid[idx] = torch.from_numpy(v)
                 step_length_m[idx] = torch.from_numpy(sl)
