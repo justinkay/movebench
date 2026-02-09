@@ -5,12 +5,30 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "movebench"
 version = "0.0.0"
-description = "MoveBench (research code)"
-requires-python = ">=3.9"
+description = "MoveBench"
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-  "PyYAML>=6.0",
+  "PyYAML",
+  "earthengine-api",
+  "numpy",
+  "pandas",
+  "pyproj",
+  "rasterio",
+  "requests",
+  "scipy",
+  "torch",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+# Streamlit trajectory review app (app.py)
+review-app = [
+  "cartopy",
+  "matplotlib",
+  "streamlit",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["movebench"]
+include = ["movebench",]
