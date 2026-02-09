@@ -68,13 +68,11 @@ def _select_sampler_dir(base_dir: Path, sampler_hash: str | None) -> tuple[str, 
     candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
     if not candidates:
         raise FileNotFoundError(f"No sampler directories found under: {base_dir}")
-    if len(candidates) != 1:
-        raise ValueError(
-            f"Multiple sampler directories found under {base_dir}. "
-            f"Pass sampler_hash explicitly. Available: {candidates}"
-        )
-    sh = candidates[0]
-    return sh, base_dir / sh
+    if len(candidates) == 1:
+        sh = candidates[0]
+        return sh, base_dir / sh
+    # Caller can handle this case by iterating the returned candidates.
+    raise ValueError(f"Multiple sampler directories found under {base_dir}: {candidates}")
 
 
 def compute_points_normalization_stats(
@@ -88,7 +86,35 @@ def compute_points_normalization_stats(
     """Compute per-band mean/std from an extracted point feature store on disk."""
     study_dir = Path(study_dir)
     base_dir = study_dir / "features" / "points" / str(split) / str(plan.config_hash)
-    sampler_hash, in_dir = _select_sampler_dir(base_dir, sampler_hash)
+    if sampler_hash is None:
+        if not base_dir.exists():
+            raise FileNotFoundError(f"Feature store directory not found: {base_dir}")
+        candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
+        if not candidates:
+            raise FileNotFoundError(f"No sampler directories found under: {base_dir}")
+        if len(candidates) == 1:
+            sampler_hash, in_dir = candidates[0], base_dir / candidates[0]
+        else:
+            # Compute stats for every sampler store present (empirical + parametric, etc).
+            out = []
+            for sh in candidates:
+                out.append(
+                    compute_points_normalization_stats(
+                        study_dir=study_dir,
+                        plan=plan,
+                        sampler_hash=sh,
+                        split=split,
+                        skip_existing=skip_existing,
+                    )
+                )
+            return {
+                "status": "multiple",
+                "config_hash": str(plan.config_hash),
+                "split": str(split),
+                "samplers": out,
+            }
+    else:
+        sampler_hash, in_dir = _select_sampler_dir(base_dir, sampler_hash)
 
     in_pt = in_dir / "features.pt"
     in_manifest = in_dir / "manifest.json"
