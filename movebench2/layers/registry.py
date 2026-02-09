@@ -47,6 +47,7 @@ class LayerSpec:
 
     scale_factor: float = 1.0
     valid_range: tuple[float, float] | None = None
+    clip_max: float | None = None
 
 
 LAYERS: dict[str, LayerSpec] = {
@@ -151,6 +152,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=30.0,
         gee_collection="JRC/GSW1_4/GlobalSurfaceWater",
         temporal="static",
+        clip_max=30000.0,
     ),
     "slope": LayerSpec(
         name="slope",

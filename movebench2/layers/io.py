@@ -337,6 +337,8 @@ class LayerIO:
         arr[arr == GEE_NODATA_SENTINEL] = np.nan
 
         spec = self.registry.get(layer)
+        if spec.clip_max is not None:
+            arr = np.clip(arr, 0.0, float(spec.clip_max))
         return Raster(
             array=arr,
             transform=base.transform,

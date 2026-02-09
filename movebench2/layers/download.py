@@ -369,12 +369,15 @@ def _tile_image(layer: str, *, registry: LayerRegistry):
         return ee.ImageCollection(spec.gee_collection).mosaic().select("DEM").toFloat()
 
     if layer == "dist_water":
+        if spec.clip_max is None:
+            raise ValueError("dist_water requires LayerSpec.clip_max (meters)")
+        max_dist = float(spec.clip_max)
         gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
         water = gsw.select("max_extent").unmask(0).gt(0).selfMask()
-        max_dist = 30000
         dist = (
             ee.Image(1)
             .cumulativeCost(source=water, maxDistance=max_dist, geodeticDistance=True)
+            .clamp(0, max_dist)
             .unmask(max_dist)
             .rename("dist_water")
         )
