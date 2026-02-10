@@ -3,7 +3,7 @@
 # Values are intentionally user-specific. Point these at your local copies of
 # the datasets (directories or files).
 data_root: /archive/vision/beery/movebench/
-modis_grid: /archive/vision/beery/movebench/sn_bound_10deg.txt
+modis_grid: /Users/justinkay/movebench/sn_bound_10deg.txt #/archive/vision/beery/movebench/sn_bound_10deg.txt
 modis_lc: /archive/vision/beery/movebench/modis_lc2015-2025
 modis_cvf: /archive/vision/beery/movebench/modis_cvf2015-2025
 hii: /archive/vision/beery/movebench/human_impact_index

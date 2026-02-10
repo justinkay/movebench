@@ -57,6 +57,18 @@ def _parse_args() -> argparse.Namespace:
     g.add_argument("--study", type=str, help="Study id (single).")
     g.add_argument("--studies", type=str, help="Comma-separated list of study ids.")
     p.add_argument("--config", type=str, default="configs/layers_all.yaml", help="Layer config YAML.")
+    p.add_argument(
+        "--subset-env-layers",
+        type=str,
+        default=None,
+        help="Comma-separated list of env layer keys to include (all bands/classes for those layers).",
+    )
+    p.add_argument(
+        "--subset-band-ids",
+        type=str,
+        default=None,
+        help="Comma-separated list of env band_ids to include (e.g. 'dem.elevation,bioclim.bio_1').",
+    )
     p.add_argument("--output-dir", type=str, default="results/issf", help="Output directory.")
     p.add_argument("--device", type=str, default="cpu", help="cpu or cuda (or cuda:0, etc).")
     p.add_argument("--batch-size", type=int, default=32, help="Batch size.")
@@ -179,6 +191,19 @@ def main() -> None:
     args = _parse_args()
     device = torch.device(str(args.device))
 
+    subset_env_layers = (
+        [s.strip() for s in str(args.subset_env_layers).split(",") if s.strip()]
+        if args.subset_env_layers
+        else None
+    )
+    subset_band_ids = (
+        [s.strip() for s in str(args.subset_band_ids).split(",") if s.strip()]
+        if args.subset_band_ids
+        else None
+    )
+    if subset_env_layers is not None and subset_band_ids is not None:
+        raise ValueError("Pass at most one of --subset-env-layers or --subset-band-ids")
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,6 +219,8 @@ def main() -> None:
             config=args.config,
             include_time=False,
             normalize=True,
+            subset_env_layers=subset_env_layers,
+            subset_band_ids=subset_band_ids,
             num_candidates=NUM_CANDIDATES,
             random_seed=SAMPLER_RANDOM_SEED,
             step_multiplier=STEP_MULTIPLIER,
@@ -206,6 +233,8 @@ def main() -> None:
             config=args.config,
             include_time=False,
             normalize=True,
+            subset_env_layers=subset_env_layers,
+            subset_band_ids=subset_band_ids,
             num_candidates=NUM_CANDIDATES,
             random_seed=SAMPLER_RANDOM_SEED,
             step_multiplier=STEP_MULTIPLIER,

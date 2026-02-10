@@ -662,17 +662,17 @@ def download_tile_layer(
     grid = bounds.coveringGrid(proj=crs, scale=grid_size_m)
     filtered = grid.filter(ee.Filter.intersects(".geo", union_region))
 
-    tile_ids = filtered.aggregate_array("system:index").getInfo()
-    download_regions = [ee.Feature(filtered.toList(1, i).get(0)).geometry() for i, _ in enumerate(tile_ids)]
+    n_tiles = int(filtered.size().getInfo())
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
     img = _tile_image(layer, registry=registry).unmask(GEE_NODATA_SENTINEL, sameFootprint=False)
 
     tiles_out: list[dict[str, Any]] = []
-    stats = {"total": len(download_regions), "downloaded": 0, "existing": 0, "failed": 0}
+    stats = {"total": n_tiles, "downloaded": 0, "existing": 0, "failed": 0}
 
-    for i, region in enumerate(download_regions):
+    for i in range(n_tiles):
+        region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
         out_path = tile_dir / f"tile_{i:03d}.tif"
 
         info = region.getInfo()

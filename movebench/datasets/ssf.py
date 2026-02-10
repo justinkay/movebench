@@ -21,7 +21,7 @@ from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import select_point_store_dir
-from movebench.layers.plan import LayerPlan
+from movebench.layers.plan import Channel, LayerPlan
 from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
 
@@ -57,6 +57,60 @@ def _compute_movement_stats(step_length_m: torch.Tensor, turn_angle_rad: torch.T
     }
 
 
+def _subset_plan_env_channels(
+    plan: LayerPlan,
+    *,
+    subset_env_layers: list[str] | None,
+    subset_band_ids: list[str] | None,
+) -> tuple[list[int], LayerPlan]:
+    if subset_env_layers is not None and subset_band_ids is not None:
+        raise ValueError("Pass at most one of subset_env_layers or subset_band_ids")
+
+    if subset_env_layers is None and subset_band_ids is None:
+        return list(range(int(plan.num_channels()))), plan
+
+    if subset_env_layers is not None:
+        want = {str(x) for x in subset_env_layers}
+        present_layers = {c.layer for c in plan.channels}
+        missing = sorted(want - present_layers)
+        if missing:
+            raise ValueError(f"subset_env_layers contains unknown layer(s): {missing}. Available: {sorted(present_layers)}")
+        indices = [i for i, ch in enumerate(plan.channels) if ch.layer in want]
+    else:
+        assert subset_band_ids is not None
+        want = {str(x) for x in subset_band_ids}
+        band_ids = plan.band_ids_in_order()
+        present_band_ids = set(band_ids)
+        missing = sorted(want - present_band_ids)
+        if missing:
+            raise ValueError(f"subset_band_ids contains unknown band_id(s): {missing}")
+        indices = [i for i, bid in enumerate(band_ids) if bid in want]
+
+    if len(indices) == int(plan.num_channels()):
+        return indices, plan
+
+    channels: list[Channel] = [plan.channels[i] for i in indices]
+    layers_in_order: list[str] = []
+    seen: set[str] = set()
+    for ch in channels:
+        if ch.layer in seen:
+            continue
+        seen.add(ch.layer)
+        layers_in_order.append(ch.layer)
+
+    chip_groups = {k: dict(v) for k, v in plan.chip_groups.items()}
+    derived_dependencies = {k: list(v) for k, v in plan.derived_dependencies.items()}
+
+    return indices, LayerPlan(
+        config_hash=str(plan.config_hash),
+        rasters_hash=str(plan.rasters_hash),
+        layers_in_order=layers_in_order,
+        channels=channels,
+        chip_groups=chip_groups,
+        derived_dependencies=derived_dependencies,
+    )
+
+
 class SSFDataset(Dataset):
     """Empirical SSF dataset (env + valid mask) loaded from a point feature store."""
 
@@ -67,6 +121,8 @@ class SSFDataset(Dataset):
         plan: LayerPlan,
         split: str,
         normalize: bool = True,
+        subset_env_layers: list[str] | None = None,
+        subset_band_ids: list[str] | None = None,
         num_candidates: int | None = None,
         random_seed: int | None = None,
         step_multiplier: float | None = None,
@@ -111,6 +167,12 @@ class SSFDataset(Dataset):
         if int(self.env.shape[1]) != int(self.plan.num_channels()):
             raise ValueError(f"env.shape[1] ({self.env.shape[1]}) must match plan.num_channels() ({self.plan.num_channels()})")
 
+        idxs, view_plan = _subset_plan_env_channels(self.plan, subset_env_layers=subset_env_layers, subset_band_ids=subset_band_ids)
+        if len(idxs) != int(self.plan.num_channels()):
+            self.env = self.env[:, idxs, :]
+            self.valid = self.valid[:, idxs, :]
+            self.plan = view_plan
+
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
@@ -154,6 +216,8 @@ class iSSFDataset(SSFDataset):
         plan: LayerPlan,
         split: str,
         normalize: bool = True,
+        subset_env_layers: list[str] | None = None,
+        subset_band_ids: list[str] | None = None,
         normalize_movement: bool = True,
         include_time: bool = False,
         include_individual_id: bool = False,
@@ -199,6 +263,19 @@ class iSSFDataset(SSFDataset):
 
         if self.step_length_m is None or self.turn_angle_rad is None or self.point_id_start is None or self.timestamp_ns is None:
             raise ValueError("features.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
+
+        if self.env.ndim != 3 or self.valid.ndim != 3:
+            raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
+        if tuple(self.env.shape) != tuple(self.valid.shape):
+            raise ValueError(f"env and valid shapes must match; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
+        if int(self.env.shape[1]) != int(self.plan.num_channels()):
+            raise ValueError(f"env.shape[1] ({self.env.shape[1]}) must match plan.num_channels() ({self.plan.num_channels()})")
+
+        idxs, view_plan = _subset_plan_env_channels(self.plan, subset_env_layers=subset_env_layers, subset_band_ids=subset_band_ids)
+        if len(idxs) != int(self.plan.num_channels()):
+            self.env = self.env[:, idxs, :]
+            self.valid = self.valid[:, idxs, :]
+            self.plan = view_plan
 
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
