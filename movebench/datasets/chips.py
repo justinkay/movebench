@@ -21,7 +21,7 @@ from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
 from movebench.rasters import Raster, reproject_to_meters
-from movebench.trajectories import POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
+from movebench.trajectories import LAT_COL, LON_COL, POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
 
 
 TARGET_CRS = "EPSG:3857" # meters
@@ -40,6 +40,8 @@ def _compute_valid_mask(values: torch.Tensor, nodata: Any) -> torch.Tensor:
 class _Row:
     point_id: int
     timestamp: Any
+    lon: float
+    lat: float
 
 
 class ChipDataset(Dataset):
@@ -69,19 +71,59 @@ class ChipDataset(Dataset):
 
         if POINT_ID_COL not in df.columns:
             raise ValueError(f"trajectories.csv missing required column: {POINT_ID_COL!r}")
+        if LON_COL not in df.columns or LAT_COL not in df.columns:
+            raise ValueError(f"trajectories.csv missing required columns: {LON_COL!r}, {LAT_COL!r}")
 
         self._rows: list[_Row] = [
-            _Row(point_id=int(row[POINT_ID_COL]), timestamp=row[TIME_COL]) for _, row in df.iterrows()
+            _Row(
+                point_id=int(row[POINT_ID_COL]),
+                timestamp=row[TIME_COL],
+                lon=float(row[LON_COL]),
+                lat=float(row[LAT_COL]),
+            )
+            for _, row in df.iterrows()
         ]
 
         self._ref_layer = self._select_reference_layer()
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
 
     def _select_reference_layer(self) -> str:
+        # Prefer a per-point chip group when available.
         for layer in self.plan.layers_in_order:
             if self.registry.get(layer).source == "gee_chip":
                 return layer
-        raise ValueError("ChipDataset requires at least one gee_chip layer in the LayerPlan to define bounds.")
+        # Otherwise fall back to a tile layer (e.g. dem/dist_water). Prefer dem when present.
+        tile_layers = [l for l in self.plan.layers_in_order if self.registry.get(l).source == "gee_tile"]
+        if not tile_layers:
+            raise ValueError(
+                "ChipDataset requires at least one gee_chip or gee_tile layer in the LayerPlan to define bounds."
+            )
+        if "dem" in tile_layers:
+            return "dem"
+        return tile_layers[0]
+
+    def _tile_bounds_for_point(self, layer: str, *, lon: float, lat: float) -> tuple[float, float, float, float]:
+        """Return the downloaded tile bounds (EPSG:4326) that contain a point."""
+        import json
+
+        tile_dir = self.study_dir / "rasters" / str(self.plan.rasters_hash) / "tiles" / str(layer)
+        index_path = tile_dir / "index.json"
+        if not index_path.exists():
+            raise FileNotFoundError(f"Tile index.json not found for layer={layer!r}: {index_path}")
+
+        with open(index_path, "r") as f:
+            d = json.load(f)
+        tiles = d.get("tiles", [])
+        for t in tiles:
+            b = t.get("bounds", {})
+            min_lon = float(b["min_lon"])
+            max_lon = float(b["max_lon"])
+            min_lat = float(b["min_lat"])
+            max_lat = float(b["max_lat"])
+            if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat):
+                return (min_lon, min_lat, max_lon, max_lat)
+
+        raise FileNotFoundError(f"No downloaded tile for layer={layer!r} contains lon/lat=({lon},{lat})")
 
     def _build_chip_group_layer_slices(self) -> dict[str, dict[str, tuple[int, int]]]:
         out: dict[str, dict[str, tuple[int, int]]] = {}
@@ -104,16 +146,25 @@ class ChipDataset(Dataset):
         point_id = int(row.point_id)
         timestamp = row.timestamp
 
-        ref_group = self.plan.chip_group_for_layer(self._ref_layer)
-        if ref_group is None:
-            raise ValueError(f"Reference layer {self._ref_layer!r} is not in any chip group")
+        ref_spec = self.registry.get(self._ref_layer)
+        if ref_spec.source == "gee_chip":
+            ref_group = self.plan.chip_group_for_layer(self._ref_layer)
+            if ref_group is None:
+                raise ValueError(f"Reference layer {self._ref_layer!r} is not in any chip group")
 
-        # Reference chip group defines bounds for tile/local layers and the
-        # output grid for metric reprojection.
-        ref_chip = self.io.load_chip_group(ref_group, point_id=point_id)
-        bounds_latlon = ref_chip.bounds
+            # Reference chip group defines bounds for tile/local layers and the
+            # output grid for metric reprojection.
+            ref_raster = self.io.load_chip_group(ref_group, point_id=point_id)
+            bounds_latlon = ref_raster.bounds
+        else:
+            # No per-point chip groups: use the downloaded tile that contains the point.
+            bounds_latlon = self._tile_bounds_for_point(self._ref_layer, lon=float(row.lon), lat=float(row.lat))
+            ref_group = None
+            ref_raster = self.io.load_layer(self._ref_layer, bounds_latlon=bounds_latlon, timestamp=timestamp)
 
         cache: dict[str, Raster] = {}
+        if ref_group is None:
+            cache[self._ref_layer] = ref_raster
 
         def get_raster(layer: str) -> Raster:
             return self.io.load_layer_cached(
@@ -141,23 +192,30 @@ class ChipDataset(Dataset):
         non_chip_layers = [l for l in self.plan.layers_in_order if self.registry.get(l).source != "gee_chip"]
         non_chip_rasters = [get_raster(l) for l in non_chip_layers]
 
-        # Warp: reference chip group first, then other chip groups, then non-chip layers.
+        # Warp: reference raster first, then other chip groups, then non-chip layers.
         warp_kinds: list[str] = []
         warp_names: list[str] = []
         warp_rasters: list[Raster] = []
 
-        warp_kinds.append("chip_group")
-        warp_names.append(ref_group)
-        warp_rasters.append(chip_groups[ref_group])
-
-        for g in needed_chip_groups:
-            if g == ref_group:
-                continue
+        if ref_group is not None:
             warp_kinds.append("chip_group")
-            warp_names.append(g)
-            warp_rasters.append(chip_groups[g])
+            warp_names.append(ref_group)
+            warp_rasters.append(ref_raster)
+
+            for g in needed_chip_groups:
+                if g == ref_group:
+                    continue
+                warp_kinds.append("chip_group")
+                warp_names.append(g)
+                warp_rasters.append(chip_groups[g])
+        else:
+            warp_kinds.append("layer")
+            warp_names.append(self._ref_layer)
+            warp_rasters.append(ref_raster)
 
         for layer, r in zip(non_chip_layers, non_chip_rasters):
+            if ref_group is None and layer == self._ref_layer:
+                continue
             warp_kinds.append("layer")
             warp_names.append(layer)
             warp_rasters.append(r)
@@ -184,7 +242,6 @@ class ChipDataset(Dataset):
 
         # Categorical layers (one-hot encoded later) must use nearest-neighbor
         # resampling to avoid creating fractional class IDs during reprojection.
-        ref_raster = chip_groups[ref_group]
         for layer, r in zip(non_chip_layers, non_chip_rasters):
             if not self.registry.get(layer).categorical:
                 continue

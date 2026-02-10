@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import rasterio
 import numpy as np
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from typing import Any, Iterable
 from rasterio.enums import Resampling
 from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, transform_bounds
-from rasterio.windows import from_bounds
+from rasterio.windows import Window, bounds as window_bounds, from_bounds
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,21 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
         else:
             bounds_in_ds = (min_lon, min_lat, max_lon, max_lat)
 
-        window = from_bounds(*bounds_in_ds, transform=ds.transform)
+        # Rasterio can produce empty windows for bounds smaller than 1 pixel.
+        # Convert to an integer window and force at least one pixel in each dim.
+        win = from_bounds(*bounds_in_ds, transform=ds.transform)
+        col0 = int(math.floor(win.col_off))
+        row0 = int(math.floor(win.row_off))
+        col1 = int(math.ceil(win.col_off + win.width))
+        row1 = int(math.ceil(win.row_off + win.height))
+        if col1 <= col0:
+            col1 = col0 + 1
+        if row1 <= row0:
+            row1 = row0 + 1
+        window = Window(col0, row0, col1 - col0, row1 - row0)
+        b = window_bounds(window, ds.transform)
+        win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+
         fill_val = ds.nodata if ds.nodata is not None else np.nan
         arr = ds.read(window=window, boundless=True, fill_value=fill_val)
         band_ids = list(ds.descriptions) if ds.descriptions and any(ds.descriptions) else [f"band_{i+1}" for i in range(ds.count)]
@@ -68,7 +83,7 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
             transform=ds.window_transform(window),
             crs=ds.crs,
             nodata=fill_val,
-            bounds=tuple(map(float, bounds_in_ds)),
+            bounds=win_bounds,
             band_ids=band_ids,
         )
 
@@ -91,10 +106,23 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
 
         min_lon, min_lat, max_lon, max_lat = bounds_latlon
         left, bottom, right, top = transform_bounds("EPSG:4326", crs, min_lon, min_lat, max_lon, max_lat)
+        # Snap to >=1-pixel integer bounds in the dataset CRS (avoids 0x0 merges).
+        win = from_bounds(float(left), float(bottom), float(right), float(top), transform=datasets[0].transform)
+        col0 = int(math.floor(win.col_off))
+        row0 = int(math.floor(win.row_off))
+        col1 = int(math.ceil(win.col_off + win.width))
+        row1 = int(math.ceil(win.row_off + win.height))
+        if col1 <= col0:
+            col1 = col0 + 1
+        if row1 <= row0:
+            row1 = row0 + 1
+        win_i = Window(col0, row0, col1 - col0, row1 - row0)
+        b = window_bounds(win_i, datasets[0].transform)
+        win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
 
         mosaic, out_transform = merge(
             datasets,
-            bounds=(left, bottom, right, top),
+            bounds=win_bounds,
             nodata=nodata_val,
             resampling=Resampling.nearest,
         )
@@ -113,7 +141,7 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
             transform=out_transform,
             crs=crs,
             nodata=nodata_out,
-            bounds=(float(left), float(bottom), float(right), float(top)),
+            bounds=win_bounds,
             band_ids=band_ids,
         )
     finally:
