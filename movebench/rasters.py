@@ -121,10 +121,20 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
             ds.close()
 
 
-def reproject_to_meters(layers: list[Raster], dst_crs: str = "EPSG:3857") -> tuple[list[np.ndarray], Any, str]:
+def reproject_to_meters(
+    layers: list[Raster],
+    dst_crs: str = "EPSG:3857",
+    *,
+    resampling: Resampling = Resampling.nearest,
+) -> tuple[list[np.ndarray], Any, str]:
     """Reproject all layers to a metric CRS, aligned to the first layer's bounds.
 
     This mirrors the legacy behavior in movebench, but works with `Raster` objects.
+
+    Args:
+        layers: Input rasters to align. All outputs share a common grid.
+        dst_crs: Destination CRS.
+        resampling: Rasterio resampling strategy used for reprojection.
     """
     if not layers:
         raise ValueError("reproject_to_meters requires at least one Raster")
@@ -166,7 +176,7 @@ def reproject_to_meters(layers: list[Raster], dst_crs: str = "EPSG:3857") -> tup
             src_crs=layer.crs,
             dst_transform=dst_transform,
             dst_crs=dst_crs,
-            resampling=Resampling.nearest,
+            resampling=resampling,
             src_nodata=src_nodata if src_nodata is not None else np.nan,
             dst_nodata=dst_nodata,
         )

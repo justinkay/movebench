@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from rasterio.enums import Resampling
 from torch.utils.data import Dataset
 
 from movebench.layers.io import LayerIO
@@ -161,7 +162,13 @@ class ChipDataset(Dataset):
             warp_names.append(layer)
             warp_rasters.append(r)
 
-        aligned_arrays, final_transform, final_crs = reproject_to_meters(warp_rasters, dst_crs=TARGET_CRS)
+        # Default to bilinear resampling for continuous layers; categorical layers
+        # are overridden below with nearest neighbor to preserve class IDs.
+        aligned_arrays, final_transform, final_crs = reproject_to_meters(
+            warp_rasters,
+            dst_crs=TARGET_CRS,
+            resampling=Resampling.bilinear,
+        )
 
         aligned_chip_groups: dict[str, np.ndarray] = {}
         aligned_layers: dict[str, np.ndarray] = {}
@@ -174,6 +181,19 @@ class ChipDataset(Dataset):
             else:
                 aligned_layers[name] = arr
             nodata_by_name[(kind, name)] = warp_rasters[i].nodata
+
+        # Categorical layers (one-hot encoded later) must use nearest-neighbor
+        # resampling to avoid creating fractional class IDs during reprojection.
+        ref_raster = chip_groups[ref_group]
+        for layer, r in zip(non_chip_layers, non_chip_rasters):
+            if not self.registry.get(layer).categorical:
+                continue
+            cat_aligned, _, _ = reproject_to_meters(
+                [ref_raster, r],
+                dst_crs=TARGET_CRS,
+                resampling=Resampling.nearest,
+            )
+            aligned_layers[layer] = cat_aligned[1]
 
         # Build final (C,H,W) stack in LayerPlan channel order.
         H, W = aligned_arrays[0].shape[1:]
