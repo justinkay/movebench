@@ -539,6 +539,7 @@ def _extract_one_step(
         start, end = layer_slices[layer]
         spec = REGISTRY.get(layer)
 
+        # TODO: get rid of second clause?
         bilinear = (not spec.categorical) and (layer not in {"dynamic_world", "landsat_ndwi"})
 
         r = get_raster(layer)

@@ -641,25 +641,137 @@ def download_tile_layer(
     if missing:
         raise ValueError(f"trajectories df missing required columns: {missing}")
 
-    ensure_ee_initialized()
+    ee = ensure_ee_initialized()
 
     layer_scale = compute_group_scale(buffer_km, float(spec.native_scale_m))
 
-    regions = []
-    for _, row in df.iterrows():
-        lon = float(row[LON_COL])
-        lat = float(row[LAT_COL])
-        split = str(row[SET_COL])
-        region_mult = float(REGION_MULTIPLIER.get(split, 1.0))
-        regions.append(square_region_for_point(lon, lat, region_mult * buffer_km))
-
-    union_region = union_regions(regions)
-
-    ee = ensure_ee_initialized()
     crs = "EPSG:4326"
     grid_size_m = float(layer_scale) * float(px_per_side)
-    bounds = union_region.bounds(proj=crs, maxError=10)
-    grid = bounds.coveringGrid(proj=crs, scale=grid_size_m)
+
+    # Avoid building a huge Earth Engine union geometry from per-point buffers:
+    # bucket points into coarse spatial bins and build one conservative rectangle per bucket.
+    import numpy as np
+
+    lon = df[LON_COL].astype(float)
+    lat = df[LAT_COL].astype(float)
+    if lon.isna().any() or lat.isna().any():
+        raise ValueError("trajectories df contains NaN lon/lat values")
+
+    ref_lat = float(lat.median())
+    lon_deg_to_m_ref = 111320.0 * math.cos(math.radians(ref_lat))
+    bucket_deg_lon = 360.0 if abs(lon_deg_to_m_ref) < 1e-6 else grid_size_m / lon_deg_to_m_ref
+    bucket_deg_lat = grid_size_m / 110540.0
+
+    bucket_deg_lon = max(float(bucket_deg_lon), 1e-6)
+    bucket_deg_lat = max(float(bucket_deg_lat), 1e-6)
+
+    MAX_BUCKETS = 5000
+    MAX_COARSEN_ITERS = 4
+
+    base = pd.DataFrame(
+        {
+            "split": df[SET_COL].astype(str),
+            "lon": lon,
+            "lat": lat,
+            "lat_abs": lat.abs(),
+        }
+    )
+
+    grouped = None
+    b_lon = bucket_deg_lon
+    b_lat = bucket_deg_lat
+    for _ in range(MAX_COARSEN_ITERS + 1):
+        lon_bin = np.floor((base["lon"] + 180.0) / b_lon).astype("int64")
+        lat_bin = np.floor((base["lat"] + 90.0) / b_lat).astype("int64")
+        g = (
+            base.assign(lon_bin=lon_bin, lat_bin=lat_bin)
+            .groupby(["split", "lon_bin", "lat_bin"], sort=False)
+            .agg(
+                min_lon=("lon", "min"),
+                max_lon=("lon", "max"),
+                min_lat=("lat", "min"),
+                max_lat=("lat", "max"),
+                max_abs_lat=("lat_abs", "max"),
+            )
+            .reset_index()
+        )
+        if len(g) <= MAX_BUCKETS:
+            grouped = g
+            break
+        b_lon *= 2.0
+        b_lat *= 2.0
+
+    if grouped is None:
+        grouped = (
+            base.groupby(["split"], sort=False)
+            .agg(
+                min_lon=("lon", "min"),
+                max_lon=("lon", "max"),
+                min_lat=("lat", "min"),
+                max_lat=("lat", "max"),
+                max_abs_lat=("lat_abs", "max"),
+            )
+            .reset_index()
+        )
+
+    rect_geoms = []
+    rect_bounds: list[tuple[float, float, float, float]] = []
+
+    for _, r in grouped.iterrows():
+        split = str(r["split"])
+        region_mult = float(REGION_MULTIPLIER.get(split, 1.0))
+        buffer_m = float(buffer_km) * 1000.0 * region_mult
+
+        buffer_deg_lat = buffer_m / 110540.0
+        lon_deg_to_m = 111320.0 * math.cos(math.radians(float(r["max_abs_lat"])))
+        buffer_deg_lon = 180.0 if abs(lon_deg_to_m) < 1e-6 else buffer_m / lon_deg_to_m
+
+        min_lon_exp = float(r["min_lon"]) - buffer_deg_lon
+        max_lon_exp = float(r["max_lon"]) + buffer_deg_lon
+        min_lat_exp = float(r["min_lat"]) - buffer_deg_lat
+        max_lat_exp = float(r["max_lat"]) + buffer_deg_lat
+
+        min_lat_exp = max(min_lat_exp, -89.9999)
+        max_lat_exp = min(max_lat_exp, 89.9999)
+
+        rects: list[tuple[float, float, float, float]]
+        if (max_lon_exp - min_lon_exp) >= 360.0:
+            rects = [(-180.0, min_lat_exp, 180.0, max_lat_exp)]
+        elif max_lon_exp > 180.0:
+            rects = [
+                (min_lon_exp, min_lat_exp, 180.0, max_lat_exp),
+                (-180.0, min_lat_exp, max_lon_exp - 360.0, max_lat_exp),
+            ]
+        elif min_lon_exp < -180.0:
+            rects = [
+                (min_lon_exp + 360.0, min_lat_exp, 180.0, max_lat_exp),
+                (-180.0, min_lat_exp, max_lon_exp, max_lat_exp),
+            ]
+        else:
+            rects = [(min_lon_exp, min_lat_exp, max_lon_exp, max_lat_exp)]
+
+        for a, b, c, d in rects:
+            a = max(float(a), -180.0)
+            c = min(float(c), 180.0)
+            b = float(b)
+            d = float(d)
+            if a >= c or b >= d:
+                continue
+            rect_bounds.append((a, b, c, d))
+            rect_geoms.append(ee.Geometry.Rectangle([a, b, c, d], proj=crs, geodesic=False))
+
+    if not rect_geoms:
+        raise RuntimeError("No bucket rectangles were constructed for tiling")
+
+    min_rect_lon = min(b[0] for b in rect_bounds)
+    min_rect_lat = min(b[1] for b in rect_bounds)
+    max_rect_lon = max(b[2] for b in rect_bounds)
+    max_rect_lat = max(b[3] for b in rect_bounds)
+
+    bounds_rect = ee.Geometry.Rectangle([min_rect_lon, min_rect_lat, max_rect_lon, max_rect_lat], proj=crs, geodesic=False)
+    union_region = union_regions(rect_geoms)
+
+    grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m)
     filtered = grid.filter(ee.Filter.intersects(".geo", union_region))
 
     n_tiles = int(filtered.size().getInfo())
