@@ -1,9 +1,13 @@
 #!/usr/bin/env python
-"""Ingest a Movebank-formatted CSV into movebench as a new study.
+"""Ingest Movebank-formatted CSVs into movebench as new studies.
 
 This script creates:
   data/movebench/studies/<study_id>/trajectories.csv
   data/movebench/studies/<study_id>/manifest.json
+
+It can ingest either:
+  - a single CSV file, or
+  - a directory of CSVs (one study per CSV; study_id defaults to each CSV stem).
 
 Unless overridden via:
   - `--data-root`, or
@@ -15,8 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import shutil
 import sys
+import uuid
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -30,6 +37,16 @@ def _insert_repo_root_on_path() -> None:
     root = _repo_root()
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
+
+
+def _parse_int_with_underscores(value: str) -> int:
+    s = str(value).strip()
+    if not s:
+        raise argparse.ArgumentTypeError("Expected an integer")
+    try:
+        return int(s.replace("_", ""))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"Invalid integer: {value!r}") from e
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -74,6 +91,62 @@ def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _subsample_individuals(
+    df: pd.DataFrame,
+    *,
+    max_individuals: int,
+    max_points: int,
+    random_seed: int,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    from movebench.trajectories import INDIVIDUAL_COL
+
+    if max_individuals <= 0:
+        raise ValueError(f"max_individuals must be > 0, got {max_individuals}")
+    if max_points <= 0:
+        raise ValueError(f"max_points must be > 0, got {max_points}")
+
+    df = df.copy()
+    df = df.dropna(subset=[INDIVIDUAL_COL])
+
+    n_points_before = int(len(df))
+    n_individuals_before = int(df[INDIVIDUAL_COL].nunique())
+    if n_points_before == 0 or n_individuals_before == 0:
+        raise ValueError("No valid rows/individuals remaining after filtering timestamps/lat/lon/individual ids.")
+
+    counts = df.groupby(INDIVIDUAL_COL).size()
+    individual_ids = sorted(counts.index.tolist(), key=lambda x: str(x))
+    random.Random(int(random_seed)).shuffle(individual_ids)
+
+    selected: list[object] = []
+    cumulative_points = 0
+    stop_reason = "all_individuals"
+
+    for indiv in individual_ids:
+        selected.append(indiv)
+        cumulative_points += int(counts.loc[indiv])
+        if len(selected) == int(max_individuals):
+            stop_reason = "max_individuals"
+            break
+        if cumulative_points > int(max_points):
+            stop_reason = "max_points"
+            break
+
+    df = df[df[INDIVIDUAL_COL].isin(selected)].copy()
+
+    info: dict[str, object] = {
+        "max_individuals": int(max_individuals),
+        "max_points": int(max_points),
+        "random_seed": int(random_seed),
+        "stop_reason": str(stop_reason),
+        "selected_individuals": [str(x) for x in selected],
+        "n_points_before": int(n_points_before),
+        "n_individuals_before": int(n_individuals_before),
+        "n_points_after": int(len(df)),
+        "n_individuals_after": int(df[INDIVIDUAL_COL].nunique()),
+    }
+    return df, info
+
+
 def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
     from movebench.trajectories import INDIVIDUAL_COL, SET_COL, TIME_COL
 
@@ -100,7 +173,14 @@ def _sort_and_assign_point_id(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _write_manifest(*, study_dir: Path, study_id: str, source_csv: str, df: pd.DataFrame) -> None:
+def _write_manifest(
+    *,
+    study_dir: Path,
+    study_id: str,
+    source_csv: str,
+    df: pd.DataFrame,
+    subsample: dict[str, object] | None = None,
+) -> None:
     from movebench.features.manifest import utc_now_iso
     from movebench.trajectories import INDIVIDUAL_COL, SET_COL
 
@@ -122,40 +202,61 @@ def _write_manifest(*, study_dir: Path, study_id: str, source_csv: str, df: pd.D
             "n_test": n_test,
         },
     }
+    if subsample is not None:
+        manifest["subsample"] = dict(subsample)
     (study_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Ingest a Movebank CSV into movebench.")
-    parser.add_argument("csv_path", type=Path, help="Path to a Movebank-formatted CSV.")
-    parser.add_argument("--study-id", type=str, default=None, help="Study id (default: CSV stem).")
-    parser.add_argument("--data-root", type=Path, default=None, help="Override MOVEBENCH_DATA_ROOT for this run.")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing study directory.")
-    parser.add_argument("--dry-run", action="store_true", help="Print what would happen without writing.")
-    args = parser.parse_args(argv[1:])
+def _commit_staged_study_dir(*, staged_dir: Path, final_dir: Path, force: bool) -> None:
+    if not staged_dir.exists():
+        raise FileNotFoundError(f"Staged study directory missing: {staged_dir}")
 
-    _insert_repo_root_on_path()
+    if final_dir.exists():
+        if not force:
+            raise FileExistsError(f"Study directory already exists: {final_dir} (use --force to overwrite)")
+        backup = final_dir.with_name(f"{final_dir.name}.bak_ingest_{os.getpid()}_{uuid.uuid4().hex}")
+        final_dir.rename(backup)
+        try:
+            staged_dir.rename(final_dir)
+        except Exception:
+            if not final_dir.exists() and backup.exists():
+                backup.rename(final_dir)
+            raise
+        else:
+            shutil.rmtree(backup)
+        return
 
-    if args.data_root is not None:
-        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
+    staged_dir.rename(final_dir)
 
-    from movebench import paths
+
+def _ingest_one_csv(
+    *,
+    csv_path: Path,
+    study_id: str,
+    study_dir: Path,
+    max_individuals: int,
+    max_points: int,
+    random_seed: int,
+    dry_run: bool,
+    force: bool,
+    compact_logs: bool = False,
+    log_prefix: str = "",
+) -> None:
     from movebench.trajectories import INDIVIDUAL_COL, SET_COL
-
-    csv_path = args.csv_path.expanduser().resolve()
-    if not csv_path.exists():
-        parser.error(f"CSV not found: {csv_path}")
-
-    study_id = str(args.study_id) if args.study_id else csv_path.stem
-    study_dir = paths.study_dir(study_id)
 
     df = pd.read_csv(csv_path, low_memory=False)
     df = _normalize_columns(df)
     df = _ensure_required_columns(df)
     df = _parse_and_filter(df)
+    df, subsample_info = _subsample_individuals(
+        df,
+        max_individuals=max_individuals,
+        max_points=max_points,
+        random_seed=random_seed,
+    )
 
     if len(df) == 0:
-        raise ValueError("No valid rows remaining after filtering timestamps/lat/lon.")
+        raise ValueError("No valid rows remaining after filtering/subsampling.")
 
     df = _ensure_set_split(df)
     df = _sort_and_assign_point_id(df)
@@ -164,31 +265,187 @@ def main(argv: list[str]) -> int:
     n_test = int((df[SET_COL] == "test").sum())
     if n_train == 0:
         raise ValueError("No train rows found after split assignment; cannot proceed.")
-    if n_test == 0:
-        print("WARNING: no test rows found after split assignment (all points are train).")
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
 
-    print(f"csv_path:   {csv_path}")
-    print(f"study_id:   {study_id}")
-    print(f"study_dir:  {study_dir}")
-    print(f"n_points:   {n_points}")
-    print(f"individuals:{n_individuals}")
-    print(f"split:      train={n_train} test={n_test}")
+    if compact_logs:
+        before_p = int(subsample_info["n_points_before"])
+        before_i = int(subsample_info["n_individuals_before"])
+        reason = str(subsample_info["stop_reason"])
+        print(
+            f"{log_prefix}{csv_path.name} -> {study_id} "
+            f"points={n_points}/{before_p} individuals={n_individuals}/{before_i} stop={reason} "
+            f"split=train={n_train} test={n_test}"
+        )
+    else:
+        print(f"{log_prefix}csv_path:   {csv_path}")
+        print(f"{log_prefix}study_id:   {study_id}")
+        print(f"{log_prefix}study_dir:  {study_dir}")
+        print(
+            f"{log_prefix}subsample:  "
+            f"max_individuals={int(max_individuals)} max_points={int(max_points)} random_seed={int(random_seed)} "
+            f"stop={subsample_info['stop_reason']}"
+        )
+        print(
+            f"{log_prefix}n_points:   {n_points} (from {int(subsample_info['n_points_before'])})"
+        )
+        print(
+            f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})"
+        )
+        print(f"{log_prefix}split:      train={n_train} test={n_test}")
 
-    if args.dry_run:
-        return 0
+    if n_test == 0:
+        print(f"{log_prefix}WARNING: no test rows found after split assignment (all points are train).")
+
+    if dry_run:
+        return
 
     if study_dir.exists():
-        if not args.force:
+        if not force:
             raise FileExistsError(f"Study directory already exists: {study_dir} (use --force to overwrite)")
         shutil.rmtree(study_dir)
 
     study_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(study_dir / "trajectories.csv", index=False)
-    _write_manifest(study_dir=study_dir, study_id=study_id, source_csv=str(csv_path), df=df)
+    _write_manifest(
+        study_dir=study_dir,
+        study_id=study_id,
+        source_csv=str(csv_path),
+        df=df,
+        subsample=subsample_info,
+    )
 
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Ingest Movebank CSV(s) into movebench.")
+    parser.add_argument("source_path", type=Path, help="Path to a Movebank-formatted CSV or a directory of CSVs.")
+    parser.add_argument("--study-id", type=str, default=None, help="Study id (default: CSV stem).")
+    parser.add_argument("--data-root", type=Path, default=None, help="Override MOVEBENCH_DATA_ROOT for this run.")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing study directory.")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would happen without writing.")
+    parser.add_argument(
+        "--max-individuals",
+        type=_parse_int_with_underscores,
+        default=10,
+        help="Maximum number of individuals to keep (default: 10).",
+    )
+    parser.add_argument(
+        "--max-points",
+        type=_parse_int_with_underscores,
+        default=100_000,
+        help="Stop after cumulative points exceeds this threshold (default: 100_000).",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=0,
+        help="Random seed for individual subsampling (default: 0).",
+    )
+    args = parser.parse_args(argv[1:])
+
+    _insert_repo_root_on_path()
+
+    if args.data_root is not None:
+        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
+
+    from movebench import paths
+
+    source_path = args.source_path.expanduser().resolve()
+    if not source_path.exists():
+        parser.error(f"Path not found: {source_path}")
+
+    if source_path.is_dir():
+        if args.study_id is not None:
+            parser.error("--study-id cannot be used when source_path is a directory (one study per CSV).")
+
+        csv_paths = sorted(source_path.glob("*.csv"))
+        if not csv_paths:
+            parser.error(f"No CSV files found in directory: {source_path}")
+
+        stem_counts = Counter([p.stem for p in csv_paths])
+        dupes = sorted([s for s, c in stem_counts.items() if c > 1])
+        if dupes:
+            parser.error(f"Duplicate CSV stems (study_id collisions) found in directory: {dupes}")
+
+        print(f"dir_path:   {source_path}")
+        print(f"csvs:       {len(csv_paths)}")
+
+        jobs: list[tuple[Path, str, Path]] = []
+        for p in csv_paths:
+            sid = p.stem
+            sdir = paths.study_dir(sid)
+            jobs.append((p, sid, sdir))
+
+        if not args.dry_run:
+            existing = [sdir for _, _, sdir in jobs if sdir.exists()]
+            if existing and not args.force:
+                raise FileExistsError(
+                    "Study directory already exists (use --force to overwrite): "
+                    + ", ".join([str(p) for p in existing])
+                )
+
+        total = len(jobs)
+        if args.dry_run:
+            for i, (csv_path, study_id, study_dir) in enumerate(jobs, start=1):
+                _ingest_one_csv(
+                    csv_path=csv_path,
+                    study_id=study_id,
+                    study_dir=study_dir,
+                    max_individuals=int(args.max_individuals),
+                    max_points=int(args.max_points),
+                    random_seed=int(args.random_seed),
+                    dry_run=True,
+                    force=bool(args.force),
+                    compact_logs=True,
+                    log_prefix=f"[{i}/{total}] ",
+                )
+            return 0
+
+        tmp_root = paths.studies_root() / f".tmp_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        tmp_root.mkdir(parents=True, exist_ok=False)
+        try:
+            for i, (csv_path, study_id, _) in enumerate(jobs, start=1):
+                staged_dir = tmp_root / study_id
+                _ingest_one_csv(
+                    csv_path=csv_path,
+                    study_id=study_id,
+                    study_dir=staged_dir,
+                    max_individuals=int(args.max_individuals),
+                    max_points=int(args.max_points),
+                    random_seed=int(args.random_seed),
+                    dry_run=False,
+                    force=True,
+                    compact_logs=True,
+                    log_prefix=f"[{i}/{total}] ",
+                )
+
+            for _, study_id, final_dir in jobs:
+                staged_dir = tmp_root / study_id
+                _commit_staged_study_dir(staged_dir=staged_dir, final_dir=final_dir, force=bool(args.force))
+        except Exception:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        return 0
+
+    # ---- single file mode ----
+    csv_path = source_path
+    study_id = str(args.study_id) if args.study_id else csv_path.stem
+    study_dir = paths.study_dir(study_id)
+    _ingest_one_csv(
+        csv_path=csv_path,
+        study_id=study_id,
+        study_dir=study_dir,
+        max_individuals=int(args.max_individuals),
+        max_points=int(args.max_points),
+        random_seed=int(args.random_seed),
+        dry_run=bool(args.dry_run),
+        force=bool(args.force),
+        compact_logs=False,
+        log_prefix="",
+    )
     return 0
 
 
