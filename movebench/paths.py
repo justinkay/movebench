@@ -10,7 +10,10 @@ def repo_root() -> Path:
 
 
 def data_root() -> Path:
-    return get_path('data_root')
+    env = os.environ.get("MOVEBENCH_DATA_ROOT")
+    if env:
+        return Path(env)
+    return get_path("data_root")
 
 
 def studies_root() -> Path:

@@ -165,6 +165,10 @@ class Study:
         *,
         split: str = "train",
         config: str | Path = "configs/layers_all.yaml",
+        mode: str = "points",
+        step_multiplier: float = 2.0,
+        step_q: float = 0.95,
+        gap_q: float = 0.999,
     ):
         """Create a ChipDataset for this study.
 
@@ -180,6 +184,10 @@ class Study:
             trajectories_path=self.trajectories_path,
             split=split,
             plan=plan,
+            mode=mode,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
         )
 
     def ssf_dataset(

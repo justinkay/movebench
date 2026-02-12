@@ -112,10 +112,76 @@ def compute_movement_features(
             "lon_rad",
             "lat_prev",
             "lon_prev",
-            "bearing_prev",
             "burst_start",
             "is_first_in_indiv",
         ]
     )
 
     return df
+
+
+def select_step_starts(
+    df: pd.DataFrame,
+    *,
+    step_multiplier: float = 2.0,
+    step_q: float = 0.95,
+    gap_q: float = 0.999,
+) -> pd.DataFrame:
+    """Select valid step starts and attach observed endpoints.
+
+    Returns a dataframe with one row per valid step start containing:
+      - point_id_start, timestamp,
+      - start_lon/start_lat/start_bearing,
+      - end_lon/end_lat for the observed next location.
+
+    This is the shared step selection helper used by both:
+      - point-store extraction (SSF/iSSF), and
+      - raster chip datasets for next-step prediction.
+    """
+    required = [INDIVIDUAL_COL, TIME_COL, LON_COL, LAT_COL, POINT_ID_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"trajectories df missing required columns: {missing}")
+
+    d = compute_movement_features(df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
+    starts = d[d["can_be_step_start"]].copy()
+    if len(starts) == 0:
+        return pd.DataFrame(
+            {
+                "point_id_start": pd.Series(dtype="int64"),
+                "timestamp": pd.Series(dtype="datetime64[ns]"),
+                "start_lon": pd.Series(dtype="float64"),
+                "start_lat": pd.Series(dtype="float64"),
+                "start_bearing": pd.Series(dtype="float64"),
+                "end_lon": pd.Series(dtype="float64"),
+                "end_lat": pd.Series(dtype="float64"),
+            }
+        )
+
+    next_idx = starts["next_index"]
+    starts = starts[next_idx.notna()].copy()
+    next_idx_int = next_idx[next_idx.notna()].astype(int).to_numpy()
+
+    # Align endpoints to starts by reindexing in the same order.
+    ends = d.loc[next_idx_int].copy()
+    starts = starts.reset_index(drop=True)
+    ends = ends.reset_index(drop=True)
+    if len(starts) != len(ends):
+        raise RuntimeError(f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})")
+
+    out = pd.DataFrame(
+        {
+            "point_id_start": starts[POINT_ID_COL].astype(int),
+            "timestamp": starts[TIME_COL],
+            "start_lon": starts[LON_COL].astype(float),
+            "start_lat": starts[LAT_COL].astype(float),
+            "start_bearing": starts["bearing"].astype(float),
+            "end_lon": ends[LON_COL].astype(float),
+            "end_lat": ends[LAT_COL].astype(float),
+        }
+    )
+
+    finite = np.isfinite(
+        out[["start_lon", "start_lat", "start_bearing", "end_lon", "end_lat"]].to_numpy(dtype=np.float64, copy=False)
+    ).all(axis=1)
+    return out.loc[finite].reset_index(drop=True)

@@ -8,20 +8,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from rasterio.enums import Resampling
+from rasterio.transform import rowcol
 from torch.utils.data import Dataset
 
 from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
 from movebench.rasters import Raster, reproject_to_meters
-from movebench.trajectories import LAT_COL, LON_COL, POINT_ID_COL, SET_COL, TIME_COL, load_trajectories_csv
+from movebench.trajectories import (
+    LAT_COL,
+    LON_COL,
+    POINT_ID_COL,
+    SET_COL,
+    TIME_COL,
+    load_trajectories_csv,
+    select_step_starts,
+)
 
 
 TARGET_CRS = "EPSG:3857" # meters
@@ -44,8 +53,26 @@ class _Row:
     lat: float
 
 
+@dataclass(frozen=True)
+class _StepRow:
+    point_id: int
+    timestamp: Any
+    lon: float
+    lat: float
+    end_lon: float
+    end_lat: float
+
+
 class ChipDataset(Dataset):
-    """Load a model-ready raster stack (C,H,W) for each point in a split."""
+    """Load model-ready raster stacks for points or step starts.
+
+    Modes:
+      - mode="points" (default): iterate over every point in the split and return
+        `(env, valid, transform, crs)`.
+      - mode="steps": iterate only over valid step starts and return
+        `(env, valid, y, transform, crs)`, where `y` is a one-hot (H,W) mask for
+        the observed next-step endpoint.
+    """
 
     def __init__(
         self,
@@ -54,6 +81,10 @@ class ChipDataset(Dataset):
         trajectories_path: str | Path,
         split: str,
         plan: LayerPlan,
+        mode: Literal["points", "steps"] = "points",
+        step_multiplier: float = 2.0,
+        step_q: float = 0.95,
+        gap_q: float = 0.999,
         registry: LayerRegistry = REGISTRY,
     ) -> None:
         self.study_dir = Path(study_dir)
@@ -61,6 +92,9 @@ class ChipDataset(Dataset):
         self.split = str(split)
         self.plan = plan
         self.registry = registry
+        self.mode = str(mode)
+        if self.mode not in {"points", "steps"}:
+            raise ValueError(f"Unknown mode={mode!r} (expected 'points' or 'steps')")
 
         self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
 
@@ -68,21 +102,45 @@ class ChipDataset(Dataset):
         df = df[df[SET_COL] == self.split].copy()
         if len(df) == 0:
             raise ValueError(f"No rows found for split={split!r} in {self.trajectories_path}")
+        self.df = df
 
         if POINT_ID_COL not in df.columns:
             raise ValueError(f"trajectories.csv missing required column: {POINT_ID_COL!r}")
         if LON_COL not in df.columns or LAT_COL not in df.columns:
             raise ValueError(f"trajectories.csv missing required columns: {LON_COL!r}, {LAT_COL!r}")
+        if TIME_COL not in df.columns:
+            raise ValueError(f"trajectories.csv missing required column: {TIME_COL!r}")
 
-        self._rows: list[_Row] = [
-            _Row(
-                point_id=int(row[POINT_ID_COL]),
-                timestamp=row[TIME_COL],
-                lon=float(row[LON_COL]),
-                lat=float(row[LAT_COL]),
-            )
-            for _, row in df.iterrows()
-        ]
+        self._to_target = None
+
+        if self.mode == "steps":
+            steps = select_step_starts(df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
+            if len(steps) == 0:
+                raise ValueError(f"No valid step starts found for split={split!r} in {self.trajectories_path}")
+            self._rows: list[_Row | _StepRow] = [
+                _StepRow(
+                    point_id=int(r.point_id_start),
+                    timestamp=pd.Timestamp(r.timestamp),
+                    lon=float(r.start_lon),
+                    lat=float(r.start_lat),
+                    end_lon=float(r.end_lon),
+                    end_lat=float(r.end_lat),
+                )
+                for r in steps.itertuples(index=False)
+            ]
+            from pyproj import Transformer
+
+            self._to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+        else:
+            self._rows = [
+                _Row(
+                    point_id=int(row[POINT_ID_COL]),
+                    timestamp=row[TIME_COL],
+                    lon=float(row[LON_COL]),
+                    lat=float(row[LAT_COL]),
+                )
+                for _, row in df.iterrows()
+            ]
 
         self._ref_layer = self._select_reference_layer()
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
@@ -141,7 +199,7 @@ class ChipDataset(Dataset):
     def __len__(self) -> int:
         return len(self._rows)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, Any, str]:
+    def __getitem__(self, idx: int) -> tuple[Any, ...]:
         row = self._rows[int(idx)]
         point_id = int(row.point_id)
         timestamp = row.timestamp
@@ -299,5 +357,21 @@ class ChipDataset(Dataset):
 
             env[start:end] = torch.where(vmask, vals, torch.zeros_like(vals))
             valid[start:end] = vmask
+
+        if self.mode == "steps":
+            if not isinstance(row, _StepRow):
+                raise RuntimeError("Internal error: expected _StepRow rows when mode='steps'")
+            if self._to_target is None:
+                raise RuntimeError("Internal error: missing coordinate transformer for mode='steps'")
+            x_m, y_m = self._to_target.transform(float(row.end_lon), float(row.end_lat))
+            rr, cc = rowcol(final_transform, x_m, y_m)
+            if not (0 <= int(rr) < int(H) and 0 <= int(cc) < int(W)):
+                raise ValueError(
+                    "Observed endpoint falls outside the chip grid for point_id_start="
+                    f"{point_id}. (row,col)=({rr},{cc}) chip(H,W)=({H},{W})"
+                )
+            y = torch.zeros((int(H), int(W)), dtype=torch.float32)
+            y[int(rr), int(cc)] = 1.0
+            return env, valid, y, final_transform, str(final_crs)
 
         return env, valid, final_transform, str(final_crs)

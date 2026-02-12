@@ -34,6 +34,7 @@ from movebench.trajectories import (
     SET_COL,
     TIME_COL,
     compute_movement_features,
+    select_step_starts,
 )
 
 TARGET_CRS = "EPSG:3857"  # meters
@@ -637,28 +638,29 @@ def extract_split_feature_store(
     if skip_existing and out_pt.exists() and out_manifest.exists():
         return {"split": split, "status": "existing", "out_dir": str(out_dir)}
 
-    df_split = compute_movement_features(df_split, step_multiplier=sampler["step_multiplier"], step_q=sampler["step_q"], gap_q=sampler["gap_q"])
-    sample_indices = df_split.index[df_split["can_be_step_start"]].to_numpy()
-    n_steps = int(len(sample_indices))
+    steps = select_step_starts(
+        df_split,
+        step_multiplier=float(sampler["step_multiplier"]),
+        step_q=float(sampler["step_q"]),
+        gap_q=float(sampler["gap_q"]),
+    )
+    n_steps = int(len(steps))
     P = int(num_candidates) + 1
     C = int(plan.num_channels())
 
     layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
     reqs: list[_StepRequest] = []
-    for orig_idx in sample_indices:
-        row = df_split.loc[orig_idx]
-        next_idx = int(row["next_index"])
-        next_row = df_split.loc[next_idx]
+    for row in steps.itertuples(index=False):
         reqs.append(
             _StepRequest(
-                point_id_start=int(row[POINT_ID_COL]),
-                timestamp=row[TIME_COL],
-                start_lon=float(row[LON_COL]),
-                start_lat=float(row[LAT_COL]),
-                start_bearing=float(row["bearing"]),
-                end_lon=float(next_row[LON_COL]),
-                end_lat=float(next_row[LAT_COL]),
+                point_id_start=int(row.point_id_start),
+                timestamp=pd.Timestamp(row.timestamp),
+                start_lon=float(row.start_lon),
+                start_lat=float(row.start_lat),
+                start_bearing=float(row.start_bearing),
+                end_lon=float(row.end_lon),
+                end_lat=float(row.end_lat),
             )
         )
 
