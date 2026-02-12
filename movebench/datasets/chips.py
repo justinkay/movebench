@@ -18,6 +18,7 @@ from rasterio.enums import Resampling
 from rasterio.transform import rowcol
 from torch.utils.data import Dataset
 
+from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
@@ -81,6 +82,8 @@ class ChipDataset(Dataset):
         trajectories_path: str | Path,
         split: str,
         plan: LayerPlan,
+        normalize: bool = True,
+        normalization_sampler_hash: str | None = None,
         mode: Literal["points", "steps"] = "points",
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
@@ -92,11 +95,21 @@ class ChipDataset(Dataset):
         self.split = str(split)
         self.plan = plan
         self.registry = registry
+        self.normalize = bool(normalize)
         self.mode = str(mode)
         if self.mode not in {"points", "steps"}:
             raise ValueError(f"Unknown mode={mode!r} (expected 'points' or 'steps')")
 
         self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
+        if self.normalize:
+            self._mean, self._std = load_points_normalization_mean_std(
+                study_dir=self.study_dir,
+                plan=self.plan,
+                sampler_hash=normalization_sampler_hash,
+            )
+        else:
+            self._mean = None
+            self._std = None
 
         df = load_trajectories_csv(str(self.trajectories_path))
         df = df[df[SET_COL] == self.split].copy()
@@ -357,6 +370,13 @@ class ChipDataset(Dataset):
 
             env[start:end] = torch.where(vmask, vals, torch.zeros_like(vals))
             valid[start:end] = vmask
+
+        if self.normalize:
+            assert self._mean is not None
+            assert self._std is not None
+            mean = self._mean.view(-1, 1, 1)
+            std = self._std.view(-1, 1, 1)
+            env = torch.where(valid, (env - mean) / std, torch.zeros_like(env))
 
         if self.mode == "steps":
             if not isinstance(row, _StepRow):

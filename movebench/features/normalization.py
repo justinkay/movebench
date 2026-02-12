@@ -15,17 +15,32 @@ def load_points_normalization_mean_std(
     *,
     study_dir: Path,
     plan: LayerPlan,
-    sampler_hash: str,
+    sampler_hash: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Load per-channel mean/std vectors for env normalization from cached stats.json."""
-    stats_path = (
-        Path(study_dir)
-        / "normalization"
-        / "points"
-        / str(plan.config_hash)
-        / str(sampler_hash)
-        / "stats.json"
-    )
+    base_dir = Path(study_dir) / "normalization" / "points" / str(plan.config_hash)
+    if sampler_hash is None:
+        if not base_dir.exists():
+            raise FileNotFoundError(
+                "Normalization stats not found. Run "
+                "Study.compute_normalization_vals(from_='points', ...) first. "
+                f"Expected at least one sampler directory under: {base_dir}"
+            )
+        candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
+        if not candidates:
+            raise FileNotFoundError(
+                "Normalization stats not found. Run "
+                "Study.compute_normalization_vals(from_='points', ...) first. "
+                f"Expected at least one sampler directory under: {base_dir}"
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                "Multiple normalization sampler directories found under "
+                f"{base_dir}: {candidates}. Pass sampler_hash=... to disambiguate."
+            )
+        sampler_hash = candidates[0]
+
+    stats_path = base_dir / str(sampler_hash) / "stats.json"
     if not stats_path.exists():
         raise FileNotFoundError(
             "Normalization stats not found. Run "
