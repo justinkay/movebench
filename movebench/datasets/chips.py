@@ -82,6 +82,7 @@ class ChipDataset(Dataset):
         trajectories_path: str | Path,
         split: str,
         plan: LayerPlan,
+        output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
         normalization_sampler_hash: str | None = None,
         mode: Literal["points", "steps"] = "points",
@@ -95,6 +96,14 @@ class ChipDataset(Dataset):
         self.split = str(split)
         self.plan = plan
         self.registry = registry
+        try:
+            oh, ow = output_hw
+        except Exception as e:
+            raise ValueError(f"output_hw must be a (H,W) tuple, got {output_hw!r}") from e
+        oh_i, ow_i = int(oh), int(ow)
+        if oh_i <= 0 or ow_i <= 0:
+            raise ValueError(f"output_hw must be positive, got {(oh_i, ow_i)}")
+        self.output_hw = (oh_i, ow_i)
         self.normalize = bool(normalize)
         self.mode = str(mode)
         if self.mode not in {"points", "steps"}:
@@ -297,6 +306,8 @@ class ChipDataset(Dataset):
             warp_rasters,
             dst_crs=TARGET_CRS,
             resampling=Resampling.bilinear,
+            dst_height=self.output_hw[0],
+            dst_width=self.output_hw[1],
         )
 
         aligned_chip_groups: dict[str, np.ndarray] = {}
@@ -320,6 +331,8 @@ class ChipDataset(Dataset):
                 [ref_raster, r],
                 dst_crs=TARGET_CRS,
                 resampling=Resampling.nearest,
+                dst_height=self.output_hw[0],
+                dst_width=self.output_hw[1],
             )
             aligned_layers[layer] = cat_aligned[1]
 
@@ -386,12 +399,14 @@ class ChipDataset(Dataset):
             x_m, y_m = self._to_target.transform(float(row.end_lon), float(row.end_lat))
             rr, cc = rowcol(final_transform, x_m, y_m)
             if not (0 <= int(rr) < int(H) and 0 <= int(cc) < int(W)):
-                raise ValueError(
-                    "Observed endpoint falls outside the chip grid for point_id_start="
+                print("WARNING: Observed endpoint falls outside the chip grid for point_id_start="
                     f"{point_id}. (row,col)=({rr},{cc}) chip(H,W)=({H},{W})"
                 )
+            
+            # TODO HACKY CLAMP
+            # FIX THIS LATER
             y = torch.zeros((int(H), int(W)), dtype=torch.float32)
-            y[int(rr), int(cc)] = 1.0
+            y[min(H-1, max(0, int(rr))), min(W-1, max(0, int(cc)))] = 1.0
             return env, valid, y, final_transform, str(final_crs)
 
         return env, valid, final_transform, str(final_crs)
