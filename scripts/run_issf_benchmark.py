@@ -18,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from movebench import Study
-from movebench.models import LinearStepSelect, MLPStepSelect, random_baseline_metrics
+from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
 from movebench.train import collate_step_select, eval_step_select, fit_step_select
 
 

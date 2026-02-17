@@ -1,4 +1,4 @@
-"""PyTorch models for MoveBench2 step selection benchmarks.
+"""Step-selection functions in PyTorch.
 
 All models in this module follow the same contract:
 - input `x` has shape (B, C, P): batch, feature-channels, candidate points
