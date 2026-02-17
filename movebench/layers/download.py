@@ -787,7 +787,12 @@ def download_tile_layer(
         region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
         out_path = tile_dir / f"tile_{i:03d}.tif"
 
-        info = region.getInfo()
+        try:
+            info = region.getInfo()
+        except Exception as e:
+            raise RuntimeError(
+                f"GEE tile geometry getInfo failed (layer={layer!r}, tile_index={i}, n_tiles={n_tiles})"
+            ) from e
         coords = info["coordinates"][0]
         min_lon = min(c[0] for c in coords)
         max_lon = max(c[0] for c in coords)
