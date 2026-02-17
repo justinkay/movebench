@@ -783,16 +783,26 @@ def download_tile_layer(
     tiles_out: list[dict[str, Any]] = []
     stats = {"total": n_tiles, "downloaded": 0, "existing": 0, "failed": 0}
 
+    # Build the tile list once. This avoids repeated `toList(1, offset).get(0)` calls,
+    # which can intermittently error in Earth Engine even when `size()` is non-zero.
+    tile_list = filtered.toList(n_tiles)
+
     for i in range(n_tiles):
-        region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
         out_path = tile_dir / f"tile_{i:03d}.tif"
 
         try:
+            region = ee.Feature(tile_list.get(i)).geometry()
             info = region.getInfo()
         except Exception as e:
-            raise RuntimeError(
-                f"GEE tile geometry getInfo failed (layer={layer!r}, tile_index={i}, n_tiles={n_tiles})"
-            ) from e
+            stats["failed"] += 1
+            tiles_out.append(
+                {
+                    "file": out_path.name,
+                    "tile_index": int(i),
+                    "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
+                }
+            )
+            continue
         coords = info["coordinates"][0]
         min_lon = min(c[0] for c in coords)
         max_lon = max(c[0] for c in coords)
@@ -801,6 +811,7 @@ def download_tile_layer(
 
         tile_meta = {
             "file": out_path.name,
+            "tile_index": int(i),
             "bounds": {"min_lon": min_lon, "max_lon": max_lon, "min_lat": min_lat, "max_lat": max_lat},
         }
 
