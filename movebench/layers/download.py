@@ -633,7 +633,9 @@ def download_tile_layer(
         with open(index_path, "r") as f:
             existing = json.load(f)
         tiles = existing.get("tiles", [])
-        if tiles and all((tile_dir / t["file"]).exists() for t in tiles):
+        # If prior runs recorded errors, do not skip; allow reruns to retry failures.
+        errors = existing.get("errors", [])
+        if tiles and all((tile_dir / t["file"]).exists() for t in tiles) and not errors:
             return {"total": len(tiles), "downloaded": 0, "existing": len(tiles), "failed": 0, "index_path": str(index_path)}
 
     required_cols = [LON_COL, LAT_COL, SET_COL]
@@ -782,25 +784,27 @@ def download_tile_layer(
 
     tiles_out: list[dict[str, Any]] = []
     errors_out: list[dict[str, Any]] = []
+    n_tiles_effective = int(n_tiles_reported)
 
-    # Build the tile list once. This avoids repeated `toList(1, offset).get(0)` calls,
-    # which can intermittently error in Earth Engine even when `size()` is non-zero.
-    tile_list = filtered.toList(n_tiles_reported)
-    try:
-        n_tiles = int(tile_list.size().getInfo())
-    except Exception:
-        # If the list size evaluation fails, fall back to the reported size.
-        n_tiles = int(n_tiles_reported)
+    stats = {"total": int(n_tiles_reported), "downloaded": 0, "existing": 0, "failed": 0}
 
-    stats = {"total": n_tiles, "downloaded": 0, "existing": 0, "failed": 0}
-
-    for i in range(n_tiles):
+    for i in range(int(n_tiles_reported)):
         out_path = tile_dir / f"tile_{i:03d}.tif"
 
         try:
-            region = ee.Feature(tile_list.get(i)).geometry()
+            region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
             info = region.getInfo()
         except Exception as e:
+            msg = str(e)
+            is_list_index_error = ("List index must be between" in msg) or ("List.get: List is empty" in msg)
+
+            # Earth Engine can occasionally report `size()` larger than the number
+            # of items returned by `toList(1, offset)`. If that happens near the tail,
+            # stop early and treat the effective tile count as the first missing index.
+            if is_list_index_error and i >= max(int(n_tiles_reported) - 5, 0):
+                n_tiles_effective = int(i)
+                break
+
             stats["failed"] += 1
             errors_out.append(
                 {
@@ -839,10 +843,15 @@ def download_tile_layer(
             tiles_out.append(tile_meta)
 
     with open(index_path, "w") as f:
+        stats["total"] = int(n_tiles_effective)
+
         payload: dict[str, Any] = {"layer": layer, "scale": float(layer_scale), "tiles": tiles_out}
         if errors_out:
             payload["errors"] = errors_out
             payload["n_tiles_reported"] = int(n_tiles_reported)
+        if int(n_tiles_effective) != int(n_tiles_reported):
+            payload["n_tiles_reported"] = int(n_tiles_reported)
+            payload["n_tiles_effective"] = int(n_tiles_effective)
         json.dump(payload, f, indent=2)
 
     stats["index_path"] = str(index_path)
