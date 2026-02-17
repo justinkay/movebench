@@ -774,18 +774,25 @@ def download_tile_layer(
     grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m)
     filtered = grid.filter(ee.Filter.intersects(".geo", union_region))
 
-    n_tiles = int(filtered.size().getInfo())
+    n_tiles_reported = int(filtered.size().getInfo())
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
     img = _tile_image(layer, registry=registry).unmask(GEE_NODATA_SENTINEL, sameFootprint=False)
 
     tiles_out: list[dict[str, Any]] = []
-    stats = {"total": n_tiles, "downloaded": 0, "existing": 0, "failed": 0}
+    errors_out: list[dict[str, Any]] = []
 
     # Build the tile list once. This avoids repeated `toList(1, offset).get(0)` calls,
     # which can intermittently error in Earth Engine even when `size()` is non-zero.
-    tile_list = filtered.toList(n_tiles)
+    tile_list = filtered.toList(n_tiles_reported)
+    try:
+        n_tiles = int(tile_list.size().getInfo())
+    except Exception:
+        # If the list size evaluation fails, fall back to the reported size.
+        n_tiles = int(n_tiles_reported)
+
+    stats = {"total": n_tiles, "downloaded": 0, "existing": 0, "failed": 0}
 
     for i in range(n_tiles):
         out_path = tile_dir / f"tile_{i:03d}.tif"
@@ -795,10 +802,10 @@ def download_tile_layer(
             info = region.getInfo()
         except Exception as e:
             stats["failed"] += 1
-            tiles_out.append(
+            errors_out.append(
                 {
-                    "file": out_path.name,
                     "tile_index": int(i),
+                    "file": out_path.name,
                     "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
                 }
             )
@@ -832,7 +839,11 @@ def download_tile_layer(
             tiles_out.append(tile_meta)
 
     with open(index_path, "w") as f:
-        json.dump({"layer": layer, "scale": float(layer_scale), "tiles": tiles_out}, f, indent=2)
+        payload: dict[str, Any] = {"layer": layer, "scale": float(layer_scale), "tiles": tiles_out}
+        if errors_out:
+            payload["errors"] = errors_out
+            payload["n_tiles_reported"] = int(n_tiles_reported)
+        json.dump(payload, f, indent=2)
 
     stats["index_path"] = str(index_path)
     return stats
