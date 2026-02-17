@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -134,11 +135,14 @@ class ChipDataset(Dataset):
             raise ValueError(f"trajectories.csv missing required column: {TIME_COL!r}")
 
         self._to_target = None
+        self._step_starts_df: pd.DataFrame | None = None
+        self._warned_oob = False
 
         if self.mode == "steps":
             steps = select_step_starts(df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
             if len(steps) == 0:
                 raise ValueError(f"No valid step starts found for split={split!r} in {self.trajectories_path}")
+            self._step_starts_df = steps.copy()
             self._rows: list[_Row | _StepRow] = [
                 _StepRow(
                     point_id=int(r.point_id_start),
@@ -166,6 +170,14 @@ class ChipDataset(Dataset):
 
         self._ref_layer = self._select_reference_layer()
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
+
+    @property
+    def step_starts_df(self) -> pd.DataFrame:
+        """Step starts dataframe used by this dataset when mode='steps'."""
+        if self.mode != "steps":
+            raise AttributeError("step_starts_df is only available when mode='steps'")
+        assert self._step_starts_df is not None
+        return self._step_starts_df
 
     def _select_reference_layer(self) -> str:
         # Prefer a per-point chip group when available.
@@ -398,15 +410,17 @@ class ChipDataset(Dataset):
                 raise RuntimeError("Internal error: missing coordinate transformer for mode='steps'")
             x_m, y_m = self._to_target.transform(float(row.end_lon), float(row.end_lat))
             rr, cc = rowcol(final_transform, x_m, y_m)
-            if not (0 <= int(rr) < int(H) and 0 <= int(cc) < int(W)):
-                print("WARNING: Observed endpoint falls outside the chip grid for point_id_start="
-                    f"{point_id}. (row,col)=({rr},{cc}) chip(H,W)=({H},{W})"
-                )
-            
-            # TODO HACKY CLAMP
-            # FIX THIS LATER
             y = torch.zeros((int(H), int(W)), dtype=torch.float32)
-            y[min(H-1, max(0, int(rr))), min(W-1, max(0, int(cc)))] = 1.0
+            if 0 <= int(rr) < int(H) and 0 <= int(cc) < int(W):
+                y[int(rr), int(cc)] = 1.0
+            else:
+                if not self._warned_oob:
+                    warnings.warn(
+                        "Observed endpoint fell outside chip grid at least once; those samples will have an all-zero target "
+                        "(and should be ignored by losses/metrics). "
+                        f"Example: point_id_start={point_id} (row,col)=({rr},{cc}) chip(H,W)=({H},{W})."
+                    )
+                    self._warned_oob = True
             return env, valid, y, final_transform, str(final_crs)
 
         return env, valid, final_transform, str(final_crs)

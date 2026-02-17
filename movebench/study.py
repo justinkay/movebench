@@ -196,6 +196,39 @@ class Study:
             gap_q=gap_q,
         )
 
+    def deepssf_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+        output_hw: tuple[int, int] = (101, 101),
+        normalize: bool = True,
+        normalization_sampler_hash: str | None = None,
+        step_multiplier: float = 2.0,
+        step_q: float = 0.95,
+        gap_q: float = 0.999,
+    ):
+        """Create a DeepSSFDataset for this study.
+
+        This wraps `ChipDataset(mode="steps")` to provide deepSSF inputs:
+        `(spatial, scalars_to_grid, bearing, target)`.
+        """
+        chips = self.chip_dataset(
+            split=split,
+            config=config,
+            mode="steps",
+            output_hw=output_hw,
+            normalize=normalize,
+            normalization_sampler_hash=normalization_sampler_hash,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+        )
+
+        from movebench.datasets.deepssf import DeepSSFDataset
+
+        return DeepSSFDataset(chips)
+
     def ssf_dataset(
         self,
         *,
