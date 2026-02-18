@@ -313,6 +313,20 @@ def _resolve_fit_schedule(*, hparams: dict[str, Any], steps_per_epoch: int) -> d
         "patience": int(patience),
     }
 
+
+def _resolve_max_eval_steps(cfg: dict[str, Any]) -> int | None:
+    runtime = cfg.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ValueError("cfg.runtime must be a dict")
+    val = runtime.get("max_eval_steps", None)
+    if val is None:
+        return None
+    max_eval = int(val)
+    if max_eval <= 0:
+        raise ValueError(f"runtime.max_eval_steps must be > 0 or null; got {val!r}")
+    return int(max_eval)
+
+
 def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, model_kind: str) -> dict[str, Any]:
     from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
     from movebench.train import collate_step_select, eval_step_select, fit_step_select
@@ -365,6 +379,7 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
     else:
         raise ValueError(f"Unknown model_kind={model_kind!r}")
 
+    max_eval_steps = _resolve_max_eval_steps(cfg)
     fit = fit_step_select(
         model,
         train_loader,
@@ -376,6 +391,7 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
         max_steps=int(schedule["max_steps"]),
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
+        max_eval_steps=max_eval_steps,
     )
     train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
     test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
@@ -465,6 +481,7 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
             f"Got pixel_size_m train={pixel_size_train} test={pixel_size_test}."
         )
 
+    max_eval_steps = _resolve_max_eval_steps(cfg)
     fit = fit_deepssf(
         model,
         train_loader,
@@ -477,6 +494,7 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         max_steps=int(schedule["max_steps"]),
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
+        max_eval_steps=max_eval_steps,
     )
 
     # Save the best checkpoint (fit_deepssf restores the best weights before returning).
@@ -607,7 +625,7 @@ def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dic
     )
 
 
-def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None) -> None:
+def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, resume: bool = False) -> None:
     import torch
 
     from movebench import Study
@@ -621,18 +639,40 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None) ->
     studies = resolve_studies(cfg)
     out_dir = Path(str(cfg["output_dir"]))
     out_dir.mkdir(parents=True, exist_ok=True)
+    raw_results_path = out_dir / "raw_results.json"
 
     device = torch.device(str(cfg["runtime"]["device"]))
 
     results: dict[str, dict[str, Any]] = {}
+    if resume and raw_results_path.exists():
+        loaded = json.loads(raw_results_path.read_text())
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Expected raw_results.json to contain a dict; got {type(loaded).__name__}")
+        results = loaded  # type: ignore[assignment]
 
     for study_id in studies:
+        existing_study = results.get(study_id, {})
+        if not isinstance(existing_study, dict):
+            existing_study = {}
+
+        def _is_complete(x: Any) -> bool:
+            return isinstance(x, dict) and "fit" in x and "test" in x
+
+        if resume:
+            needs_any = any(not _is_complete(existing_study.get(str(m["name"]))) for m in cfg["methods"])
+            if not needs_any:
+                print(f"[{study_id}] all methods already present; skipping (--resume)")
+                continue
+
         study = Study(study_id)
         sampler_hash = ensure_study_ready(study=study, cfg=cfg)
 
-        study_results: dict[str, Any] = {}
+        study_results: dict[str, Any] = dict(existing_study)
         for method in cfg["methods"]:
             name = str(method["name"])
+            if resume and _is_complete(study_results.get(name)):
+                print(f"[{study_id}] {name} exists; skipping (--resume)")
+                continue
             kind = str(method["kind"])
             study_results[name] = run_method(
                 kind=kind,
@@ -642,6 +682,9 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None) ->
                 method=method,
                 device=device,
             )
+            if resume:
+                results[study_id] = study_results
+                raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
             print(f"[{study_id}] {name} done")
 
         results[study_id] = study_results

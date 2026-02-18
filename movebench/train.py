@@ -19,6 +19,40 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _deterministic_eval_subset(loader: Any, *, max_items: int | None, seed: int) -> Any:
+    """Return a deterministic, shuffled subset loader for evaluation.
+
+    This is used to speed up frequent validation (early stopping) while keeping
+    the evaluated items fixed across epochs/steps.
+    """
+    if max_items is None:
+        return loader
+    max_items = int(max_items)
+
+    try:
+        from torch.utils.data import DataLoader, Subset
+
+        ds = loader.dataset
+        n = int(len(ds))
+        k = min(int(max_items), int(n))
+
+        g = torch.Generator()
+        g.manual_seed(int(seed))
+        idx = torch.randperm(n, generator=g)[:k].tolist()
+
+        subset = Subset(ds, idx)
+        return DataLoader(
+            subset,
+            batch_size=loader.batch_size if loader.batch_size is not None else 1,
+            shuffle=False,
+            num_workers=loader.num_workers if loader.num_workers is not None else 0,
+            collate_fn=loader.collate_fn,
+            drop_last=False,
+        )
+    except Exception:
+        return loader
+
+
 _COLLATE_CHECKED = False
 
 
@@ -72,6 +106,7 @@ def eval_step_select(
     device: torch.device,
     *,
     topk: Sequence[int] = (1, 5, 10, 25, 50),
+    max_items: int | None = None,
 ) -> dict:
     model.eval()
     total_nll = 0.0
@@ -79,6 +114,8 @@ def eval_step_select(
     correct_topk = {int(k): 0 for k in topk}
 
     for x, _valid in loader:
+        if max_items is not None and int(total) >= int(max_items):
+            break
         x = x.to(device)
         logits = model(x)
         if logits.ndim != 2:
@@ -116,11 +153,15 @@ def fit_step_select(
     eval_interval: int,
     patience: int,
     seed: int,
+    max_eval_steps: int | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
     _seed_everything(seed)
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+
+    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
+    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
 
     best_state: dict[str, torch.Tensor] | None = None
     best_val_nll = float("inf")
@@ -144,9 +185,9 @@ def fit_step_select(
         loss.backward()
         opt.step()
 
-        if step % int(eval_interval) == 0:
-            train_metrics = eval_step_select(model, train_loader, device, topk=())
-            val_metrics = eval_step_select(model, val_loader, device, topk=())
+        if (step + 1) % int(eval_interval) == 0:
+            train_metrics = eval_step_select(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
+            val_metrics = eval_step_select(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
@@ -213,6 +254,7 @@ def eval_deepssf(
     device: torch.device,
     *,
     topk: Sequence[int] = (1, 5, 10, 25, 50),
+    max_items: int | None = None,
 ) -> dict:
     """Evaluate deepSSF by treating the (H,W) grid as a classification problem over H*W pixels."""
     model.eval()
@@ -221,6 +263,8 @@ def eval_deepssf(
     correct_topk = {int(k): 0 for k in topk}
 
     for x1, x2, x3, y in loader:
+        if max_items is not None and int(total) >= int(max_items):
+            break
         x1 = x1.to(device)
         x2 = x2.to(device)
         x3 = x3.to(device)
@@ -276,10 +320,14 @@ def fit_deepssf(
     eval_interval: int,
     patience: int,
     seed: int,
+    max_eval_steps: int | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
     _seed_everything(seed)
     model.to(device)
+
+    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
+    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
 
     if not hasattr(model, "parameter_groups"):
         raise TypeError("fit_deepssf expects a model with a parameter_groups() method")
@@ -338,9 +386,9 @@ def fit_deepssf(
         opt.step()
 
         PRINT = True
-        if step % int(eval_interval) == 0:
-            train_metrics = eval_deepssf(model, train_loader, device, topk=())
-            val_metrics = eval_deepssf(model, val_loader, device, topk=())
+        if (step + 1) % int(eval_interval) == 0:
+            train_metrics = eval_deepssf(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
+            val_metrics = eval_deepssf(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})

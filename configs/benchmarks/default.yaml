@@ -7,6 +7,7 @@ runtime:
   device: cpu
   seed: 0
   setup_workers: 16
+  max_eval_steps: 2500
 
 datasets:
   issf:

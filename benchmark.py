@@ -20,6 +20,11 @@ def _parse_args() -> argparse.Namespace:
         default="configs/benchmarks/default.yaml",
         help="Benchmark YAML config path.",
     )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip methods already present in output_dir/raw_results.json (and save progress after each method).",
+    )
     return p.parse_args()
 
 
@@ -33,9 +38,8 @@ def main() -> None:
 
     from movebench import benchmark as mb_benchmark
 
-    mb_benchmark.main(config_path=str(args.config), overrides=None)
+    mb_benchmark.main(config_path=str(args.config), overrides=None, resume=bool(args.resume))
 
 
 if __name__ == "__main__":
     main()
-
