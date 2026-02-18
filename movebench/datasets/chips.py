@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from rasterio.enums import Resampling
-from rasterio.transform import rowcol
+from rasterio.transform import from_bounds, rowcol
 from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
@@ -30,6 +30,7 @@ from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
+    compute_movement_features,
     load_trajectories_csv,
     select_step_starts,
 )
@@ -90,6 +91,7 @@ class ChipDataset(Dataset):
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
         gap_q: float = 0.999,
+        fixed_buffer_split: Literal["train"] | None = None,
         registry: LayerRegistry = REGISTRY,
     ) -> None:
         self.study_dir = Path(study_dir)
@@ -110,6 +112,22 @@ class ChipDataset(Dataset):
         if self.mode not in {"points", "steps"}:
             raise ValueError(f"Unknown mode={mode!r} (expected 'points' or 'steps')")
 
+        self.step_multiplier = float(step_multiplier)
+        self.step_q = float(step_q)
+        self.gap_q = float(gap_q)
+        if not (0.0 <= self.step_q <= 1.0):
+            raise ValueError(f"step_q must be in [0,1], got {self.step_q}")
+        if not (0.0 <= self.gap_q <= 1.0):
+            raise ValueError(f"gap_q must be in [0,1], got {self.gap_q}")
+        if self.step_multiplier <= 0:
+            raise ValueError(f"step_multiplier must be positive, got {self.step_multiplier}")
+
+        self.fixed_buffer_split = None if fixed_buffer_split is None else str(fixed_buffer_split)
+        if self.fixed_buffer_split is not None and self.fixed_buffer_split != "train":
+            raise ValueError(f"fixed_buffer_split must be None or 'train', got {fixed_buffer_split!r}")
+        if self.fixed_buffer_split is not None and self.mode != "steps":
+            raise ValueError("fixed_buffer_split is only supported when mode='steps'")
+
         self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
@@ -121,8 +139,8 @@ class ChipDataset(Dataset):
             self._mean = None
             self._std = None
 
-        df = load_trajectories_csv(str(self.trajectories_path))
-        df = df[df[SET_COL] == self.split].copy()
+        df_all = load_trajectories_csv(str(self.trajectories_path))
+        df = df_all[df_all[SET_COL] == self.split].copy()
         if len(df) == 0:
             raise ValueError(f"No rows found for split={split!r} in {self.trajectories_path}")
         self.df = df
@@ -137,9 +155,16 @@ class ChipDataset(Dataset):
         self._to_target = None
         self._step_starts_df: pd.DataFrame | None = None
         self._warned_oob = False
+        self._fixed_buffer_m: float | None = None
+        self._warned_fixed_grid_coverage = False
 
         if self.mode == "steps":
-            steps = select_step_starts(df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
+            steps = select_step_starts(
+                df,
+                step_multiplier=self.step_multiplier,
+                step_q=self.step_q,
+                gap_q=self.gap_q,
+            )
             if len(steps) == 0:
                 raise ValueError(f"No valid step starts found for split={split!r} in {self.trajectories_path}")
             self._step_starts_df = steps.copy()
@@ -157,6 +182,30 @@ class ChipDataset(Dataset):
             from pyproj import Transformer
 
             self._to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+
+            if self.fixed_buffer_split == "train":
+                df_train = df_all[df_all[SET_COL] == "train"].copy()
+                if len(df_train) == 0:
+                    raise ValueError(
+                        "fixed_buffer_split='train' requires a non-empty train split in trajectories.csv. "
+                        f"Found no rows for set='train' in {self.trajectories_path}."
+                    )
+                try:
+                    d_train = compute_movement_features(
+                        df_train,
+                        step_multiplier=self.step_multiplier,
+                        step_q=self.step_q,
+                        gap_q=self.gap_q,
+                    )
+                    buffer_m = float(d_train["max_step_len"].iloc[0])
+                except Exception as exc:
+                    raise ValueError(
+                        "Could not compute fixed chip extent from the train split. "
+                        "This usually means there are no valid steps after filtering."
+                    ) from exc
+                if not np.isfinite(buffer_m) or buffer_m <= 0:
+                    raise ValueError(f"Computed invalid fixed buffer_m={buffer_m} from train split.")
+                self._fixed_buffer_m = buffer_m
         else:
             self._rows = [
                 _Row(
@@ -237,6 +286,25 @@ class ChipDataset(Dataset):
         row = self._rows[int(idx)]
         point_id = int(row.point_id)
         timestamp = row.timestamp
+
+        fixed_dst_transform = None
+        if self._fixed_buffer_m is not None:
+            if not isinstance(row, _StepRow):
+                raise RuntimeError("Internal error: fixed_buffer_split requires mode='steps' rows.")
+            if self._to_target is None:
+                raise RuntimeError("Internal error: missing coordinate transformer for fixed_buffer_split.")
+            H_out, W_out = self.output_hw
+            if int(W_out) < 2 or int(H_out) < 2:
+                raise ValueError(f"fixed_buffer_split requires output_hw >= (2,2), got {self.output_hw}.")
+
+            buffer_m = float(self._fixed_buffer_m)
+            x0, y0 = self._to_target.transform(float(row.lon), float(row.lat))
+            px = (2.0 * buffer_m) / (float(W_out) - 1.0)
+            left = float(x0) - buffer_m - 0.5 * px
+            right = float(x0) + buffer_m + 0.5 * px
+            bottom = float(y0) - buffer_m - 0.5 * px
+            top = float(y0) + buffer_m + 0.5 * px
+            fixed_dst_transform = from_bounds(left, bottom, right, top, int(W_out), int(H_out))
 
         ref_spec = self.registry.get(self._ref_layer)
         if ref_spec.source == "gee_chip":
@@ -320,6 +388,7 @@ class ChipDataset(Dataset):
             resampling=Resampling.bilinear,
             dst_height=self.output_hw[0],
             dst_width=self.output_hw[1],
+            dst_transform=fixed_dst_transform,
         )
 
         aligned_chip_groups: dict[str, np.ndarray] = {}
@@ -345,8 +414,24 @@ class ChipDataset(Dataset):
                 resampling=Resampling.nearest,
                 dst_height=self.output_hw[0],
                 dst_width=self.output_hw[1],
+                dst_transform=fixed_dst_transform,
             )
             aligned_layers[layer] = cat_aligned[1]
+
+        if fixed_dst_transform is not None and not self._warned_fixed_grid_coverage:
+            # If the fixed grid extends outside the downloaded raster coverage,
+            # reprojection will fill with nodata/NaNs. Downstream code treats
+            # invalid pixels as zeros. Warn once so users know coverage can vary.
+            ref_arr = aligned_arrays[0]
+            ref_nodata = warp_rasters[0].nodata
+            v = _compute_valid_mask(torch.from_numpy(ref_arr.astype(np.float32, copy=False)), ref_nodata)
+            if not bool(v.all()):
+                warnings.warn(
+                    "At least one chip contained invalid pixels after reprojection onto the fixed deepSSF grid; "
+                    "this can happen when rasters do not fully cover the requested extent. "
+                    "Invalid pixels are treated as zeros."
+                )
+                self._warned_fixed_grid_coverage = True
 
         # Build final (C,H,W) stack in LayerPlan channel order.
         H, W = aligned_arrays[0].shape[1:]

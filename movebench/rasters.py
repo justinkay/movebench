@@ -156,6 +156,7 @@ def reproject_to_meters(
     resampling: Resampling = Resampling.nearest,
     dst_width: int | None = None,
     dst_height: int | None = None,
+    dst_transform: Any | None = None,
 ) -> tuple[list[np.ndarray], Any, str]:
     """Reproject all layers to a metric CRS, aligned to the first layer's bounds.
 
@@ -167,6 +168,9 @@ def reproject_to_meters(
         resampling: Rasterio resampling strategy used for reprojection.
         dst_width: Optional fixed output width in pixels.
         dst_height: Optional fixed output height in pixels.
+        dst_transform: Optional explicit destination transform (in `dst_crs`
+            coordinates). If provided, `calculate_default_transform` is skipped
+            and both `dst_width` and `dst_height` are required.
     """
     if not layers:
         raise ValueError("reproject_to_meters requires at least one Raster")
@@ -177,6 +181,8 @@ def reproject_to_meters(
 
     if (dst_width is None) != (dst_height is None):
         raise ValueError("Pass both dst_width and dst_height, or neither")
+    if dst_transform is not None and dst_width is None:
+        raise ValueError("dst_transform requires dst_width and dst_height")
     if dst_width is not None:
         dst_width = int(dst_width)
         dst_height = int(dst_height)
@@ -185,31 +191,32 @@ def reproject_to_meters(
 
     _, H_ref, W_ref = ref.array.shape
 
-    if dst_width is None:
-        dst_transform, dst_width, dst_height = calculate_default_transform(
-            ref.crs,
-            dst_crs,
-            W_ref,
-            H_ref,
-            *ref.bounds,
-        )
-    else:
-        dst_transform, out_w, out_h = calculate_default_transform(
-            ref.crs,
-            dst_crs,
-            W_ref,
-            H_ref,
-            *ref.bounds,
-            dst_width=int(dst_width),
-            dst_height=int(dst_height),
-        )
-        if int(out_w) != int(dst_width) or int(out_h) != int(dst_height):
-            raise RuntimeError(
-                "rasterio.warp.calculate_default_transform did not respect requested output size "
-                f"(dst_width={dst_width}, dst_height={dst_height}); got (width={out_w}, height={out_h}). "
-                "Check rasterio version compatibility."
+    if dst_transform is None:
+        if dst_width is None:
+            dst_transform, dst_width, dst_height = calculate_default_transform(
+                ref.crs,
+                dst_crs,
+                W_ref,
+                H_ref,
+                *ref.bounds,
             )
-        dst_width, dst_height = out_w, out_h
+        else:
+            dst_transform, out_w, out_h = calculate_default_transform(
+                ref.crs,
+                dst_crs,
+                W_ref,
+                H_ref,
+                *ref.bounds,
+                dst_width=int(dst_width),
+                dst_height=int(dst_height),
+            )
+            if int(out_w) != int(dst_width) or int(out_h) != int(dst_height):
+                raise RuntimeError(
+                    "rasterio.warp.calculate_default_transform did not respect requested output size "
+                    f"(dst_width={dst_width}, dst_height={dst_height}); got (width={out_w}, height={out_h}). "
+                    "Check rasterio version compatibility."
+                )
+            dst_width, dst_height = out_w, out_h
 
     aligned: list[np.ndarray] = []
     for layer in layers:
