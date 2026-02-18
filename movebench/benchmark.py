@@ -23,64 +23,6 @@ import yaml
 TOP_K_VALUES = (1, 5, 10, 25, 50)
 
 
-_DEFAULT_CFG: dict[str, Any] = {
-    "version": 1,
-    "layers_config": "configs/layers_all.yaml",
-    "output_dir": "results/benchmarks",
-    "runtime": {"device": "cpu", "seed": 0, "setup_workers": 16},
-    "datasets": {
-        "issf": {
-            "batch_size": 32,
-            "num_workers": 0,
-            "normalize": True,
-            "include_time": False,
-            "subset_env_layers": None,
-            "subset_band_ids": None,
-            "sampler": {
-                "num_candidates": 100,
-                "random_seed": 0,
-                "step_multiplier": 2.0,
-                "step_q": 0.95,
-                "gap_q": 0.999,
-                "bounds_buffer_deg": 0.01,
-            },
-        },
-        "deepssf": {
-            "batch_size": 16,
-            "num_workers": 0,
-            "output_hw": (101, 101),
-            "normalize": True,
-            "step_multiplier": 2.0,
-            "step_q": 0.95,
-            "gap_q": 0.999,
-        },
-    },
-}
-
-
-_DEFAULT_METHODS: dict[str, dict[str, Any]] = {
-    "issf_linear": {
-        "model": {},
-        "hparams": {"lr": 1e-2, "weight_decay": 1e-3, "max_steps": 1000, "eval_interval": 10, "patience": 50},
-    },
-    "issf_mlp": {
-        "model": {"hidden_dims": (128,), "dropout": 0.6},
-        "hparams": {"lr": 1e-3, "weight_decay": 1e-4, "max_steps": 2000, "eval_interval": 10, "patience": 50},
-    },
-    "deepssf": {
-        "model": {"image_dim": 101},
-        "hparams": {
-            "lr_movement": 1e-5,
-            "lr_habitat": 1e-4,
-            "weight_decay": 0.0,
-            "max_steps": 2000,
-            "eval_interval": 10,
-            "patience": 50,
-        },
-    },
-}
-
-
 def _deep_update(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for k, v in update.items():
@@ -100,14 +42,37 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(user, dict):
         raise ValueError(f"Benchmark config must be a mapping/dict at the top level; got {type(user).__name__}")
 
-    cfg = _deep_update(_DEFAULT_CFG, user)
-
+    cfg = user
     if int(cfg.get("version", -1)) != 1:
         raise ValueError(f"Unsupported benchmark config version={cfg.get('version')!r} (expected 1)")
 
     for key in ("layers_config", "output_dir", "runtime", "datasets", "methods"):
         if key not in cfg:
             raise ValueError(f"Benchmark config missing required key: {key!r}")
+
+    if not isinstance(cfg["runtime"], dict):
+        raise ValueError("Benchmark config `runtime` must be a mapping/dict.")
+    for key in ("device", "seed", "setup_workers"):
+        if key not in cfg["runtime"]:
+            raise ValueError(f"Benchmark config missing required key: runtime.{key!r}")
+
+    if not isinstance(cfg["datasets"], dict):
+        raise ValueError("Benchmark config `datasets` must be a mapping/dict.")
+    if "issf" not in cfg["datasets"] or not isinstance(cfg["datasets"]["issf"], dict):
+        raise ValueError("Benchmark config missing required key: datasets.issf")
+    issf = cfg["datasets"]["issf"]
+    if "sampler" not in issf or not isinstance(issf["sampler"], dict):
+        raise ValueError("Benchmark config missing required key: datasets.issf.sampler")
+    for key in (
+        "num_candidates",
+        "random_seed",
+        "step_multiplier",
+        "step_q",
+        "gap_q",
+        "bounds_buffer_deg",
+    ):
+        if key not in issf["sampler"]:
+            raise ValueError(f"Benchmark config missing required key: datasets.issf.sampler.{key!r}")
 
     if not isinstance(cfg["methods"], list) or not cfg["methods"]:
         raise ValueError("Benchmark config must include a non-empty `methods:` list.")
@@ -120,7 +85,19 @@ def load_config(path: str | Path) -> dict[str, Any]:
         for k, v in env.items():
             os.environ[str(k)] = str(v)
 
-    # Validate + fill method defaults.
+    def _validate_schedule_hparams(*, method_name: str, hparams: dict[str, Any]) -> None:
+        use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
+        if use_epochs:
+            for key in ("max_epochs", "patience_epochs"):
+                if key not in hparams:
+                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (epoch schedule)")
+        else:
+            for key in ("max_steps", "eval_interval", "patience"):
+                if key not in hparams:
+                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (step schedule)")
+
+    # Validate methods (no default filling; rely on model/dataset defaults where applicable).
+    allowed_kinds = {"issf_linear", "issf_mlp", "deepssf"}
     seen_names: set[str] = set()
     methods_out: list[dict[str, Any]] = []
     for m in cfg["methods"]:
@@ -134,8 +111,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
         seen_names.add(name)
 
         kind = str(m.get("kind", "")).strip()
-        if kind not in _DEFAULT_METHODS:
-            allowed = sorted(_DEFAULT_METHODS.keys())
+        if kind not in allowed_kinds:
+            allowed = sorted(allowed_kinds)
             raise ValueError(f"Unknown method kind={kind!r}. Allowed: {allowed}")
 
         model_cfg = m.get("model") or {}
@@ -143,9 +120,20 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if not isinstance(model_cfg, dict) or not isinstance(hparams, dict):
             raise ValueError(f"Method {name!r}: `model` and `hparams` must be dicts.")
 
-        defaults = _DEFAULT_METHODS[kind]
-        model_cfg = _deep_update(defaults["model"], model_cfg)
-        hparams = _deep_update(defaults["hparams"], hparams)
+        if kind in {"issf_linear", "issf_mlp"}:
+            for key in ("lr", "weight_decay"):
+                if key not in hparams:
+                    raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
+            _validate_schedule_hparams(method_name=name, hparams=hparams)
+        elif kind == "deepssf":
+            if "deepssf" not in cfg["datasets"] or not isinstance(cfg["datasets"]["deepssf"], dict):
+                raise ValueError("Benchmark config missing required key: datasets.deepssf (required for kind='deepssf')")
+            for key in ("lr_movement", "lr_habitat", "weight_decay"):
+                if key not in hparams:
+                    raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
+            _validate_schedule_hparams(method_name=name, hparams=hparams)
+        else:
+            raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
 
         methods_out.append({"name": name, "kind": kind, "model": model_cfg, "hparams": hparams})
 
@@ -262,60 +250,25 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
     return sampler_hash
 
 
-def _make_issf_loaders(*, ds_train, ds_test, batch_size: int, num_workers: int):
+def _make_loaders(*, ds_train, ds_test, collate_fn, batch_size: int | None, num_workers: int | None):
     from torch.utils.data import DataLoader
 
-    from movebench.train import collate_step_select
+    kwargs: dict[str, Any] = {"collate_fn": collate_fn, "drop_last": False}
+    if batch_size is not None:
+        kwargs["batch_size"] = int(batch_size)
+    if num_workers is not None:
+        kwargs["num_workers"] = int(num_workers)
 
     train_loader = DataLoader(
         ds_train,
-        batch_size=int(batch_size),
         shuffle=True,
-        num_workers=int(num_workers),
-        collate_fn=collate_step_select,
-        drop_last=False,
+        **kwargs,
     )
     test_loader = DataLoader(
         ds_test,
-        batch_size=int(batch_size),
         shuffle=False,
-        num_workers=int(num_workers),
-        collate_fn=collate_step_select,
-        drop_last=False,
+        **kwargs,
     )
-
-    # Verify we can draw at least one batch (helps catch empty splits early).
-    x0, _valid0 = next(iter(train_loader))
-    if x0.ndim != 3:
-        raise ValueError(f"iSSF dataset must produce x with shape (B,C,P); got {tuple(x0.shape)}")
-    return train_loader, test_loader
-
-
-def _make_deepssf_loaders(*, ds_train, ds_test, batch_size: int, num_workers: int):
-    from torch.utils.data import DataLoader
-
-    from movebench.train import collate_deepssf
-
-    train_loader = DataLoader(
-        ds_train,
-        batch_size=int(batch_size),
-        shuffle=True,
-        num_workers=int(num_workers),
-        collate_fn=collate_deepssf,
-        drop_last=False,
-    )
-    test_loader = DataLoader(
-        ds_test,
-        batch_size=int(batch_size),
-        shuffle=False,
-        num_workers=int(num_workers),
-        collate_fn=collate_deepssf,
-        drop_last=False,
-    )
-
-    x1, x2, x3, y = next(iter(train_loader))
-    if x1.ndim != 4 or y.ndim != 3:
-        raise ValueError("DeepSSFDataset must produce (spatial, scalars, bearing, target) tensors.")
     return train_loader, test_loader
 
 
@@ -360,57 +313,58 @@ def _resolve_fit_schedule(*, hparams: dict[str, Any], steps_per_epoch: int) -> d
         "patience": int(patience),
     }
 
-
-def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
-    from movebench.models.ssf import LinearStepSelect, random_baseline_metrics
-    from movebench.train import eval_step_select, fit_step_select
+def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, model_kind: str) -> dict[str, Any]:
+    from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
+    from movebench.train import collate_step_select, eval_step_select, fit_step_select
 
     issf = cfg["datasets"]["issf"]
     sampler = issf["sampler"]
 
-    train_ds = study.issf_dataset(
-        split="train",
-        config=str(cfg["layers_config"]),
-        include_time=bool(issf.get("include_time", False)),
-        normalize=bool(issf.get("normalize", True)),
-        subset_env_layers=issf.get("subset_env_layers", None),
-        subset_band_ids=issf.get("subset_band_ids", None),
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
-    test_ds = study.issf_dataset(
-        split="test",
-        config=str(cfg["layers_config"]),
-        include_time=bool(issf.get("include_time", False)),
-        normalize=bool(issf.get("normalize", True)),
-        subset_env_layers=issf.get("subset_env_layers", None),
-        subset_band_ids=issf.get("subset_band_ids", None),
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
+    ds_kwargs: dict[str, Any] = {
+        "config": str(cfg["layers_config"]),
+        "num_candidates": int(sampler["num_candidates"]),
+        "random_seed": int(sampler["random_seed"]),
+        "step_multiplier": float(sampler["step_multiplier"]),
+        "step_q": float(sampler["step_q"]),
+        "gap_q": float(sampler["gap_q"]),
+        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
+    }
+    for k in ("include_time", "normalize", "subset_env_layers", "subset_band_ids", "include_individual_id", "normalize_movement"):
+        if k in issf:
+            ds_kwargs[k] = issf[k]
 
-    train_loader, test_loader = _make_issf_loaders(
+    train_ds = study.issf_dataset(split="train", **ds_kwargs)
+    test_ds = study.issf_dataset(split="test", **ds_kwargs)
+
+    train_loader, test_loader = _make_loaders(
         ds_train=train_ds,
         ds_test=test_ds,
-        batch_size=int(issf["batch_size"]),
-        num_workers=int(issf["num_workers"]),
+        collate_fn=collate_step_select,
+        batch_size=issf.get("batch_size", None),
+        num_workers=issf.get("num_workers", None),
     )
 
     schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
 
     x0, _valid0 = next(iter(train_loader))
+    if x0.ndim != 3:
+        raise ValueError(f"iSSF dataset must produce x with shape (B,C,P); got {tuple(x0.shape)}")
     _b, c, p = x0.shape
     random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
 
-    model = LinearStepSelect(int(c))
+    if model_kind == "linear":
+        model = LinearStepSelect(int(c))
+    elif model_kind == "mlp":
+        model_cfg = method.get("model") or {}
+        kwargs: dict[str, Any] = {}
+        if "hidden_dims" in model_cfg:
+            kwargs["hidden_dims"] = tuple(int(x) for x in model_cfg["hidden_dims"])
+        if "dropout" in model_cfg:
+            kwargs["dropout"] = float(model_cfg["dropout"])
+        model = MLPStepSelect(int(c), **kwargs)
+    else:
+        raise ValueError(f"Unknown model_kind={model_kind!r}")
+
     fit = fit_step_select(
         model,
         train_loader,
@@ -434,125 +388,54 @@ def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], devic
         "train": train_metrics,
         "test": test_metrics,
     }
+
+
+def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+    return _run_issf(study=study, cfg=cfg, method=method, device=device, model_kind="linear")
 
 
 def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
-    from movebench.models.ssf import MLPStepSelect, random_baseline_metrics
-    from movebench.train import eval_step_select, fit_step_select
-
-    issf = cfg["datasets"]["issf"]
-    sampler = issf["sampler"]
-
-    train_ds = study.issf_dataset(
-        split="train",
-        config=str(cfg["layers_config"]),
-        include_time=bool(issf.get("include_time", False)),
-        normalize=bool(issf.get("normalize", True)),
-        subset_env_layers=issf.get("subset_env_layers", None),
-        subset_band_ids=issf.get("subset_band_ids", None),
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
-    test_ds = study.issf_dataset(
-        split="test",
-        config=str(cfg["layers_config"]),
-        include_time=bool(issf.get("include_time", False)),
-        normalize=bool(issf.get("normalize", True)),
-        subset_env_layers=issf.get("subset_env_layers", None),
-        subset_band_ids=issf.get("subset_band_ids", None),
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
-
-    train_loader, test_loader = _make_issf_loaders(
-        ds_train=train_ds,
-        ds_test=test_ds,
-        batch_size=int(issf["batch_size"]),
-        num_workers=int(issf["num_workers"]),
-    )
-
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
-
-    x0, _valid0 = next(iter(train_loader))
-    _b, c, p = x0.shape
-    random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
-
-    model_cfg = method["model"]
-    hidden_dims = tuple(int(x) for x in model_cfg.get("hidden_dims", (128,)))
-    dropout = float(model_cfg.get("dropout", 0.6))
-
-    model = MLPStepSelect(int(c), hidden_dims=hidden_dims, dropout=dropout)
-    fit = fit_step_select(
-        model,
-        train_loader,
-        test_loader,
-        device,
-        seed=int(cfg["runtime"]["seed"]),
-        lr=float(method["hparams"]["lr"]),
-        weight_decay=float(method["hparams"]["weight_decay"]),
-        max_steps=int(schedule["max_steps"]),
-        eval_interval=int(schedule["eval_interval"]),
-        patience=int(schedule["patience"]),
-    )
-    train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
-    test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
-
-    return {
-        "P": int(p),
-        "random": random_metrics,
-        "schedule": schedule,
-        "fit": fit,
-        "train": train_metrics,
-        "test": test_metrics,
-    }
+    return _run_issf(study=study, cfg=cfg, method=method, device=device, model_kind="mlp")
 
 
 def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
     from movebench.models.deepssf import DeepSSF
-    from movebench.train import eval_deepssf, fit_deepssf, random_grid_baseline_metrics
+    from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
 
     dcfg = cfg["datasets"]["deepssf"]
 
-    output_hw_raw = dcfg.get("output_hw", (101, 101))
-    if isinstance(output_hw_raw, (list, tuple)) and len(output_hw_raw) == 2:
-        output_hw = (int(output_hw_raw[0]), int(output_hw_raw[1]))
-    else:
-        raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+    ds_kwargs_train: dict[str, Any] = {
+        "split": "train",
+        "config": str(cfg["layers_config"]),
+        "normalization_sampler_hash": str(sampler_hash),
+    }
+    ds_kwargs_test = dict(ds_kwargs_train)
+    ds_kwargs_test["split"] = "test"
+
+    for k in ("output_hw", "normalize", "step_multiplier", "step_q", "gap_q"):
+        if k not in dcfg:
+            continue
+        v = dcfg[k]
+        if k == "output_hw":
+            if not (isinstance(v, (list, tuple)) and len(v) == 2):
+                raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+            v = (int(v[0]), int(v[1]))
+        ds_kwargs_train[k] = v
+        ds_kwargs_test[k] = v
 
     train_ds = study.deepssf_dataset(
-        split="train",
-        config=str(cfg["layers_config"]),
-        output_hw=output_hw,
-        normalize=bool(dcfg.get("normalize", True)),
-        normalization_sampler_hash=str(sampler_hash),
-        step_multiplier=float(dcfg["step_multiplier"]),
-        step_q=float(dcfg["step_q"]),
-        gap_q=float(dcfg["gap_q"]),
+        **ds_kwargs_train,
     )
     test_ds = study.deepssf_dataset(
-        split="test",
-        config=str(cfg["layers_config"]),
-        output_hw=output_hw,
-        normalize=bool(dcfg.get("normalize", True)),
-        normalization_sampler_hash=str(sampler_hash),
-        step_multiplier=float(dcfg["step_multiplier"]),
-        step_q=float(dcfg["step_q"]),
-        gap_q=float(dcfg["gap_q"]),
+        **ds_kwargs_test,
     )
 
-    train_loader, test_loader = _make_deepssf_loaders(
+    train_loader, test_loader = _make_loaders(
         ds_train=train_ds,
         ds_test=test_ds,
-        batch_size=int(dcfg["batch_size"]),
-        num_workers=int(dcfg["num_workers"]),
+        collate_fn=collate_deepssf,
+        batch_size=dcfg.get("batch_size", None),
+        num_workers=dcfg.get("num_workers", None),
     )
 
     schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
