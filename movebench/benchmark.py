@@ -319,6 +319,48 @@ def _make_deepssf_loaders(*, ds_train, ds_test, batch_size: int, num_workers: in
     return train_loader, test_loader
 
 
+def _resolve_fit_schedule(*, hparams: dict[str, Any], steps_per_epoch: int) -> dict[str, int]:
+    steps_per_epoch = int(steps_per_epoch)
+    if steps_per_epoch <= 0:
+        raise ValueError(f"steps_per_epoch must be > 0; got {steps_per_epoch}")
+
+    use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
+    if use_epochs:
+        if "max_epochs" not in hparams or "patience_epochs" not in hparams:
+            raise ValueError("Epoch-based schedule requires hparams.max_epochs and hparams.patience_epochs.")
+        max_epochs = int(hparams["max_epochs"])
+        eval_every_epochs = int(hparams.get("eval_every_epochs", 1))
+        patience_epochs = int(hparams["patience_epochs"])
+        if max_epochs <= 0:
+            raise ValueError(f"hparams.max_epochs must be > 0; got {max_epochs}")
+        if eval_every_epochs <= 0:
+            raise ValueError(f"hparams.eval_every_epochs must be > 0; got {eval_every_epochs}")
+        if patience_epochs <= 0:
+            raise ValueError(f"hparams.patience_epochs must be > 0; got {patience_epochs}")
+
+        max_steps = int(max_epochs) * int(steps_per_epoch)
+        eval_interval = int(eval_every_epochs) * int(steps_per_epoch)
+        patience = int(math.ceil(float(patience_epochs) / float(eval_every_epochs)))
+    else:
+        max_steps = int(hparams["max_steps"])
+        eval_interval = int(hparams["eval_interval"])
+        patience = int(hparams["patience"])
+
+    if max_steps <= 0:
+        raise ValueError(f"max_steps must be > 0; got {max_steps}")
+    if eval_interval <= 0:
+        raise ValueError(f"eval_interval must be > 0; got {eval_interval}")
+    if patience <= 0:
+        raise ValueError(f"patience must be > 0; got {patience}")
+
+    return {
+        "steps_per_epoch": int(steps_per_epoch),
+        "max_steps": int(max_steps),
+        "eval_interval": int(eval_interval),
+        "patience": int(patience),
+    }
+
+
 def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
     from movebench.models.ssf import LinearStepSelect, random_baseline_metrics
     from movebench.train import eval_step_select, fit_step_select
@@ -362,6 +404,8 @@ def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], devic
         num_workers=int(issf["num_workers"]),
     )
 
+    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+
     x0, _valid0 = next(iter(train_loader))
     _b, c, p = x0.shape
     random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
@@ -375,14 +419,21 @@ def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], devic
         seed=int(cfg["runtime"]["seed"]),
         lr=float(method["hparams"]["lr"]),
         weight_decay=float(method["hparams"]["weight_decay"]),
-        max_steps=int(method["hparams"]["max_steps"]),
-        eval_interval=int(method["hparams"]["eval_interval"]),
-        patience=int(method["hparams"]["patience"]),
+        max_steps=int(schedule["max_steps"]),
+        eval_interval=int(schedule["eval_interval"]),
+        patience=int(schedule["patience"]),
     )
     train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
     test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
 
-    return {"P": int(p), "random": random_metrics, "fit": fit, "train": train_metrics, "test": test_metrics}
+    return {
+        "P": int(p),
+        "random": random_metrics,
+        "schedule": schedule,
+        "fit": fit,
+        "train": train_metrics,
+        "test": test_metrics,
+    }
 
 
 def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
@@ -428,6 +479,8 @@ def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) 
         num_workers=int(issf["num_workers"]),
     )
 
+    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+
     x0, _valid0 = next(iter(train_loader))
     _b, c, p = x0.shape
     random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
@@ -445,14 +498,21 @@ def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) 
         seed=int(cfg["runtime"]["seed"]),
         lr=float(method["hparams"]["lr"]),
         weight_decay=float(method["hparams"]["weight_decay"]),
-        max_steps=int(method["hparams"]["max_steps"]),
-        eval_interval=int(method["hparams"]["eval_interval"]),
-        patience=int(method["hparams"]["patience"]),
+        max_steps=int(schedule["max_steps"]),
+        eval_interval=int(schedule["eval_interval"]),
+        patience=int(schedule["patience"]),
     )
     train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
     test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
 
-    return {"P": int(p), "random": random_metrics, "fit": fit, "train": train_metrics, "test": test_metrics}
+    return {
+        "P": int(p),
+        "random": random_metrics,
+        "schedule": schedule,
+        "fit": fit,
+        "train": train_metrics,
+        "test": test_metrics,
+    }
 
 
 def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
@@ -495,6 +555,8 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         num_workers=int(dcfg["num_workers"]),
     )
 
+    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+
     x1, _x2, _x3, _y = next(iter(train_loader))
     b, c_env, h, w = x1.shape
     if int(h) != int(w):
@@ -529,9 +591,33 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         lr_movement=float(method["hparams"]["lr_movement"]),
         lr_habitat=float(method["hparams"]["lr_habitat"]),
         weight_decay=float(method["hparams"]["weight_decay"]),
-        max_steps=int(method["hparams"]["max_steps"]),
-        eval_interval=int(method["hparams"]["eval_interval"]),
-        patience=int(method["hparams"]["patience"]),
+        max_steps=int(schedule["max_steps"]),
+        eval_interval=int(schedule["eval_interval"]),
+        patience=int(schedule["patience"]),
+    )
+
+    # Save the best checkpoint (fit_deepssf restores the best weights before returning).
+    import torch
+
+    out_dir = Path(str(cfg["output_dir"]))
+    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    method_name = str(method["name"])
+    ckpt_path = ckpt_dir / f"{method_name}.pt"
+    torch.save(
+        {
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "meta": {
+                "study_id": str(study.study_id),
+                "method_name": method_name,
+                "env_channels": int(c_env),
+                "image_dim": int(image_dim),
+                "pixel_size_m": float(model.pixel_size_m),
+                "best_step": int(fit["best_step"]),
+                "best_test_nll": float(fit["val"]["nll"]),
+            },
+        },
+        ckpt_path,
     )
 
     train_metrics = eval_deepssf(model, train_loader, device, topk=TOP_K_VALUES)
@@ -541,9 +627,11 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     return {
         "grid": {"H": int(h), "W": int(w), "num_pixels": int(h) * int(w), "pixel_size_m": float(model.pixel_size_m)},
         "random_grid": random_grid,
+        "schedule": schedule,
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
+        "checkpoint_path": str(ckpt_path),
     }
 
 
