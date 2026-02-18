@@ -172,7 +172,6 @@ class Study:
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
         gap_q: float = 0.999,
-        fixed_buffer_split: str | None = None,
     ):
         """Create a ChipDataset for this study.
 
@@ -195,7 +194,6 @@ class Study:
             step_multiplier=step_multiplier,
             step_q=step_q,
             gap_q=gap_q,
-            fixed_buffer_split=fixed_buffer_split,
         )
 
     def deepssf_dataset(
@@ -225,7 +223,6 @@ class Study:
             step_multiplier=step_multiplier,
             step_q=step_q,
             gap_q=gap_q,
-            fixed_buffer_split="train",
         )
 
         from movebench.datasets.deepssf import DeepSSFDataset

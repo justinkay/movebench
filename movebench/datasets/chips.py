@@ -91,7 +91,6 @@ class ChipDataset(Dataset):
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
         gap_q: float = 0.999,
-        fixed_buffer_split: Literal["train"] | None = None,
         registry: LayerRegistry = REGISTRY,
     ) -> None:
         self.study_dir = Path(study_dir)
@@ -122,12 +121,6 @@ class ChipDataset(Dataset):
         if self.step_multiplier <= 0:
             raise ValueError(f"step_multiplier must be positive, got {self.step_multiplier}")
 
-        self.fixed_buffer_split = None if fixed_buffer_split is None else str(fixed_buffer_split)
-        if self.fixed_buffer_split is not None and self.fixed_buffer_split != "train":
-            raise ValueError(f"fixed_buffer_split must be None or 'train', got {fixed_buffer_split!r}")
-        if self.fixed_buffer_split is not None and self.mode != "steps":
-            raise ValueError("fixed_buffer_split is only supported when mode='steps'")
-
         self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
@@ -155,10 +148,21 @@ class ChipDataset(Dataset):
         self._to_target = None
         self._step_starts_df: pd.DataFrame | None = None
         self._warned_oob = False
-        self._fixed_buffer_m: float | None = None
+        self._step_buffer_m: float | None = None
         self._warned_fixed_grid_coverage = False
 
         if self.mode == "steps":
+            if self.output_hw[0] != self.output_hw[1]:
+                raise ValueError(
+                    "ChipDataset(mode='steps') requires square output_hw for deepSSF. "
+                    f"Got output_hw={self.output_hw}."
+                )
+            if self.output_hw[0] < 2:
+                raise ValueError(
+                    "ChipDataset(mode='steps') requires output_hw >= (2,2) to define a pixel size. "
+                    f"Got output_hw={self.output_hw}."
+                )
+
             steps = select_step_starts(
                 df,
                 step_multiplier=self.step_multiplier,
@@ -183,29 +187,29 @@ class ChipDataset(Dataset):
 
             self._to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
 
-            if self.fixed_buffer_split == "train":
-                df_train = df_all[df_all[SET_COL] == "train"].copy()
-                if len(df_train) == 0:
-                    raise ValueError(
-                        "fixed_buffer_split='train' requires a non-empty train split in trajectories.csv. "
-                        f"Found no rows for set='train' in {self.trajectories_path}."
-                    )
-                try:
-                    d_train = compute_movement_features(
-                        df_train,
-                        step_multiplier=self.step_multiplier,
-                        step_q=self.step_q,
-                        gap_q=self.gap_q,
-                    )
-                    buffer_m = float(d_train["max_step_len"].iloc[0])
-                except Exception as exc:
-                    raise ValueError(
-                        "Could not compute fixed chip extent from the train split. "
-                        "This usually means there are no valid steps after filtering."
-                    ) from exc
-                if not np.isfinite(buffer_m) or buffer_m <= 0:
-                    raise ValueError(f"Computed invalid fixed buffer_m={buffer_m} from train split.")
-                self._fixed_buffer_m = buffer_m
+            df_train = df_all[df_all[SET_COL] == "train"].copy()
+            if len(df_train) == 0:
+                raise ValueError(
+                    "ChipDataset(mode='steps') requires a non-empty train split in trajectories.csv to define a "
+                    "deterministic chip extent. "
+                    f"Found no rows for set='train' in {self.trajectories_path}."
+                )
+            try:
+                d_train = compute_movement_features(
+                    df_train,
+                    step_multiplier=self.step_multiplier,
+                    step_q=self.step_q,
+                    gap_q=self.gap_q,
+                )
+                buffer_m = float(d_train["max_step_len"].iloc[0])
+            except Exception as exc:
+                raise ValueError(
+                    "Could not compute step_buffer_m from the train split. "
+                    "This usually means there are no valid steps after filtering."
+                ) from exc
+            if not np.isfinite(buffer_m) or buffer_m <= 0:
+                raise ValueError(f"Computed invalid step_buffer_m={buffer_m} from train split.")
+            self._step_buffer_m = buffer_m
         else:
             self._rows = [
                 _Row(
@@ -227,6 +231,26 @@ class ChipDataset(Dataset):
             raise AttributeError("step_starts_df is only available when mode='steps'")
         assert self._step_starts_df is not None
         return self._step_starts_df
+
+    @property
+    def step_buffer_m(self) -> float:
+        """Half-width of the step chip extent (meters), defined from the train split."""
+        if self.mode != "steps":
+            raise AttributeError("step_buffer_m is only available when mode='steps'")
+        assert self._step_buffer_m is not None
+        return float(self._step_buffer_m)
+
+    @property
+    def pixel_size_m(self) -> float:
+        """Meters/pixel for the deterministic step grid (EPSG:3857)."""
+        if self.mode != "steps":
+            raise AttributeError("pixel_size_m is only available when mode='steps'")
+        H, W = self.output_hw
+        if H != W:
+            raise ValueError(f"pixel_size_m requires square output_hw; got {self.output_hw}.")
+        if W < 2:
+            raise ValueError(f"pixel_size_m requires W>=2; got output_hw={self.output_hw}.")
+        return (2.0 * float(self.step_buffer_m)) / (float(W) - 1.0)
 
     def _select_reference_layer(self) -> str:
         # Prefer a per-point chip group when available.
@@ -288,16 +312,14 @@ class ChipDataset(Dataset):
         timestamp = row.timestamp
 
         fixed_dst_transform = None
-        if self._fixed_buffer_m is not None:
+        if self.mode == "steps":
             if not isinstance(row, _StepRow):
-                raise RuntimeError("Internal error: fixed_buffer_split requires mode='steps' rows.")
-            if self._to_target is None:
-                raise RuntimeError("Internal error: missing coordinate transformer for fixed_buffer_split.")
-            H_out, W_out = self.output_hw
-            if int(W_out) < 2 or int(H_out) < 2:
-                raise ValueError(f"fixed_buffer_split requires output_hw >= (2,2), got {self.output_hw}.")
+                raise RuntimeError("Internal error: expected _StepRow rows when mode='steps'.")
+            if self._to_target is None or self._step_buffer_m is None:
+                raise RuntimeError("Internal error: missing coordinate transformer/buffer for mode='steps'.")
 
-            buffer_m = float(self._fixed_buffer_m)
+            H_out, W_out = self.output_hw
+            buffer_m = float(self._step_buffer_m)
             x0, y0 = self._to_target.transform(float(row.lon), float(row.lat))
             px = (2.0 * buffer_m) / (float(W_out) - 1.0)
             left = float(x0) - buffer_m - 0.5 * px
@@ -409,14 +431,14 @@ class ChipDataset(Dataset):
             if not self.registry.get(layer).categorical:
                 continue
             cat_aligned, _, _ = reproject_to_meters(
-                [ref_raster, r],
+                [r],
                 dst_crs=TARGET_CRS,
                 resampling=Resampling.nearest,
                 dst_height=self.output_hw[0],
                 dst_width=self.output_hw[1],
-                dst_transform=fixed_dst_transform,
+                dst_transform=final_transform,
             )
-            aligned_layers[layer] = cat_aligned[1]
+            aligned_layers[layer] = cat_aligned[0]
 
         if fixed_dst_transform is not None and not self._warned_fixed_grid_coverage:
             # If the fixed grid extends outside the downloaded raster coverage,

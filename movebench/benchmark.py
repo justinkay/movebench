@@ -469,11 +469,11 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     model = DeepSSF(
         int(c_env),
         image_dim=int(image_dim),
-        pixel_size_m=float(train_ds.pixel_size_m_estimate),
+        pixel_size_m=float(train_ds.chips.pixel_size_m),
         device=device,
     )
 
-    pixel_size_test = float(test_ds.pixel_size_m_estimate)
+    pixel_size_test = float(test_ds.chips.pixel_size_m)
     pixel_size_train = float(model.pixel_size_m)
     if not math.isclose(pixel_size_test, pixel_size_train, rel_tol=1e-6, abs_tol=0.0):
         raise ValueError(

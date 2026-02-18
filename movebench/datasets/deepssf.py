@@ -7,7 +7,6 @@ the observed endpoint pixel.
 from __future__ import annotations
 
 import math
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -60,7 +59,6 @@ class DeepSSFDataset(Dataset):
         if getattr(chips, "mode", None) != "steps":
             raise ValueError("DeepSSFDataset requires ChipDataset(mode='steps')")
         self.chips = chips
-        self._pixel_size_m_estimate: float | None = None
 
         steps = chips.step_starts_df
         for col in ("timestamp", "start_bearing"):
@@ -81,48 +79,6 @@ class DeepSSFDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.chips)
-
-    @property
-    def pixel_size_m_estimate(self) -> float:
-        """Meters/pixel inferred from the underlying chip grid transform (EPSG:3857)."""
-        if self._pixel_size_m_estimate is None:
-            if len(self.chips) == 0:
-                raise ValueError("Cannot infer pixel_size_m from an empty dataset.")
-
-            # ChipDataset(mode="steps") returns: (env, valid, y, transform, crs)
-            _env0, _valid0, _y0, transform0, crs0 = self.chips[0]
-            crs0_str = str(crs0)
-            if crs0_str != "EPSG:3857":
-                raise ValueError(
-                    "deepSSF pixel_size_m inference requires a metric CRS (EPSG:3857). "
-                    f"Got chip CRS: {crs0_str!r}"
-                )
-
-            try:
-                a = float(getattr(transform0, "a"))
-                e = float(getattr(transform0, "e"))
-            except Exception as exc:
-                raise TypeError(
-                    "ChipDataset returned a transform without numeric `.a` and `.e` attributes; "
-                    "cannot infer pixel_size_m."
-                ) from exc
-
-            ax = abs(a)
-            ex = abs(e)
-            px = (ax + ex) / 2.0
-            if px <= 0:
-                raise ValueError(f"Inferred non-positive pixel_size_m={px} from transform a={a}, e={e}.")
-
-            if ax > 0 and ex > 0:
-                rel = abs(ax - ex) / max(ax, ex)
-                if rel > 1e-3:
-                    warnings.warn(
-                        f"Non-square chip pixels detected (|a|={ax}, |e|={ex}); using average pixel_size_m={px}."
-                    )
-
-            self._pixel_size_m_estimate = float(px)
-
-        return float(self._pixel_size_m_estimate)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         spatial, _valid, target, _xfm, _crs = self.chips[int(idx)]
