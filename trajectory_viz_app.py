@@ -73,6 +73,26 @@ def _make_shade_palette(base_rgb: list[int], keys: list[str], alpha: int) -> dic
     return out
 
 
+def _color_dot_html(rgba: list[int], *, enabled: bool) -> str:
+    r, g, b, a = rgba
+    alpha = float(a) / 255.0
+    if not enabled:
+        alpha *= 0.25
+    border_alpha = 0.35 if enabled else 0.15
+    return (
+        "<span "
+        "style="
+        "\"display:inline-block;"
+        "width:12px;"
+        "height:12px;"
+        "border-radius:999px;"
+        f"background:rgba({int(r)},{int(g)},{int(b)},{alpha:.3f});"
+        f"border:1px solid rgba(0,0,0,{border_alpha:.3f});"
+        "\""
+        "></span>"
+    )
+
+
 def _span_to_zoom(span_deg: float) -> float:
     # Deterministic, dependency-free heuristic.
     if not np.isfinite(span_deg) or span_deg <= 0:
@@ -183,14 +203,14 @@ def main() -> None:
 
     study_ids = list_study_ids()
     if not study_ids:
-        st.error(
+        st.sidebar.error(
             "No studies found. "
             f"Expected study directories under: {paths.studies_root()}. "
             "Set MOVEBENCH_DATA_ROOT to your data root (the directory containing studies_10ind/)."
         )
         st.stop()
 
-    study_id = st.selectbox("Study", study_ids)
+    study_id = st.sidebar.selectbox("Study", study_ids, key="study_id")
     df = load_study_df(study_id)
 
     view_state_study_id = st.session_state.get("_view_state_study_id")
@@ -201,43 +221,58 @@ def main() -> None:
 
     individuals = sorted(df[INDIVIDUAL_COL].dropna().astype(str).unique().tolist())
     if not individuals:
-        st.error("No individuals found in trajectories.csv.")
+        st.sidebar.error("No individuals found in trajectories.csv.")
         st.stop()
-
-    last_study_id = st.session_state.get("_last_study_id")
-    if last_study_id != study_id:
-        st.session_state["_last_study_id"] = study_id
-        st.session_state["visible_individuals"] = individuals
-
-    visible_individuals = st.session_state.get("visible_individuals", individuals)
-    if not isinstance(visible_individuals, list):
-        visible_individuals = individuals
-    visible_individuals = [v for v in visible_individuals if v in individuals]
-    st.session_state["visible_individuals"] = visible_individuals
 
     if "show_train" not in st.session_state:
         st.session_state["show_train"] = True
     if "show_test" not in st.session_state:
         st.session_state["show_test"] = True
 
-    with st.expander("Individuals", expanded=True):
-        st.markdown("**Splits**")
-        s1, s2 = st.columns(2)
-        s1.checkbox("Show train", key="show_train")
-        s2.checkbox("Show test", key="show_test")
+    train_palette = _make_shade_palette(TRAIN_RGB, individuals, PATH_ALPHA)
+    test_palette = _make_shade_palette(TEST_RGB, individuals, PATH_ALPHA)
+    fallback_train_color = [int(TRAIN_RGB[0]), int(TRAIN_RGB[1]), int(TRAIN_RGB[2]), int(PATH_ALPHA)]
+    fallback_test_color = [int(TEST_RGB[0]), int(TEST_RGB[1]), int(TEST_RGB[2]), int(PATH_ALPHA)]
 
-        st.markdown("**Individuals**")
-        c1, c2 = st.columns(2)
-        if c1.button("Select all", use_container_width=True):
-            st.session_state["visible_individuals"] = individuals
-        if c2.button("Clear", use_container_width=True):
-            st.session_state["visible_individuals"] = []
+    def _indiv_visible_key(indiv: str) -> str:
+        return f"visible::{study_id}::{indiv}"
 
-        st.multiselect("Visible individuals", options=individuals, key="visible_individuals")
+    last_study_id = st.session_state.get("_last_study_id")
+    if last_study_id != study_id:
+        st.session_state["_last_study_id"] = study_id
+        for indiv in individuals:
+            st.session_state[_indiv_visible_key(indiv)] = True
 
-    selected = set(st.session_state.get("visible_individuals", []))
+    # ---- table header ----
+    h1, h2, h3 = st.sidebar.columns([3, 1, 1])
+    h1.markdown("**Individual**")
+    h2.checkbox("Train", key="show_train")
+    h3.checkbox("Test", key="show_test")
+
+    # ---- table rows ----
+    for indiv in individuals:
+        k = _indiv_visible_key(indiv)
+        if k not in st.session_state:
+            st.session_state[k] = True
+
+        c1, c2, c3 = st.sidebar.columns([3, 1, 1])
+        visible = c1.checkbox(indiv, key=k)
+
+        train_color = train_palette.get(indiv, fallback_train_color)
+        test_color = test_palette.get(indiv, fallback_test_color)
+        c2.markdown(
+            _color_dot_html(train_color, enabled=visible and bool(st.session_state.get("show_train", True))),
+            unsafe_allow_html=True,
+        )
+        c3.markdown(
+            _color_dot_html(test_color, enabled=visible and bool(st.session_state.get("show_test", True))),
+            unsafe_allow_html=True,
+        )
+
+    sidebar_messages = st.sidebar.container()
+    selected = {indiv for indiv in individuals if bool(st.session_state.get(_indiv_visible_key(indiv), False))}
     if not selected:
-        st.warning("No individuals selected.")
+        sidebar_messages.warning("No individuals selected.")
 
     enabled_splits: list[str] = []
     if bool(st.session_state.get("show_train", True)):
@@ -246,11 +281,11 @@ def main() -> None:
         enabled_splits.append("test")
 
     if not enabled_splits:
-        st.warning("No splits selected.")
+        sidebar_messages.warning("No splits selected.")
     else:
         missing_splits = [s for s in enabled_splits if (df[SET_COL] == s).sum() == 0]
         if missing_splits:
-            st.warning(f"No data for enabled split(s): {', '.join(missing_splits)} (rendering what exists).")
+            sidebar_messages.warning(f"No data for enabled split(s): {', '.join(missing_splits)} (rendering what exists).")
 
     all_rows = build_path_rows(df)
     if selected and enabled_splits:
