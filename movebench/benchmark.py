@@ -393,6 +393,30 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
         patience=int(schedule["patience"]),
         max_eval_steps=max_eval_steps,
     )
+
+    # Save the best checkpoint (fit_step_select restores the best weights before returning).
+    import torch
+
+    out_dir = Path(str(cfg["output_dir"]))
+    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    method_name = str(method["name"])
+    ckpt_path = ckpt_dir / f"{method_name}.pt"
+    torch.save(
+        {
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "meta": {
+                "study_id": str(study.study_id),
+                "method_name": method_name,
+                "kind": str(method["kind"]),
+                "in_channels": int(c),
+                "num_candidates": int(p),
+                "best_step": int(fit["best_step"]),
+                "best_test_nll": float(fit["val"]["nll"]),
+            },
+        },
+        ckpt_path,
+    )
     train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
     test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
 
@@ -403,6 +427,7 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
+        "checkpoint_path": str(ckpt_path),
     }
 
 
@@ -682,11 +707,11 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
                 method=method,
                 device=device,
             )
-            if resume:
-                results[study_id] = study_results
-                raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
+            results[study_id] = study_results
+            raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
             print(f"[{study_id}] {name} done")
 
         results[study_id] = study_results
+        write_outputs(results=results, out_dir=out_dir, cfg=cfg)
 
     write_outputs(results=results, out_dir=out_dir, cfg=cfg)
