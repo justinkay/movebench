@@ -4,7 +4,7 @@ layers_config: configs/layers_all.yaml
 output_dir: results/benchmarks
 
 runtime:
-  device: cpu
+  device: cuda
   seed: 0
   setup_workers: 16
   max_eval_steps: 2500
@@ -12,7 +12,7 @@ runtime:
 datasets:
   issf:
     batch_size: 32
-    num_workers: 0
+    num_workers: 32
     normalize: true
     include_time: true
     sampler:
@@ -24,8 +24,8 @@ datasets:
       bounds_buffer_deg: 0.01
 
   deepssf:
-    batch_size: 16
-    num_workers: 0
+    batch_size: 32
+    num_workers: 32
     output_hw: [101, 101]
     normalize: true
     step_multiplier: 2.0
@@ -64,4 +64,4 @@ methods:
       weight_decay: 0.0
       max_epochs: 100
       eval_every_epochs: 1
-      patience_epochs: 10
+      patience_epochs: 5

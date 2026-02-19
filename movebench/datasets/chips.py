@@ -448,11 +448,12 @@ class ChipDataset(Dataset):
             ref_nodata = warp_rasters[0].nodata
             v = _compute_valid_mask(torch.from_numpy(ref_arr.astype(np.float32, copy=False)), ref_nodata)
             if not bool(v.all()):
-                warnings.warn(
-                    "At least one chip contained invalid pixels after reprojection onto the fixed deepSSF grid; "
-                    "this can happen when rasters do not fully cover the requested extent. "
-                    "Invalid pixels are treated as zeros."
-                )
+                # TODO: This is annoying, and expected -- layers often have NaN values
+                # warnings.warn(
+                #     "At least one chip contained invalid pixels after reprojection onto the fixed deepSSF grid; "
+                #     "this can happen when rasters do not fully cover the requested extent. "
+                #     "Invalid pixels are treated as zeros."
+                # )
                 self._warned_fixed_grid_coverage = True
 
         # Build final (C,H,W) stack in LayerPlan channel order.
@@ -522,11 +523,12 @@ class ChipDataset(Dataset):
                 y[int(rr), int(cc)] = 1.0
             else:
                 if not self._warned_oob:
-                    warnings.warn(
-                        "Observed endpoint fell outside chip grid at least once; those samples will have an all-zero target "
-                        "(and should be ignored by losses/metrics). "
-                        f"Example: point_id_start={point_id} (row,col)=({rr},{cc}) chip(H,W)=({H},{W})."
-                    )
+                    # TODO: This is annoying, and expected -- some small fraction of points will be OOB
+                    # warnings.warn(
+                    #     "Observed endpoint fell outside chip grid at least once; those samples will have an all-zero target "
+                    #     "(and should be ignored by losses/metrics). "
+                    #     f"Example: point_id_start={point_id} (row,col)=({rr},{cc}) chip(H,W)=({H},{W})."
+                    # )
                     self._warned_oob = True
             return env, valid, y, final_transform, str(final_crs)
 
