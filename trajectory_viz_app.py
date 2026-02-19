@@ -24,9 +24,8 @@ if "MOVEBENCH_DATA_ROOT" not in os.environ and _default_data_root.exists():
 
 import numpy as np
 import pandas as pd
-import pydeck as pdk
-from pydeck.types import String as PdkString
 import streamlit as st
+import streamlit.components.v1 as components
 
 from movebench import Study, paths
 from movebench.trajectories import INDIVIDUAL_COL, LAT_COL, LON_COL, SET_COL, TIME_COL
@@ -48,6 +47,12 @@ TEST_LIGHTNESS = 0.35  # darker shade
 
 RASTER_MAX_PX = 256
 RASTER_SAMPLE_STRIDE = 10
+
+DOT_RADIUS_MIN_PX = 4
+DOT_RADIUS_MAX_PX = 14
+
+TIMELINE_BAR_ALPHA = 200
+TIMELINE_UNSELECTED_ALPHA_SCALE = 0.25
 
 def _uniform_downsample(path: list[list[float]], max_points: int) -> list[list[float]]:
     n = len(path)
@@ -307,15 +312,15 @@ def build_path_rows(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
-def compute_initial_view(df: pd.DataFrame) -> pdk.ViewState:
+def compute_initial_view(df: pd.DataFrame) -> dict[str, float]:
     if len(df) == 0:
-        return pdk.ViewState(latitude=0.0, longitude=0.0, zoom=1.0)
+        return {"latitude": 0.0, "longitude": 0.0, "zoom": 1.0}
 
     lons = df[LON_COL].to_numpy(dtype=np.float64, copy=False)
     lats = df[LAT_COL].to_numpy(dtype=np.float64, copy=False)
     finite = np.isfinite(lons) & np.isfinite(lats)
     if not finite.any():
-        return pdk.ViewState(latitude=0.0, longitude=0.0, zoom=1.0)
+        return {"latitude": 0.0, "longitude": 0.0, "zoom": 1.0}
 
     lons = lons[finite]
     lats = lats[finite]
@@ -331,7 +336,393 @@ def compute_initial_view(df: pd.DataFrame) -> pdk.ViewState:
     span = max(max_lon - min_lon, max_lat - min_lat)
     zoom = _span_to_zoom(float(span))
 
-    return pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom)
+    return {"latitude": center_lat, "longitude": center_lon, "zoom": zoom}
+
+
+def _build_timeline_times_and_points(
+    df: pd.DataFrame,
+    *,
+    selected: set[str],
+    enabled_splits: list[str],
+) -> tuple[list[str], list[dict]]:
+    if not selected or not enabled_splits:
+        return [], []
+
+    sdf = df
+    sdf = sdf[sdf[INDIVIDUAL_COL].astype(str).isin(selected)]
+    sdf = sdf[sdf[SET_COL].isin(enabled_splits)]
+    if len(sdf) == 0:
+        return [], []
+
+    sdf = sdf.dropna(subset=[TIME_COL, LON_COL, LAT_COL]).copy()
+    sdf = sdf.drop_duplicates(subset=[INDIVIDUAL_COL, SET_COL, TIME_COL], keep="last")
+    if len(sdf) == 0:
+        return [], []
+
+    times = sdf[TIME_COL].sort_values(kind="mergesort").drop_duplicates()
+    times_list = [pd.Timestamp(t) for t in times.tolist()]
+    time_to_idx = {t: i for i, t in enumerate(times_list)}
+
+    points: list[dict] = []
+    for indiv, split, t, lon, lat in sdf[[INDIVIDUAL_COL, SET_COL, TIME_COL, LON_COL, LAT_COL]].itertuples(
+        index=False, name=None
+    ):
+        ts = pd.Timestamp(t)
+        idx = time_to_idx.get(ts)
+        if idx is None:
+            continue
+        lon_f = float(lon)
+        lat_f = float(lat)
+        if not np.isfinite(lon_f) or not np.isfinite(lat_f):
+            continue
+        points.append(
+            {
+                "time_idx": int(idx),
+                "position": [lon_f, lat_f],
+                "individual": str(indiv),
+                "set": str(split),
+            }
+        )
+
+    times_iso = [t.isoformat() for t in times_list]
+    return times_iso, points
+
+
+def _build_individual_coverage_ms(df: pd.DataFrame, *, enabled_splits: list[str]) -> list[dict]:
+    plot_df = df
+    if enabled_splits:
+        plot_df = plot_df[plot_df[SET_COL].isin(enabled_splits)]
+
+    ranges = plot_df.groupby(INDIVIDUAL_COL, sort=False)[TIME_COL].agg(start="min", end="max")
+    out: list[dict] = []
+    for indiv, r in ranges.iterrows():
+        start = pd.Timestamp(r["start"])
+        end = pd.Timestamp(r["end"])
+        if pd.isna(start) or pd.isna(end):
+            continue
+        out.append(
+            {
+                "individual": str(indiv),
+                "start_ms": int(start.value // 1_000_000),
+                "end_ms": int(end.value // 1_000_000),
+            }
+        )
+    return out
+
+
+def _render_deckgl_viewer(
+    *,
+    map_style: str,
+    view_state: dict[str, float],
+    path_rows: list[dict],
+    raster_tiles: list[dict],
+    individuals: list[str],
+    selected: set[str],
+    times: list[str],
+    points: list[dict],
+    coverage: list[dict],
+    bar_colors: dict[str, str],
+) -> None:
+    map_h = 600
+    bars_h = min(260, max(120, 22 * max(1, len(individuals))))
+    total_h = int(map_h + bars_h + 140)
+
+    payload = {
+        "mapStyle": map_style,
+        "viewState": view_state,
+        "paths": path_rows,
+        "rasterTiles": raster_tiles,
+        "individuals": individuals,
+        "selected": sorted(selected),
+        "times": times,
+        "points": points,
+        "coverage": coverage,
+        "barColors": bar_colors,
+    }
+    payload_json = json.dumps(payload).replace("</", "<\\/")
+
+    html = f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css"
+    />
+    <style>
+      body {{
+        margin: 0;
+        padding: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      }}
+      .mb-wrap {{
+        width: 100%;
+      }}
+      #mb-map {{
+        width: 100%;
+        height: {map_h}px;
+        border-radius: 10px;
+        overflow: hidden;
+      }}
+      .mb-timeline {{
+        padding: 10px 2px 0 2px;
+      }}
+      .mb-title {{
+        font-weight: 600;
+        font-size: 14px;
+        margin: 2px 0 8px 0;
+      }}
+      #mb-bars {{
+        max-height: {bars_h}px;
+        overflow-y: auto;
+        border: 1px solid rgba(49, 51, 63, 0.18);
+        border-radius: 10px;
+        padding: 8px;
+      }}
+      .mb-row {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 6px 0;
+      }}
+      .mb-label {{
+        width: 170px;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }}
+      .mb-track {{
+        flex: 1;
+        height: 10px;
+        background: rgba(49, 51, 63, 0.08);
+        border-radius: 999px;
+        position: relative;
+      }}
+      .mb-bar {{
+        position: absolute;
+        height: 100%;
+        border-radius: 999px;
+      }}
+      .mb-slider-row {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 10px 2px 0 2px;
+      }}
+      #mb-slider {{
+        flex: 1;
+      }}
+      #mb-time {{
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        white-space: nowrap;
+      }}
+    </style>
+  </head>
+  <body>
+    <div class="mb-wrap">
+      <div id="mb-map"></div>
+      <div class="mb-timeline">
+        <div class="mb-title">Data availability</div>
+        <div id="mb-bars"></div>
+        <div class="mb-slider-row">
+          <input id="mb-slider" type="range" min="0" step="1" />
+          <div id="mb-time"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/deck.gl@8.9.33/dist.min.js"></script>
+    <script src="https://unpkg.com/@deck.gl/mapbox@8.9.33/dist.min.js"></script>
+    <script>
+      const DATA = {payload_json};
+
+      function safeNumber(v, fallback) {{
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fallback;
+      }}
+
+      const map = new maplibregl.Map({{
+        container: "mb-map",
+        style: DATA.mapStyle,
+        center: [
+          safeNumber(DATA.viewState && DATA.viewState.longitude, 0),
+          safeNumber(DATA.viewState && DATA.viewState.latitude, 0),
+        ],
+        zoom: safeNumber(DATA.viewState && DATA.viewState.zoom, 1),
+        attributionControl: true,
+      }});
+      map.addControl(new maplibregl.NavigationControl({{ showCompass: true }}), "top-right");
+
+      const MapboxOverlayCtor = deck && (deck.MapboxOverlay || (deck.mapbox && deck.mapbox.MapboxOverlay));
+      const overlay = MapboxOverlayCtor ? new MapboxOverlayCtor({{
+        interleaved: true,
+        layers: [],
+        getTooltip: ({{ object, layer }}) => {{
+          if (!object || !layer) return null;
+          if (layer.id === "paths") return {{ text: `${{object.set}} | ${{object.individual}}` }};
+          if (layer.id === "dots") return {{ text: `${{object.set}} | ${{object.individual}}` }};
+          return null;
+        }},
+      }}) : null;
+      if (overlay) {{
+        map.addControl(overlay);
+      }} else {{
+        console.error("deck.gl MapboxOverlay not found; dots will be disabled.");
+      }}
+
+      const rasterTiles = Array.isArray(DATA.rasterTiles) ? DATA.rasterTiles : [];
+      const bitmapLayers = rasterTiles.map((t) => new deck.BitmapLayer({{
+        id: String(t.id || `raster_${{Math.random()}}`),
+        bounds: t.bounds,
+        image: t.image,
+        opacity: safeNumber(t.opacity, 1.0),
+        pickable: false,
+      }}));
+
+      const paths = Array.isArray(DATA.paths) ? DATA.paths : [];
+      const pathLayer = new deck.PathLayer({{
+        id: "paths",
+        data: paths,
+        getPath: (d) => d.path,
+        getColor: (d) => d.color,
+        pickable: true,
+        widthMinPixels: 2,
+      }});
+
+      const times = Array.isArray(DATA.times) ? DATA.times : [];
+      const points = Array.isArray(DATA.points) ? DATA.points : [];
+      const dotsByIdx = new Array(times.length);
+      for (let i = 0; i < dotsByIdx.length; i++) dotsByIdx[i] = [];
+      for (const p of points) {{
+        const idx = Number(p.time_idx);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= dotsByIdx.length) continue;
+        dotsByIdx[idx].push(p);
+      }}
+
+      function makeDotLayer(dots) {{
+        return new deck.ScatterplotLayer({{
+          id: "dots",
+          data: dots,
+          getPosition: (d) => d.position,
+          getFillColor: [0, 0, 0, 255],
+          getLineColor: [255, 255, 255, 230],
+          lineWidthMinPixels: 1,
+          getRadius: 1,
+          radiusMinPixels: {DOT_RADIUS_MIN_PX},
+          radiusMaxPixels: {DOT_RADIUS_MAX_PX},
+          pickable: true,
+        }});
+      }}
+
+      function setDotIdx(idx) {{
+        if (!overlay) return;
+        const dots = (idx >= 0 && idx < dotsByIdx.length) ? dotsByIdx[idx] : [];
+        overlay.setProps({{
+          layers: [...bitmapLayers, pathLayer, makeDotLayer(dots)],
+        }});
+      }}
+
+      // ---- timeline bars ----
+      const selectedSet = new Set(Array.isArray(DATA.selected) ? DATA.selected : []);
+      const barColors = DATA.barColors || {{}};
+      const coverage = Array.isArray(DATA.coverage) ? DATA.coverage : [];
+      const covMap = new Map();
+      let globalMin = null;
+      let globalMax = null;
+      for (const c of coverage) {{
+        const indiv = String(c.individual);
+        const start = Number(c.start_ms);
+        const end = Number(c.end_ms);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        covMap.set(indiv, {{ start_ms: start, end_ms: end }});
+        if (globalMin === null || start < globalMin) globalMin = start;
+        if (globalMax === null || end > globalMax) globalMax = end;
+      }}
+      if (globalMin === null || globalMax === null || globalMax <= globalMin) {{
+        globalMin = 0;
+        globalMax = 1;
+      }}
+
+      const barsEl = document.getElementById("mb-bars");
+      const indivs = Array.isArray(DATA.individuals) ? DATA.individuals : [];
+      for (const indiv of indivs) {{
+        const row = document.createElement("div");
+        row.className = "mb-row";
+
+        const label = document.createElement("div");
+        label.className = "mb-label";
+        label.textContent = indiv;
+
+        const track = document.createElement("div");
+        track.className = "mb-track";
+
+        const r = covMap.get(indiv);
+        if (r) {{
+          const leftPct = ((r.start_ms - globalMin) / (globalMax - globalMin)) * 100.0;
+          const widthPct = Math.max(0.4, ((r.end_ms - r.start_ms) / (globalMax - globalMin)) * 100.0);
+          const bar = document.createElement("div");
+          bar.className = "mb-bar";
+          bar.style.left = `${{leftPct}}%`;
+          bar.style.width = `${{widthPct}}%`;
+          bar.style.background = barColors[indiv] || "rgba(100, 100, 100, 0.7)";
+          if (selectedSet.size > 0 && !selectedSet.has(indiv)) {{
+            bar.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
+            label.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
+          }}
+          track.appendChild(bar);
+        }} else {{
+          if (selectedSet.size > 0 && !selectedSet.has(indiv)) {{
+            label.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
+          }}
+        }}
+
+        row.appendChild(label);
+        row.appendChild(track);
+        barsEl.appendChild(row);
+      }}
+
+      // ---- slider ----
+      const slider = document.getElementById("mb-slider");
+      const timeEl = document.getElementById("mb-time");
+
+      const maxIdx = Math.max(0, times.length - 1);
+      slider.max = String(maxIdx);
+      slider.value = "0";
+      slider.disabled = times.length <= 1;
+
+      if (times.length === 0) {{
+        timeEl.textContent = "No timestamps";
+      }} else {{
+        timeEl.textContent = times[0];
+      }}
+
+      slider.addEventListener("input", (e) => {{
+        const idx = Number(e.target.value);
+        if (!Number.isInteger(idx)) return;
+        setDotIdx(idx);
+      }});
+
+      // Timeline label only updates on release (change), per request.
+      slider.addEventListener("change", (e) => {{
+        const idx = Number(e.target.value);
+        if (!Number.isInteger(idx)) return;
+        timeEl.textContent = times[idx] || "";
+      }});
+
+      map.on("load", () => {{
+        setDotIdx(0);
+      }});
+    </script>
+  </body>
+</html>
+"""
+
+    components.html(html, height=total_h, scrolling=False)
 
 
 def main() -> None:
@@ -350,7 +741,12 @@ def main() -> None:
     df = load_study_df(study_id)
 
     view_state_study_id = st.session_state.get("_view_state_study_id")
-    if view_state_study_id != study_id or "_initial_view_state" not in st.session_state:
+    prior_view_state = st.session_state.get("_initial_view_state")
+    if (
+        view_state_study_id != study_id
+        or not isinstance(prior_view_state, dict)
+        or not {"latitude", "longitude", "zoom"}.issubset(prior_view_state.keys())
+    ):
         st.session_state["_view_state_study_id"] = study_id
         st.session_state["_initial_view_state"] = compute_initial_view(df)
     view_state = st.session_state["_initial_view_state"]
@@ -462,7 +858,7 @@ def main() -> None:
         basemap_name = st.radio("Basemap", basemap_options, index=0, key="basemap_name")
     map_style = BASEMAP_STYLES[basemap_name]
 
-    raster_layers: list[pdk.Layer] = []
+    raster_tiles: list[dict] = []
     with st.expander("Raster overlay (DEM)", expanded=False):
         if not raster_hashes:
             st.info("No rasters found for this study.")
@@ -516,41 +912,35 @@ def main() -> None:
                             max_px=RASTER_MAX_PX,
                         )
                         safe_style = "".join(ch if ch.isalnum() else "_" for ch in str(dem_style))
-                        raster_layers.append(
-                            pdk.Layer(
-                                "BitmapLayer",
-                                data=None,
-                                # pydeck wraps plain strings as accessors (`@@=...`), which breaks
-                                # data URLs like `data:image/...` on the frontend JSON converter.
-                                # Use an explicit string wrapper to emit a literal URL.
-                                image=PdkString(img_url),
-                                bounds=[float(min_lon), float(min_lat), float(max_lon), float(max_lat)],
-                                opacity=float(dem_opacity),
-                                pickable=False,
-                                id=f"dem_{dem_hash}_{safe_style}_{i}",
-                            )
+                        raster_tiles.append(
+                            {
+                                "id": f"dem_{dem_hash}_{safe_style}_{i}",
+                                "image": img_url,
+                                "bounds": [float(min_lon), float(min_lat), float(max_lon), float(max_lat)],
+                                "opacity": float(dem_opacity),
+                            }
                         )
 
-    layer = pdk.Layer(
-        "PathLayer",
-        rows,
-        get_path="path",
-        get_color="color",
-        pickable=True,
-        width_min_pixels=2,
-    )
+    times, points = _build_timeline_times_and_points(df, selected=selected, enabled_splits=enabled_splits)
+    coverage = _build_individual_coverage_ms(df, enabled_splits=enabled_splits)
 
-    deck = pdk.Deck(
+    bar_colors: dict[str, str] = {}
+    for indiv, rgba in train_palette.items():
+        r, g, b, _ = rgba
+        bar_colors[str(indiv)] = f"rgba({int(r)},{int(g)},{int(b)},{float(TIMELINE_BAR_ALPHA) / 255.0:.3f})"
+
+    _render_deckgl_viewer(
         map_style=map_style,
-        initial_view_state=view_state,
-        layers=[*raster_layers, layer],
-        tooltip={"text": "{set} | {individual}"},
+        view_state=view_state,
+        path_rows=rows,
+        raster_tiles=raster_tiles,
+        individuals=individuals,
+        selected=selected,
+        times=times,
+        points=points,
+        coverage=coverage,
+        bar_colors=bar_colors,
     )
-
-    try:
-        st.pydeck_chart(deck, use_container_width=True, key="trajectory_map")
-    except TypeError:
-        st.pydeck_chart(deck, use_container_width=True)
 
 
 if __name__ == "__main__":
