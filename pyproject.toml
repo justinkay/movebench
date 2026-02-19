@@ -22,10 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Streamlit trajectory review app (app.py)
-review-app = [
+# Streamlit apps (trajectory viewer + review app)
+apps = [
   "cartopy",
   "matplotlib",
+  "pydeck",
   "streamlit",
 ]
 
