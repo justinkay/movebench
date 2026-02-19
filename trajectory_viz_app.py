@@ -13,6 +13,7 @@ from __future__ import annotations
 import colorsys
 import os
 from pathlib import Path
+import json
 
 
 # If the user hasn't configured MOVEBENCH_DATA_ROOT, default to the repo-local
@@ -24,13 +25,19 @@ if "MOVEBENCH_DATA_ROOT" not in os.environ and _default_data_root.exists():
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+from pydeck.types import String as PdkString
 import streamlit as st
 
 from movebench import Study, paths
 from movebench.trajectories import INDIVIDUAL_COL, LAT_COL, LON_COL, SET_COL, TIME_COL
 
 
-MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+BASEMAP_STYLES: dict[str, str] = {
+    "Positron": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    "Voyager": "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+    "Dark Matter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+}
+
 MAX_POINTS_PER_PATH = 2_000
 
 PATH_ALPHA = 180
@@ -39,6 +46,8 @@ BASE_SATURATION = 0.9
 TRAIN_LIGHTNESS = 0.65  # lighter shade
 TEST_LIGHTNESS = 0.35  # darker shade
 
+RASTER_MAX_PX = 256
+RASTER_SAMPLE_STRIDE = 10
 
 def _uniform_downsample(path: list[list[float]], max_points: int) -> list[list[float]]:
     n = len(path)
@@ -103,6 +112,123 @@ def _color_dot_html(rgba: list[int], *, enabled: bool) -> str:
         "\""
         "></span>"
     )
+
+
+@st.cache_data(show_spinner=False)
+def _load_tile_index(index_path: str) -> dict:
+    with open(index_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@st.cache_data(show_spinner=False)
+def _compute_global_vmin_vmax(tile_paths: tuple[str, ...]) -> tuple[float, float]:
+    # Approximate robust range using a stride sample to keep it lightweight.
+    import rasterio  # heavy import; keep local
+
+    samples: list[np.ndarray] = []
+    for p in tile_paths:
+        with rasterio.open(p) as ds:
+            a = ds.read(1, masked=True).filled(np.nan).astype(np.float32, copy=False)
+        a = a[::RASTER_SAMPLE_STRIDE, ::RASTER_SAMPLE_STRIDE]
+        v = a[np.isfinite(a)]
+        if v.size:
+            samples.append(v)
+
+    if not samples:
+        return (0.0, 1.0)
+
+    vals = np.concatenate(samples)
+    vmin, vmax = np.percentile(vals, [2.0, 98.0]).tolist()
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or float(vmax) <= float(vmin):
+        return (0.0, 1.0)
+    return (float(vmin), float(vmax))
+
+
+def _normalize(a: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        return np.zeros_like(a, dtype=np.float32)
+    out = (a - float(vmin)) / float(vmax - vmin)
+    return np.clip(out, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def _hillshade(z: np.ndarray, *, azimuth_deg: float = 315.0, altitude_deg: float = 45.0) -> np.ndarray:
+    # Lightweight hillshade in pixel space (good enough for visualization).
+    az = np.deg2rad(float(azimuth_deg))
+    alt = np.deg2rad(float(altitude_deg))
+
+    # Avoid NaNs blowing up gradients.
+    zf = z.astype(np.float32, copy=True)
+    finite = np.isfinite(zf)
+    fill = float(np.nanmedian(zf[finite])) if finite.any() else 0.0
+    zf[~finite] = fill
+
+    dy, dx = np.gradient(zf)
+    slope = (np.pi / 2.0) - np.arctan(np.sqrt(dx * dx + dy * dy))
+    aspect = np.arctan2(-dx, dy)
+
+    shaded = np.sin(alt) * np.sin(slope) + np.cos(alt) * np.cos(slope) * np.cos(az - aspect)
+    return np.clip(shaded, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+@st.cache_data(show_spinner=False)
+def _tile_png_data_url(
+    tile_path: str,
+    *,
+    style: str,
+    vmin: float | None,
+    vmax: float | None,
+    max_px: int,
+) -> str:
+    import base64
+    import io
+
+    import rasterio  # heavy import; keep local
+    from PIL import Image
+
+    with rasterio.open(tile_path) as ds:
+        a = ds.read(1, masked=True).filled(np.nan).astype(np.float32, copy=False)
+
+    h, w = a.shape
+    step = int(np.ceil(max(h, w) / float(max_px))) if max_px > 0 else 1
+    step = max(1, step)
+    a = a[::step, ::step]
+    mask = np.isfinite(a)
+
+    style_norm = style.strip().lower()
+    if style_norm == "hillshade":
+        shade = _hillshade(a)
+        rgb = (shade * 255.0).round().astype(np.uint8)
+        rgba = np.stack([rgb, rgb, rgb, (mask * PATH_ALPHA).astype(np.uint8)], axis=-1)
+    else:
+        if vmin is None or vmax is None:
+            v = a[mask]
+            if v.size:
+                vmin_, vmax_ = np.percentile(v, [2.0, 98.0]).tolist()
+                vmin = float(vmin_)
+                vmax = float(vmax_)
+            else:
+                vmin, vmax = 0.0, 1.0
+
+        norm = _normalize(a, float(vmin), float(vmax))
+
+        if style_norm == "grayscale":
+            rgb = (norm * 255.0).round().astype(np.uint8)
+            rgba = np.stack([rgb, rgb, rgb, (mask * PATH_ALPHA).astype(np.uint8)], axis=-1)
+        elif style_norm == "terrain colormap":
+            import matplotlib.cm as cm
+
+            cmap = cm.get_cmap("terrain")
+            rgba_f = cmap(norm)  # float RGBA in [0, 1]
+            rgba = (rgba_f * 255.0).round().astype(np.uint8)
+            rgba[..., 3] = (mask * PATH_ALPHA).astype(np.uint8)
+        else:
+            raise ValueError(f"Unknown raster style: {style!r}")
+
+    img = Image.fromarray(rgba, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
 
 
 def _span_to_zoom(span_deg: float) -> float:
@@ -234,6 +360,28 @@ def main() -> None:
         st.sidebar.error("No individuals found in trajectories.csv.")
         st.stop()
 
+    study = Study(study_id)
+    rasters_root = study.study_dir / "rasters"
+    hash_dirs = [p for p in rasters_root.iterdir() if p.is_dir()] if rasters_root.exists() else []
+    hash_dirs = sorted(hash_dirs, key=lambda p: p.stat().st_mtime, reverse=True)
+    raster_hashes = [p.name for p in hash_dirs]
+    dem_ready_hashes = [
+        p.name for p in hash_dirs if (p / "tiles" / "dem" / "index.json").exists()
+    ]
+    if dem_ready_hashes:
+        latest_hash = dem_ready_hashes[0]
+    elif raster_hashes:
+        latest_hash = raster_hashes[0]
+    else:
+        latest_hash = None
+
+    if st.session_state.get("_dem_hash_study_id") != study_id:
+        st.session_state["_dem_hash_study_id"] = study_id
+        if latest_hash is not None:
+            st.session_state["dem_raster_hash"] = latest_hash
+        if "dem_overlay_enabled" not in st.session_state:
+            st.session_state["dem_overlay_enabled"] = True
+
     if "show_train" not in st.session_state:
         st.session_state["show_train"] = True
     if "show_test" not in st.session_state:
@@ -300,6 +448,89 @@ def main() -> None:
     else:
         rows = []
 
+    # ---- map-side controls ----
+    basemap_options = list(BASEMAP_STYLES.keys())
+    try:
+        basemap_name = st.radio(
+            "Basemap",
+            basemap_options,
+            index=0,
+            horizontal=True,
+            key="basemap_name",
+        )
+    except TypeError:
+        basemap_name = st.radio("Basemap", basemap_options, index=0, key="basemap_name")
+    map_style = BASEMAP_STYLES[basemap_name]
+
+    raster_layers: list[pdk.Layer] = []
+    with st.expander("Raster overlay (DEM)", expanded=False):
+        if not raster_hashes:
+            st.info("No rasters found for this study.")
+        else:
+            st.checkbox("Show DEM overlay", key="dem_overlay_enabled")
+            dem_hash = st.selectbox("Rasters hash", raster_hashes, key="dem_raster_hash")
+            dem_style = st.selectbox(
+                "Style",
+                ["Grayscale", "Terrain colormap", "Hillshade"],
+                index=2,
+                key="dem_style",
+            )
+            dem_opacity = st.slider("Opacity", 0.0, 1.0, 0.6, 0.05, key="dem_opacity")
+
+            if bool(st.session_state.get("dem_overlay_enabled", False)):
+                dem_tiles_dir = rasters_root / str(dem_hash) / "tiles" / "dem"
+                index_path = dem_tiles_dir / "index.json"
+                if not index_path.exists():
+                    st.warning(f"DEM tiles not found at: {dem_tiles_dir}")
+                else:
+                    idx = _load_tile_index(str(index_path))
+                    tiles = idx.get("tiles", [])
+                    tile_paths = tuple(sorted(str(dem_tiles_dir / t["file"]) for t in tiles if "file" in t))
+
+                    vmin = vmax = None
+                    if dem_style.strip().lower() != "hillshade":
+                        vmin, vmax = _compute_global_vmin_vmax(tile_paths)
+
+                    for i, t in enumerate(tiles):
+                        file = t.get("file")
+                        bounds = t.get("bounds") or {}
+                        if not file:
+                            continue
+
+                        min_lon = bounds.get("min_lon")
+                        max_lon = bounds.get("max_lon")
+                        min_lat = bounds.get("min_lat")
+                        max_lat = bounds.get("max_lat")
+                        if min_lon is None or max_lon is None or min_lat is None or max_lat is None:
+                            continue
+
+                        tile_path = str(dem_tiles_dir / str(file))
+                        if not Path(tile_path).exists():
+                            continue
+
+                        img_url = _tile_png_data_url(
+                            tile_path,
+                            style=dem_style,
+                            vmin=vmin,
+                            vmax=vmax,
+                            max_px=RASTER_MAX_PX,
+                        )
+                        safe_style = "".join(ch if ch.isalnum() else "_" for ch in str(dem_style))
+                        raster_layers.append(
+                            pdk.Layer(
+                                "BitmapLayer",
+                                data=None,
+                                # pydeck wraps plain strings as accessors (`@@=...`), which breaks
+                                # data URLs like `data:image/...` on the frontend JSON converter.
+                                # Use an explicit string wrapper to emit a literal URL.
+                                image=PdkString(img_url),
+                                bounds=[float(min_lon), float(min_lat), float(max_lon), float(max_lat)],
+                                opacity=float(dem_opacity),
+                                pickable=False,
+                                id=f"dem_{dem_hash}_{safe_style}_{i}",
+                            )
+                        )
+
     layer = pdk.Layer(
         "PathLayer",
         rows,
@@ -310,9 +541,9 @@ def main() -> None:
     )
 
     deck = pdk.Deck(
-        map_style=MAP_STYLE,
+        map_style=map_style,
         initial_view_state=view_state,
-        layers=[layer],
+        layers=[*raster_layers, layer],
         tooltip={"text": "{set} | {individual}"},
     )
 
