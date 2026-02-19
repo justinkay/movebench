@@ -33,9 +33,11 @@ from movebench.trajectories import INDIVIDUAL_COL, LAT_COL, LON_COL, SET_COL, TI
 MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 MAX_POINTS_PER_PATH = 2_000
 
-TRAIN_RGB = [31, 119, 180]  # blue
-TEST_RGB = [255, 127, 14]  # orange
 PATH_ALPHA = 180
+
+BASE_SATURATION = 0.9
+TRAIN_LIGHTNESS = 0.65  # lighter shade
+TEST_LIGHTNESS = 0.35  # darker shade
 
 
 def _uniform_downsample(path: list[list[float]], max_points: int) -> list[list[float]]:
@@ -46,31 +48,41 @@ def _uniform_downsample(path: list[list[float]], max_points: int) -> list[list[f
     return [path[int(i)] for i in idx]
 
 
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
+def _alternating_hue_order(n: int) -> list[int]:
+    """Return indices 0..n-1 in an order that maximizes adjacent hue separation."""
+    half = (n + 1) // 2
+    out: list[int] = []
+    for i in range(half):
+        out.append(i)
+        j = i + half
+        if j < n:
+            out.append(j)
+    return out[:n]
 
 
-def _make_shade_palette(base_rgb: list[int], keys: list[str], alpha: int) -> dict[str, list[int]]:
-    if not keys:
-        return {}
+def _hls_to_rgba(h: float, l: float, s: float, alpha: int) -> list[int]:
+    r, g, b = colorsys.hls_to_rgb(float(h), float(l), float(s))
+    return [
+        int(round(r * 255)),
+        int(round(g * 255)),
+        int(round(b * 255)),
+        int(alpha),
+    ]
 
-    r, g, b = (float(c) / 255.0 for c in base_rgb)
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
 
-    l_min = _clamp(l - 0.12, 0.15, 0.85)
-    l_max = _clamp(l + 0.12, 0.15, 0.85)
+def _make_split_palettes(individuals: list[str], alpha: int) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    n = len(individuals)
+    if n == 0:
+        return {}, {}
 
-    n = len(keys)
-    if n == 1:
-        lightness_values = [l]
-    else:
-        lightness_values = np.linspace(l_min, l_max, num=n, dtype=np.float64).tolist()
-
-    out: dict[str, list[int]] = {}
-    for key, li in zip(keys, lightness_values, strict=True):
-        rr, gg, bb = colorsys.hls_to_rgb(h, float(li), s)
-        out[key] = [int(round(rr * 255)), int(round(gg * 255)), int(round(bb * 255)), int(alpha)]
-    return out
+    order = _alternating_hue_order(n)
+    train: dict[str, list[int]] = {}
+    test: dict[str, list[int]] = {}
+    for idx, indiv in enumerate(individuals):
+        h = float(order[idx]) / float(n)
+        train[indiv] = _hls_to_rgba(h, TRAIN_LIGHTNESS, BASE_SATURATION, alpha)
+        test[indiv] = _hls_to_rgba(h, TEST_LIGHTNESS, BASE_SATURATION, alpha)
+    return train, test
 
 
 def _color_dot_html(rgba: list[int], *, enabled: bool) -> str:
@@ -144,15 +156,10 @@ def load_study_df(study_id: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def build_path_rows(df: pd.DataFrame) -> list[dict]:
     individuals = sorted(df[INDIVIDUAL_COL].dropna().astype(str).unique().tolist())
-    train_palette = _make_shade_palette(TRAIN_RGB, individuals, PATH_ALPHA)
-    test_palette = _make_shade_palette(TEST_RGB, individuals, PATH_ALPHA)
+    train_palette, test_palette = _make_split_palettes(individuals, PATH_ALPHA)
 
     rows: list[dict] = []
-    for split, palette, fallback_rgb in (
-        ("train", train_palette, TRAIN_RGB),
-        ("test", test_palette, TEST_RGB),
-    ):
-        fallback_color = [int(fallback_rgb[0]), int(fallback_rgb[1]), int(fallback_rgb[2]), int(PATH_ALPHA)]
+    for split, palette in (("train", train_palette), ("test", test_palette)):
         sdf = df[df[SET_COL] == split]
         if len(sdf) == 0:
             continue
@@ -165,9 +172,12 @@ def build_path_rows(df: pd.DataFrame) -> list[dict]:
                 continue
             path = coords.tolist()
             path = _uniform_downsample(path, MAX_POINTS_PER_PATH)
-            rows.append(
-                {"individual": indiv_str, "set": split, "path": path, "color": palette.get(indiv_str, fallback_color)}
-            )
+            color = palette.get(indiv_str)
+            if color is None:
+                # Shouldn't happen, but keep the app robust to unexpected ids.
+                fallback_l = TRAIN_LIGHTNESS if split == "train" else TEST_LIGHTNESS
+                color = _hls_to_rgba(0.0, fallback_l, BASE_SATURATION, PATH_ALPHA)
+            rows.append({"individual": indiv_str, "set": split, "path": path, "color": color})
     return rows
 
 
@@ -229,10 +239,7 @@ def main() -> None:
     if "show_test" not in st.session_state:
         st.session_state["show_test"] = True
 
-    train_palette = _make_shade_palette(TRAIN_RGB, individuals, PATH_ALPHA)
-    test_palette = _make_shade_palette(TEST_RGB, individuals, PATH_ALPHA)
-    fallback_train_color = [int(TRAIN_RGB[0]), int(TRAIN_RGB[1]), int(TRAIN_RGB[2]), int(PATH_ALPHA)]
-    fallback_test_color = [int(TEST_RGB[0]), int(TEST_RGB[1]), int(TEST_RGB[2]), int(PATH_ALPHA)]
+    train_palette, test_palette = _make_split_palettes(individuals, PATH_ALPHA)
 
     def _indiv_visible_key(indiv: str) -> str:
         return f"visible::{study_id}::{indiv}"
@@ -258,8 +265,8 @@ def main() -> None:
         c1, c2, c3 = st.sidebar.columns([3, 1, 1])
         visible = c1.checkbox(indiv, key=k)
 
-        train_color = train_palette.get(indiv, fallback_train_color)
-        test_color = test_palette.get(indiv, fallback_test_color)
+        train_color = train_palette[indiv]
+        test_color = test_palette[indiv]
         c2.markdown(
             _color_dot_html(train_color, enabled=visible and bool(st.session_state.get("show_train", True))),
             unsafe_allow_html=True,
