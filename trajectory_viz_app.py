@@ -459,70 +459,11 @@ def _render_deckgl_viewer(
       .mb-wrap {{
         width: 100%;
       }}
-      .mb-filters {{
-        border: 1px solid rgba(49, 51, 63, 0.18);
-        border-radius: 10px;
-        padding: 8px 10px;
-        margin-bottom: 10px;
-      }}
-      .mb-filters > summary {{
-        cursor: pointer;
-        font-weight: 600;
-        font-size: 14px;
-      }}
-      .mb-filter-controls {{
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 12px;
-        margin: 10px 0 8px 0;
-        font-size: 12px;
-      }}
-      .mb-filter-controls label {{
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }}
-      .mb-filter-controls button {{
-        appearance: none;
-        border: 1px solid rgba(49, 51, 63, 0.25);
-        background: rgba(49, 51, 63, 0.03);
-        color: inherit;
-        padding: 3px 8px;
-        border-radius: 8px;
-        cursor: pointer;
-        font-size: 12px;
-      }}
-      .mb-filter-controls button:hover {{
-        background: rgba(49, 51, 63, 0.06);
-      }}
-      #mb-indiv-list {{
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-        gap: 6px 10px;
-      }}
-      .mb-indiv {{
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 12px;
-        padding: 4px 6px;
-        border-radius: 8px;
-      }}
-      .mb-indiv:hover {{
-        background: rgba(49, 51, 63, 0.03);
-      }}
       .mb-indiv-name {{
         flex: 1;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-      }}
-      .mb-dot {{
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(0, 0, 0, 0.25);
       }}
       #mb-map {{
         width: 100%;
@@ -533,10 +474,43 @@ def _render_deckgl_viewer(
       .mb-timeline {{
         padding: 12px 2px 0 2px;
       }}
+      .mb-title-row {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 2px 0 8px 0;
+      }}
       .mb-title {{
         font-weight: 600;
         font-size: 14px;
-        margin: 2px 0 8px 0;
+        margin: 0;
+      }}
+      .mb-title-controls {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        font-size: 12px;
+      }}
+      .mb-title-controls label {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+      }}
+      .mb-title-controls button {{
+        appearance: none;
+        border: 1px solid rgba(49, 51, 63, 0.25);
+        background: rgba(49, 51, 63, 0.03);
+        color: inherit;
+        padding: 3px 8px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 12px;
+      }}
+      .mb-title-controls button:hover {{
+        background: rgba(49, 51, 63, 0.06);
       }}
       #mb-bars {{
         max-height: {bars_h}px;
@@ -553,10 +527,16 @@ def _render_deckgl_viewer(
       }}
       .mb-label {{
         width: 170px;
+        flex: 0 0 170px;
+        display: flex;
+        align-items: center;
         font-size: 12px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        gap: 8px;
+        cursor: pointer;
+      }}
+      .mb-label input[type="checkbox"] {{
+        margin: 0;
+        flex: 0 0 auto;
       }}
       .mb-track {{
         flex: 1;
@@ -613,19 +593,17 @@ def _render_deckgl_viewer(
   </head>
   <body>
     <div class="mb-wrap">
-      <details class="mb-filters" id="mb-filters" open>
-        <summary id="mb-filter-summary">Filters</summary>
-        <div class="mb-filter-controls">
-          <label><input type="checkbox" id="mb-show-train" /> Train</label>
-          <label><input type="checkbox" id="mb-show-test" /> Test</label>
-          <button type="button" id="mb-select-all">All</button>
-          <button type="button" id="mb-select-none">None</button>
-        </div>
-        <div id="mb-indiv-list"></div>
-      </details>
       <div id="mb-map"></div>
       <div class="mb-timeline">
-        <div class="mb-title">Data availability</div>
+        <div class="mb-title-row">
+          <div class="mb-title">Data availability</div>
+          <div class="mb-title-controls">
+            <label><input type="checkbox" id="mb-show-train" /> Train</label>
+            <label><input type="checkbox" id="mb-show-test" /> Test</label>
+            <button type="button" id="mb-select-all">All</button>
+            <button type="button" id="mb-select-none">None</button>
+          </div>
+        </div>
         <div id="mb-bars"></div>
         <div class="mb-slider-row">
           <div class="mb-label-spacer"></div>
@@ -850,58 +828,13 @@ def _render_deckgl_viewer(
         }});
       }}
 
-      // ---- filters UI ----
+      // ---- data availability controls ----
       const showTrainEl = document.getElementById("mb-show-train");
       const showTestEl = document.getElementById("mb-show-test");
       const selectAllEl = document.getElementById("mb-select-all");
       const selectNoneEl = document.getElementById("mb-select-none");
-      const filterSummaryEl = document.getElementById("mb-filter-summary");
       showTrainEl.checked = showTrain;
       showTestEl.checked = showTest;
-
-      function updateFilterSummary() {{
-        filterSummaryEl.textContent = `Filters (${{selectedIndividuals.size}}/${{indivs.length}})`;
-      }}
-
-      function colorDot(split, indiv) {{
-        const c = (splitColors[indiv] && splitColors[indiv][split]) ? splitColors[indiv][split] : "rgba(120,120,120,0.8)";
-        const el = document.createElement("div");
-        el.className = "mb-dot";
-        el.style.background = c;
-        el.title = split;
-        return el;
-      }}
-
-      const indivListEl = document.getElementById("mb-indiv-list");
-      const indivCheckboxes = new Map();
-      for (const indiv of indivs) {{
-        const row = document.createElement("label");
-        row.className = "mb-indiv";
-
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.checked = selectedIndividuals.has(indiv);
-
-        const name = document.createElement("div");
-        name.className = "mb-indiv-name";
-        name.textContent = indiv;
-
-        row.appendChild(cb);
-        row.appendChild(name);
-        row.appendChild(colorDot("train", indiv));
-        row.appendChild(colorDot("test", indiv));
-        indivListEl.appendChild(row);
-
-        indivCheckboxes.set(indiv, cb);
-        cb.addEventListener("change", () => {{
-          if (cb.checked) selectedIndividuals.add(indiv);
-          else selectedIndividuals.delete(indiv);
-          updateFilterSummary();
-          updateBarsUI();
-          renderLayers();
-          saveStateSoon();
-        }});
-      }}
 
       showTrainEl.addEventListener("change", () => {{
         showTrain = !!showTrainEl.checked;
@@ -915,23 +848,6 @@ def _render_deckgl_viewer(
         renderLayers();
         saveStateSoon();
       }});
-      selectAllEl.addEventListener("click", () => {{
-        selectedIndividuals = new Set(indivs);
-        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = true;
-        updateFilterSummary();
-        updateBarsUI();
-        renderLayers();
-        saveStateSoon();
-      }});
-      selectNoneEl.addEventListener("click", () => {{
-        selectedIndividuals = new Set();
-        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = false;
-        updateFilterSummary();
-        updateBarsUI();
-        renderLayers();
-        saveStateSoon();
-      }});
-      updateFilterSummary();
 
       // ---- timeline bars (split-colored) ----
       const coverage = Array.isArray(DATA.coverage) ? DATA.coverage : [];
@@ -949,6 +865,7 @@ def _render_deckgl_viewer(
       const barsEl = document.getElementById("mb-bars");
       const barEls = [];
       const labelEls = new Map();
+      const indivCheckboxes = new Map();
       const cursorEls = [];
 
       function leftPct(ms) {{
@@ -962,9 +879,16 @@ def _render_deckgl_viewer(
         const row = document.createElement("div");
         row.className = "mb-row";
 
-        const label = document.createElement("div");
+        const label = document.createElement("label");
         label.className = "mb-label";
-        label.textContent = indiv;
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = selectedIndividuals.has(indiv);
+        const name = document.createElement("span");
+        name.className = "mb-indiv-name";
+        name.textContent = indiv;
+        label.appendChild(cb);
+        label.appendChild(name);
 
         const track = document.createElement("div");
         track.className = "mb-track";
@@ -995,7 +919,30 @@ def _render_deckgl_viewer(
         barsEl.appendChild(row);
 
         labelEls.set(indiv, label);
+        indivCheckboxes.set(indiv, cb);
+        cb.addEventListener("change", () => {{
+          if (cb.checked) selectedIndividuals.add(indiv);
+          else selectedIndividuals.delete(indiv);
+          updateBarsUI();
+          renderLayers();
+          saveStateSoon();
+        }});
       }}
+
+      selectAllEl.addEventListener("click", () => {{
+        selectedIndividuals = new Set(indivs);
+        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = true;
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      selectNoneEl.addEventListener("click", () => {{
+        selectedIndividuals = new Set();
+        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = false;
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
 
       function updateCursor() {{
         const pct = leftPct(currentTimeMs);
@@ -1110,11 +1057,13 @@ def main() -> None:
         st.session_state["_dem_hash_study_id"] = study_id
         if latest_hash is not None:
             st.session_state["dem_raster_hash"] = latest_hash
-        if "dem_overlay_enabled" not in st.session_state:
-            st.session_state["dem_overlay_enabled"] = True
+    if "dem_overlay_enabled" not in st.session_state:
+        st.session_state["dem_overlay_enabled"] = True
 
     train_palette, test_palette = _make_split_palettes(individuals, PATH_ALPHA)
-    st.sidebar.caption("Use the **Filters** panel above the map to toggle individuals/splits without reloading.")
+    st.sidebar.caption(
+        "Use the **Data availability** panel below the map to toggle individuals/splits without reloading."
+    )
 
     # Build all paths; selection/filtering is handled client-side.
     rows = build_path_rows(df)
@@ -1146,7 +1095,7 @@ def main() -> None:
                 index=2,
                 key="dem_style",
             )
-            dem_opacity = st.slider("Opacity", 0.0, 1.0, 0.6, 0.05, key="dem_opacity")
+            dem_opacity = st.slider("Opacity", 0.0, 1.0, 0.1, 0.05, key="dem_opacity")
 
             if bool(st.session_state.get("dem_overlay_enabled", False)):
                 dem_tiles_dir = rasters_root / str(dem_hash) / "tiles" / "dem"
