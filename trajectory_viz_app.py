@@ -653,21 +653,15 @@ def _render_deckgl_viewer(
         return d.toISOString().replace("T", " ").replace(".000Z", "Z");
       }}
 
-      function nearestIdx(sortedArr, x) {{
-        const n = sortedArr.length;
-        if (n === 0) return -1;
-        if (x <= sortedArr[0]) return 0;
-        if (x >= sortedArr[n - 1]) return n - 1;
+      function upperBound(sortedArr, x) {{
         let lo = 0;
-        let hi = n - 1;
-        while (lo + 1 < hi) {{
+        let hi = sortedArr.length;
+        while (lo < hi) {{
           const mid = (lo + hi) >> 1;
-          const v = sortedArr[mid];
-          if (v === x) return mid;
-          if (v < x) lo = mid;
+          if (sortedArr[mid] <= x) lo = mid + 1;
           else hi = mid;
         }}
-        return (x - sortedArr[lo] <= sortedArr[hi] - x) ? lo : hi;
+        return lo;
       }}
 
       const indivs = Array.isArray(DATA.individuals) ? DATA.individuals.map(String) : [];
@@ -703,10 +697,6 @@ def _render_deckgl_viewer(
         currentTimeMs = timesMs.length ? timesMs[0] : globalMin;
       }}
       currentTimeMs = Math.max(globalMin, Math.min(globalMax, currentTimeMs));
-      let currentIdx = timesMs.length ? nearestIdx(timesMs, currentTimeMs) : -1;
-      if (currentIdx >= 0) {{
-        currentTimeMs = timesMs[currentIdx];
-      }}
 
       function saveStateSoon() {{
         if (saveStateSoon._t) window.clearTimeout(saveStateSoon._t);
@@ -780,12 +770,88 @@ def _render_deckgl_viewer(
 
       const paths = Array.isArray(DATA.paths) ? DATA.paths : [];
       const points = Array.isArray(DATA.points) ? DATA.points : [];
-      const dotsByIdx = new Array(timesMs.length);
-      for (let i = 0; i < dotsByIdx.length; i++) dotsByIdx[i] = [];
+      const samplesByIndiv = new Map();
       for (const p of points) {{
-        const idx = Number(p.time_idx);
-        if (!Number.isInteger(idx) || idx < 0 || idx >= dotsByIdx.length) continue;
-        dotsByIdx[idx].push(p);
+        const indiv = String(p.individual);
+        const split = String(p.set);
+        const timeIdx = Number(p.time_idx);
+        if (!Number.isInteger(timeIdx) || timeIdx < 0 || timeIdx >= timesMs.length) continue;
+        const ms = timesMs[timeIdx];
+        const pos = (Array.isArray(p.position) && p.position.length === 2) ? p.position : null;
+        if (!pos) continue;
+
+        let splits = samplesByIndiv.get(indiv);
+        if (!splits) {{
+          splits = {{}};
+          samplesByIndiv.set(indiv, splits);
+        }}
+        if (!splits[split]) splits[split] = [];
+        splits[split].push([ms, pos]);
+      }}
+
+      const seriesByIndiv = new Map();
+      for (const [indiv, splits] of samplesByIndiv.entries()) {{
+        const outSplits = {{}};
+        for (const split of ["train", "test"]) {{
+          const samples = splits[split];
+          if (!Array.isArray(samples) || samples.length === 0) continue;
+          samples.sort((a, b) => a[0] - b[0]);
+          const times = [];
+          const positions = [];
+          for (const s of samples) {{
+            const t = s[0];
+            const pos = s[1];
+            if (times.length && t === times[times.length - 1]) {{
+              positions[positions.length - 1] = pos;
+            }} else {{
+              times.push(t);
+              positions.push(pos);
+            }}
+          }}
+          outSplits[split] = {{ times, positions }};
+        }}
+        seriesByIndiv.set(indiv, outSplits);
+      }}
+
+      function dotsAtTime(tMs) {{
+        const out = [];
+        for (const indiv of selectedIndividuals) {{
+          const splits = seriesByIndiv.get(String(indiv));
+          if (!splits) continue;
+          for (const split of ["train", "test"]) {{
+            if (!splitEnabled(split)) continue;
+            const s = splits[split];
+            if (!s) continue;
+            const times = s.times;
+            const positions = s.positions;
+            const n = times.length;
+            if (n === 0) continue;
+            if (tMs < times[0] || tMs > times[n - 1]) continue;
+
+            const j = upperBound(times, tMs) - 1;
+            if (j < 0) continue;
+
+            const individual = String(indiv);
+            if (j >= n - 1 || times[j] === tMs) {{
+              out.push({{ position: positions[j], individual, set: split }});
+              continue;
+            }}
+            const t0 = times[j];
+            const t1 = times[j + 1];
+            const denom = (t1 - t0);
+            if (!(denom > 0)) {{
+              out.push({{ position: positions[j], individual, set: split }});
+              continue;
+            }}
+            const a = (tMs - t0) / denom;
+            const p0 = positions[j];
+            const p1 = positions[j + 1];
+            const lon = p0[0] + a * (p1[0] - p0[0]);
+            const lat = p0[1] + a * (p1[1] - p0[1]);
+            out.push({{ position: [lon, lat], individual, set: split }});
+          }}
+        }}
+        return out;
       }}
 
       function splitEnabled(split) {{
@@ -821,8 +887,7 @@ def _render_deckgl_viewer(
       function renderLayers() {{
         if (!overlay) return;
         const filteredPaths = paths.filter((p) => selectedIndividuals.has(String(p.individual)) && splitEnabled(String(p.set)));
-        const rawDots = (currentIdx >= 0 && currentIdx < dotsByIdx.length) ? dotsByIdx[currentIdx] : [];
-        const dots = rawDots.filter((d) => selectedIndividuals.has(String(d.individual)) && splitEnabled(String(d.set)));
+        const dots = dotsAtTime(currentTimeMs);
         overlay.setProps({{
           layers: [...bitmapLayers, makePathLayer(filteredPaths), makeDotLayer(dots)],
         }});
@@ -983,11 +1048,7 @@ def _render_deckgl_viewer(
       slider.addEventListener("input", (e) => {{
         const desiredMs = Number(e.target.value);
         if (!Number.isFinite(desiredMs)) return;
-        const idx = nearestIdx(timesMs, desiredMs);
-        if (idx < 0) return;
-        currentIdx = idx;
-        currentTimeMs = timesMs[idx];
-        slider.value = String(currentTimeMs);
+        currentTimeMs = Math.max(globalMin, Math.min(globalMax, desiredMs));
         timeEl.textContent = fmtTime(currentTimeMs);
         updateCursor();
         renderLayers();
