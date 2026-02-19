@@ -344,7 +344,7 @@ def _build_timeline_times_and_points(
     *,
     selected: set[str],
     enabled_splits: list[str],
-) -> tuple[list[str], list[dict]]:
+) -> tuple[list[int], list[dict]]:
     if not selected or not enabled_splits:
         return [], []
 
@@ -361,14 +361,16 @@ def _build_timeline_times_and_points(
 
     times = sdf[TIME_COL].sort_values(kind="mergesort").drop_duplicates()
     times_list = [pd.Timestamp(t) for t in times.tolist()]
-    time_to_idx = {t: i for i, t in enumerate(times_list)}
+    times_ms = [int(t.value // 1_000_000) for t in times_list]
+    time_ms_to_idx = {ms: i for i, ms in enumerate(times_ms)}
 
     points: list[dict] = []
     for indiv, split, t, lon, lat in sdf[[INDIVIDUAL_COL, SET_COL, TIME_COL, LON_COL, LAT_COL]].itertuples(
         index=False, name=None
     ):
         ts = pd.Timestamp(t)
-        idx = time_to_idx.get(ts)
+        ms = int(ts.value // 1_000_000)
+        idx = time_ms_to_idx.get(ms)
         if idx is None:
             continue
         lon_f = float(lon)
@@ -384,18 +386,14 @@ def _build_timeline_times_and_points(
             }
         )
 
-    times_iso = [t.isoformat() for t in times_list]
-    return times_iso, points
+    return times_ms, points
 
 
-def _build_individual_coverage_ms(df: pd.DataFrame, *, enabled_splits: list[str]) -> list[dict]:
+def _build_individual_split_coverage_ms(df: pd.DataFrame) -> list[dict]:
     plot_df = df
-    if enabled_splits:
-        plot_df = plot_df[plot_df[SET_COL].isin(enabled_splits)]
-
-    ranges = plot_df.groupby(INDIVIDUAL_COL, sort=False)[TIME_COL].agg(start="min", end="max")
+    ranges = plot_df.groupby([INDIVIDUAL_COL, SET_COL], sort=False)[TIME_COL].agg(start="min", end="max")
     out: list[dict] = []
-    for indiv, r in ranges.iterrows():
+    for (indiv, split), r in ranges.iterrows():
         start = pd.Timestamp(r["start"])
         end = pd.Timestamp(r["end"])
         if pd.isna(start) or pd.isna(end):
@@ -403,6 +401,7 @@ def _build_individual_coverage_ms(df: pd.DataFrame, *, enabled_splits: list[str]
         out.append(
             {
                 "individual": str(indiv),
+                "set": str(split),
                 "start_ms": int(start.value // 1_000_000),
                 "end_ms": int(end.value // 1_000_000),
             }
@@ -412,32 +411,32 @@ def _build_individual_coverage_ms(df: pd.DataFrame, *, enabled_splits: list[str]
 
 def _render_deckgl_viewer(
     *,
+    study_id: str,
     map_style: str,
     view_state: dict[str, float],
     path_rows: list[dict],
     raster_tiles: list[dict],
     individuals: list[str],
-    selected: set[str],
-    times: list[str],
+    times_ms: list[int],
     points: list[dict],
     coverage: list[dict],
-    bar_colors: dict[str, str],
+    split_colors: dict[str, dict[str, str]],
 ) -> None:
     map_h = 600
     bars_h = min(260, max(120, 22 * max(1, len(individuals))))
-    total_h = int(map_h + bars_h + 140)
+    total_h = int(map_h + bars_h + 220)
 
     payload = {
+        "studyId": study_id,
         "mapStyle": map_style,
         "viewState": view_state,
         "paths": path_rows,
         "rasterTiles": raster_tiles,
         "individuals": individuals,
-        "selected": sorted(selected),
-        "times": times,
+        "timesMs": times_ms,
         "points": points,
         "coverage": coverage,
-        "barColors": bar_colors,
+        "splitColors": split_colors,
     }
     payload_json = json.dumps(payload).replace("</", "<\\/")
 
@@ -460,6 +459,71 @@ def _render_deckgl_viewer(
       .mb-wrap {{
         width: 100%;
       }}
+      .mb-filters {{
+        border: 1px solid rgba(49, 51, 63, 0.18);
+        border-radius: 10px;
+        padding: 8px 10px;
+        margin-bottom: 10px;
+      }}
+      .mb-filters > summary {{
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 14px;
+      }}
+      .mb-filter-controls {{
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin: 10px 0 8px 0;
+        font-size: 12px;
+      }}
+      .mb-filter-controls label {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }}
+      .mb-filter-controls button {{
+        appearance: none;
+        border: 1px solid rgba(49, 51, 63, 0.25);
+        background: rgba(49, 51, 63, 0.03);
+        color: inherit;
+        padding: 3px 8px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 12px;
+      }}
+      .mb-filter-controls button:hover {{
+        background: rgba(49, 51, 63, 0.06);
+      }}
+      #mb-indiv-list {{
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 6px 10px;
+      }}
+      .mb-indiv {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        padding: 4px 6px;
+        border-radius: 8px;
+      }}
+      .mb-indiv:hover {{
+        background: rgba(49, 51, 63, 0.03);
+      }}
+      .mb-indiv-name {{
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }}
+      .mb-dot {{
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(0, 0, 0, 0.25);
+      }}
       #mb-map {{
         width: 100%;
         height: {map_h}px;
@@ -467,7 +531,7 @@ def _render_deckgl_viewer(
         overflow: hidden;
       }}
       .mb-timeline {{
-        padding: 10px 2px 0 2px;
+        padding: 12px 2px 0 2px;
       }}
       .mb-title {{
         font-weight: 600;
@@ -506,31 +570,69 @@ def _render_deckgl_viewer(
         height: 100%;
         border-radius: 999px;
       }}
+      .mb-cursor {{
+        position: absolute;
+        top: -2px;
+        bottom: -2px;
+        width: 2px;
+        background: rgba(0, 0, 0, 0.35);
+        transform: translateX(-1px);
+        pointer-events: none;
+        border-radius: 2px;
+      }}
       .mb-slider-row {{
         display: flex;
         align-items: center;
         gap: 10px;
-        margin: 10px 2px 0 2px;
+        margin: 10px 8px 0 8px;
+      }}
+      .mb-label-spacer {{
+        width: 170px;
+        flex: 0 0 170px;
+      }}
+      .mb-slider-wrap {{
+        flex: 1;
+        position: relative;
       }}
       #mb-slider {{
-        flex: 1;
+        width: 100%;
       }}
       #mb-time {{
+        position: absolute;
+        right: 0;
+        top: -18px;
         font-size: 12px;
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
         white-space: nowrap;
+        pointer-events: none;
+        background: rgba(255, 255, 255, 0.65);
+        padding: 0 4px;
+        border-radius: 6px;
       }}
     </style>
   </head>
   <body>
     <div class="mb-wrap">
+      <details class="mb-filters" id="mb-filters" open>
+        <summary id="mb-filter-summary">Filters</summary>
+        <div class="mb-filter-controls">
+          <label><input type="checkbox" id="mb-show-train" /> Train</label>
+          <label><input type="checkbox" id="mb-show-test" /> Test</label>
+          <button type="button" id="mb-select-all">All</button>
+          <button type="button" id="mb-select-none">None</button>
+        </div>
+        <div id="mb-indiv-list"></div>
+      </details>
       <div id="mb-map"></div>
       <div class="mb-timeline">
         <div class="mb-title">Data availability</div>
         <div id="mb-bars"></div>
         <div class="mb-slider-row">
-          <input id="mb-slider" type="range" min="0" step="1" />
-          <div id="mb-time"></div>
+          <div class="mb-label-spacer"></div>
+          <div class="mb-slider-wrap">
+            <input id="mb-slider" type="range" step="1" />
+            <div id="mb-time"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -540,23 +642,137 @@ def _render_deckgl_viewer(
     <script src="https://unpkg.com/@deck.gl/mapbox@8.9.33/dist.min.js"></script>
     <script>
       const DATA = {payload_json};
+      const STUDY_ID = String(DATA.studyId || "");
+      const STATE_KEY = `movebench::${{STUDY_ID}}::viewerState`;
+      const VIEW_KEY = `movebench::${{STUDY_ID}}::mapView`;
 
       function safeNumber(v, fallback) {{
         const n = Number(v);
         return Number.isFinite(n) ? n : fallback;
       }}
 
+      function loadJSON(key) {{
+        try {{
+          const raw = window.localStorage.getItem(key);
+          if (!raw) return null;
+          return JSON.parse(raw);
+        }} catch (e) {{
+          return null;
+        }}
+      }}
+
+      function saveJSON(key, val) {{
+        try {{
+          window.localStorage.setItem(key, JSON.stringify(val));
+        }} catch (e) {{
+          // ignore
+        }}
+      }}
+
+      function fmtTime(ms) {{
+        const d = new Date(ms);
+        if (!Number.isFinite(d.getTime())) return "";
+        return d.toISOString().replace("T", " ").replace(".000Z", "Z");
+      }}
+
+      function nearestIdx(sortedArr, x) {{
+        const n = sortedArr.length;
+        if (n === 0) return -1;
+        if (x <= sortedArr[0]) return 0;
+        if (x >= sortedArr[n - 1]) return n - 1;
+        let lo = 0;
+        let hi = n - 1;
+        while (lo + 1 < hi) {{
+          const mid = (lo + hi) >> 1;
+          const v = sortedArr[mid];
+          if (v === x) return mid;
+          if (v < x) lo = mid;
+          else hi = mid;
+        }}
+        return (x - sortedArr[lo] <= sortedArr[hi] - x) ? lo : hi;
+      }}
+
+      const indivs = Array.isArray(DATA.individuals) ? DATA.individuals.map(String) : [];
+      const splitColors = (DATA.splitColors && typeof DATA.splitColors === "object") ? DATA.splitColors : {{}};
+
+      const storedState = loadJSON(STATE_KEY) || {{}};
+      let showTrain = storedState.showTrain;
+      if (typeof showTrain !== "boolean") showTrain = true;
+      let showTest = storedState.showTest;
+      if (typeof showTest !== "boolean") showTest = true;
+
+      const indivSet = new Set(indivs);
+      let selectedIndividuals = new Set();
+      if (Array.isArray(storedState.selectedIndividuals)) {{
+        for (const v of storedState.selectedIndividuals.map(String)) {{
+          if (indivSet.has(v)) selectedIndividuals.add(v);
+        }}
+      }} else {{
+        selectedIndividuals = new Set(indivs);
+      }}
+
+      const timesMs = Array.isArray(DATA.timesMs) ? DATA.timesMs.map(Number).filter(Number.isFinite) : [];
+      timesMs.sort((a, b) => a - b);
+      let globalMin = timesMs.length ? timesMs[0] : 0;
+      let globalMax = timesMs.length ? timesMs[timesMs.length - 1] : 1;
+      if (!(globalMax > globalMin)) {{
+        globalMin = 0;
+        globalMax = 1;
+      }}
+
+      let currentTimeMs = Number(storedState.timeMs);
+      if (!Number.isFinite(currentTimeMs)) {{
+        currentTimeMs = timesMs.length ? timesMs[0] : globalMin;
+      }}
+      currentTimeMs = Math.max(globalMin, Math.min(globalMax, currentTimeMs));
+      let currentIdx = timesMs.length ? nearestIdx(timesMs, currentTimeMs) : -1;
+      if (currentIdx >= 0) {{
+        currentTimeMs = timesMs[currentIdx];
+      }}
+
+      function saveStateSoon() {{
+        if (saveStateSoon._t) window.clearTimeout(saveStateSoon._t);
+        saveStateSoon._t = window.setTimeout(() => {{
+          saveJSON(STATE_KEY, {{
+            showTrain,
+            showTest,
+            selectedIndividuals: Array.from(selectedIndividuals),
+            timeMs: currentTimeMs,
+          }});
+        }}, 50);
+      }}
+
+      // ---- map init (restore view state if present) ----
+      const storedView = loadJSON(VIEW_KEY) || {{}};
+      const initCenter = Array.isArray(storedView.center) && storedView.center.length === 2
+        ? [safeNumber(storedView.center[0], 0), safeNumber(storedView.center[1], 0)]
+        : [
+            safeNumber(DATA.viewState && DATA.viewState.longitude, 0),
+            safeNumber(DATA.viewState && DATA.viewState.latitude, 0),
+          ];
+      const initZoom = safeNumber(storedView.zoom, safeNumber(DATA.viewState && DATA.viewState.zoom, 1));
+      const initBearing = safeNumber(storedView.bearing, 0);
+      const initPitch = safeNumber(storedView.pitch, 0);
+
       const map = new maplibregl.Map({{
         container: "mb-map",
         style: DATA.mapStyle,
-        center: [
-          safeNumber(DATA.viewState && DATA.viewState.longitude, 0),
-          safeNumber(DATA.viewState && DATA.viewState.latitude, 0),
-        ],
-        zoom: safeNumber(DATA.viewState && DATA.viewState.zoom, 1),
+        center: initCenter,
+        zoom: initZoom,
+        bearing: initBearing,
+        pitch: initPitch,
         attributionControl: true,
       }});
       map.addControl(new maplibregl.NavigationControl({{ showCompass: true }}), "top-right");
+      map.on("moveend", () => {{
+        const c = map.getCenter();
+        saveJSON(VIEW_KEY, {{
+          center: [c.lng, c.lat],
+          zoom: map.getZoom(),
+          bearing: map.getBearing(),
+          pitch: map.getPitch(),
+        }});
+      }});
 
       const MapboxOverlayCtor = deck && (deck.MapboxOverlay || (deck.mapbox && deck.mapbox.MapboxOverlay));
       const overlay = MapboxOverlayCtor ? new MapboxOverlayCtor({{
@@ -585,23 +801,28 @@ def _render_deckgl_viewer(
       }}));
 
       const paths = Array.isArray(DATA.paths) ? DATA.paths : [];
-      const pathLayer = new deck.PathLayer({{
-        id: "paths",
-        data: paths,
-        getPath: (d) => d.path,
-        getColor: (d) => d.color,
-        pickable: true,
-        widthMinPixels: 2,
-      }});
-
-      const times = Array.isArray(DATA.times) ? DATA.times : [];
       const points = Array.isArray(DATA.points) ? DATA.points : [];
-      const dotsByIdx = new Array(times.length);
+      const dotsByIdx = new Array(timesMs.length);
       for (let i = 0; i < dotsByIdx.length; i++) dotsByIdx[i] = [];
       for (const p of points) {{
         const idx = Number(p.time_idx);
         if (!Number.isInteger(idx) || idx < 0 || idx >= dotsByIdx.length) continue;
         dotsByIdx[idx].push(p);
+      }}
+
+      function splitEnabled(split) {{
+        return (split === "train" && showTrain) || (split === "test" && showTest);
+      }}
+
+      function makePathLayer(data) {{
+        return new deck.PathLayer({{
+          id: "paths",
+          data: data,
+          getPath: (d) => d.path,
+          getColor: (d) => d.color,
+          pickable: true,
+          widthMinPixels: 2,
+        }});
       }}
 
       function makeDotLayer(dots) {{
@@ -619,37 +840,124 @@ def _render_deckgl_viewer(
         }});
       }}
 
-      function setDotIdx(idx) {{
+      function renderLayers() {{
         if (!overlay) return;
-        const dots = (idx >= 0 && idx < dotsByIdx.length) ? dotsByIdx[idx] : [];
+        const filteredPaths = paths.filter((p) => selectedIndividuals.has(String(p.individual)) && splitEnabled(String(p.set)));
+        const rawDots = (currentIdx >= 0 && currentIdx < dotsByIdx.length) ? dotsByIdx[currentIdx] : [];
+        const dots = rawDots.filter((d) => selectedIndividuals.has(String(d.individual)) && splitEnabled(String(d.set)));
         overlay.setProps({{
-          layers: [...bitmapLayers, pathLayer, makeDotLayer(dots)],
+          layers: [...bitmapLayers, makePathLayer(filteredPaths), makeDotLayer(dots)],
         }});
       }}
 
-      // ---- timeline bars ----
-      const selectedSet = new Set(Array.isArray(DATA.selected) ? DATA.selected : []);
-      const barColors = DATA.barColors || {{}};
+      // ---- filters UI ----
+      const showTrainEl = document.getElementById("mb-show-train");
+      const showTestEl = document.getElementById("mb-show-test");
+      const selectAllEl = document.getElementById("mb-select-all");
+      const selectNoneEl = document.getElementById("mb-select-none");
+      const filterSummaryEl = document.getElementById("mb-filter-summary");
+      showTrainEl.checked = showTrain;
+      showTestEl.checked = showTest;
+
+      function updateFilterSummary() {{
+        filterSummaryEl.textContent = `Filters (${{selectedIndividuals.size}}/${{indivs.length}})`;
+      }}
+
+      function colorDot(split, indiv) {{
+        const c = (splitColors[indiv] && splitColors[indiv][split]) ? splitColors[indiv][split] : "rgba(120,120,120,0.8)";
+        const el = document.createElement("div");
+        el.className = "mb-dot";
+        el.style.background = c;
+        el.title = split;
+        return el;
+      }}
+
+      const indivListEl = document.getElementById("mb-indiv-list");
+      const indivCheckboxes = new Map();
+      for (const indiv of indivs) {{
+        const row = document.createElement("label");
+        row.className = "mb-indiv";
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = selectedIndividuals.has(indiv);
+
+        const name = document.createElement("div");
+        name.className = "mb-indiv-name";
+        name.textContent = indiv;
+
+        row.appendChild(cb);
+        row.appendChild(name);
+        row.appendChild(colorDot("train", indiv));
+        row.appendChild(colorDot("test", indiv));
+        indivListEl.appendChild(row);
+
+        indivCheckboxes.set(indiv, cb);
+        cb.addEventListener("change", () => {{
+          if (cb.checked) selectedIndividuals.add(indiv);
+          else selectedIndividuals.delete(indiv);
+          updateFilterSummary();
+          updateBarsUI();
+          renderLayers();
+          saveStateSoon();
+        }});
+      }}
+
+      showTrainEl.addEventListener("change", () => {{
+        showTrain = !!showTrainEl.checked;
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      showTestEl.addEventListener("change", () => {{
+        showTest = !!showTestEl.checked;
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      selectAllEl.addEventListener("click", () => {{
+        selectedIndividuals = new Set(indivs);
+        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = true;
+        updateFilterSummary();
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      selectNoneEl.addEventListener("click", () => {{
+        selectedIndividuals = new Set();
+        for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = false;
+        updateFilterSummary();
+        updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      updateFilterSummary();
+
+      // ---- timeline bars (split-colored) ----
       const coverage = Array.isArray(DATA.coverage) ? DATA.coverage : [];
-      const covMap = new Map();
-      let globalMin = null;
-      let globalMax = null;
+      const coverageByIndiv = new Map();
       for (const c of coverage) {{
         const indiv = String(c.individual);
+        const split = String(c.set);
         const start = Number(c.start_ms);
         const end = Number(c.end_ms);
         if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-        covMap.set(indiv, {{ start_ms: start, end_ms: end }});
-        if (globalMin === null || start < globalMin) globalMin = start;
-        if (globalMax === null || end > globalMax) globalMax = end;
-      }}
-      if (globalMin === null || globalMax === null || globalMax <= globalMin) {{
-        globalMin = 0;
-        globalMax = 1;
+        if (!coverageByIndiv.has(indiv)) coverageByIndiv.set(indiv, {{}});
+        coverageByIndiv.get(indiv)[split] = {{ start_ms: start, end_ms: end }};
       }}
 
       const barsEl = document.getElementById("mb-bars");
-      const indivs = Array.isArray(DATA.individuals) ? DATA.individuals : [];
+      const barEls = [];
+      const labelEls = new Map();
+      const cursorEls = [];
+
+      function leftPct(ms) {{
+        return ((ms - globalMin) / (globalMax - globalMin)) * 100.0;
+      }}
+      function widthPct(startMs, endMs) {{
+        return Math.max(0.4, ((endMs - startMs) / (globalMax - globalMin)) * 100.0);
+      }}
+
       for (const indiv of indivs) {{
         const row = document.createElement("div");
         row.className = "mb-row";
@@ -661,61 +969,88 @@ def _render_deckgl_viewer(
         const track = document.createElement("div");
         track.className = "mb-track";
 
-        const r = covMap.get(indiv);
-        if (r) {{
-          const leftPct = ((r.start_ms - globalMin) / (globalMax - globalMin)) * 100.0;
-          const widthPct = Math.max(0.4, ((r.end_ms - r.start_ms) / (globalMax - globalMin)) * 100.0);
+        const cursor = document.createElement("div");
+        cursor.className = "mb-cursor";
+        track.appendChild(cursor);
+        cursorEls.push(cursor);
+
+        const ranges = coverageByIndiv.get(indiv) || {{}};
+        for (const split of ["train", "test"]) {{
+          const r = ranges[split];
+          if (!r) continue;
           const bar = document.createElement("div");
           bar.className = "mb-bar";
-          bar.style.left = `${{leftPct}}%`;
-          bar.style.width = `${{widthPct}}%`;
-          bar.style.background = barColors[indiv] || "rgba(100, 100, 100, 0.7)";
-          if (selectedSet.size > 0 && !selectedSet.has(indiv)) {{
-            bar.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
-            label.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
-          }}
+          bar.dataset.individual = indiv;
+          bar.dataset.split = split;
+          bar.style.left = `${{leftPct(r.start_ms)}}%`;
+          bar.style.width = `${{widthPct(r.start_ms, r.end_ms)}}%`;
+          const c = (splitColors[indiv] && splitColors[indiv][split]) ? splitColors[indiv][split] : "rgba(100,100,100,0.7)";
+          bar.style.background = c;
           track.appendChild(bar);
-        }} else {{
-          if (selectedSet.size > 0 && !selectedSet.has(indiv)) {{
-            label.style.opacity = "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
-          }}
+          barEls.push(bar);
         }}
 
         row.appendChild(label);
         row.appendChild(track);
         barsEl.appendChild(row);
+
+        labelEls.set(indiv, label);
+      }}
+
+      function updateCursor() {{
+        const pct = leftPct(currentTimeMs);
+        for (const el of cursorEls) {{
+          el.style.left = `${{pct}}%`;
+        }}
+      }}
+
+      function updateBarsUI() {{
+        for (const indiv of indivs) {{
+          const label = labelEls.get(indiv);
+          if (!label) continue;
+          label.style.opacity = selectedIndividuals.has(indiv) ? "1" : "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
+        }}
+        for (const bar of barEls) {{
+          const indiv = String(bar.dataset.individual);
+          const split = String(bar.dataset.split);
+          const splitOn = splitEnabled(split);
+          if (!splitOn) {{
+            bar.style.display = "none";
+            continue;
+          }}
+          bar.style.display = "block";
+          bar.style.opacity = selectedIndividuals.has(indiv) ? "1" : "{TIMELINE_UNSELECTED_ALPHA_SCALE}";
+        }}
       }}
 
       // ---- slider ----
       const slider = document.getElementById("mb-slider");
       const timeEl = document.getElementById("mb-time");
 
-      const maxIdx = Math.max(0, times.length - 1);
-      slider.max = String(maxIdx);
-      slider.value = "0";
-      slider.disabled = times.length <= 1;
-
-      if (times.length === 0) {{
-        timeEl.textContent = "No timestamps";
-      }} else {{
-        timeEl.textContent = times[0];
-      }}
+      slider.min = String(globalMin);
+      slider.max = String(globalMax);
+      slider.value = String(currentTimeMs);
+      slider.disabled = timesMs.length <= 1;
+      timeEl.textContent = timesMs.length ? fmtTime(currentTimeMs) : "No timestamps";
 
       slider.addEventListener("input", (e) => {{
-        const idx = Number(e.target.value);
-        if (!Number.isInteger(idx)) return;
-        setDotIdx(idx);
-      }});
-
-      // Timeline label only updates on release (change), per request.
-      slider.addEventListener("change", (e) => {{
-        const idx = Number(e.target.value);
-        if (!Number.isInteger(idx)) return;
-        timeEl.textContent = times[idx] || "";
+        const desiredMs = Number(e.target.value);
+        if (!Number.isFinite(desiredMs)) return;
+        const idx = nearestIdx(timesMs, desiredMs);
+        if (idx < 0) return;
+        currentIdx = idx;
+        currentTimeMs = timesMs[idx];
+        slider.value = String(currentTimeMs);
+        timeEl.textContent = fmtTime(currentTimeMs);
+        updateCursor();
+        renderLayers();
+        saveStateSoon();
       }});
 
       map.on("load", () => {{
-        setDotIdx(0);
+        updateBarsUI();
+        updateCursor();
+        renderLayers();
       }});
     </script>
   </body>
@@ -778,71 +1113,11 @@ def main() -> None:
         if "dem_overlay_enabled" not in st.session_state:
             st.session_state["dem_overlay_enabled"] = True
 
-    if "show_train" not in st.session_state:
-        st.session_state["show_train"] = True
-    if "show_test" not in st.session_state:
-        st.session_state["show_test"] = True
-
     train_palette, test_palette = _make_split_palettes(individuals, PATH_ALPHA)
+    st.sidebar.caption("Use the **Filters** panel above the map to toggle individuals/splits without reloading.")
 
-    def _indiv_visible_key(indiv: str) -> str:
-        return f"visible::{study_id}::{indiv}"
-
-    last_study_id = st.session_state.get("_last_study_id")
-    if last_study_id != study_id:
-        st.session_state["_last_study_id"] = study_id
-        for indiv in individuals:
-            st.session_state[_indiv_visible_key(indiv)] = True
-
-    # ---- table header ----
-    h1, h2, h3 = st.sidebar.columns([3, 1, 1])
-    h1.markdown("**Individual**")
-    h2.checkbox("Train", key="show_train")
-    h3.checkbox("Test", key="show_test")
-
-    # ---- table rows ----
-    for indiv in individuals:
-        k = _indiv_visible_key(indiv)
-        if k not in st.session_state:
-            st.session_state[k] = True
-
-        c1, c2, c3 = st.sidebar.columns([3, 1, 1])
-        visible = c1.checkbox(indiv, key=k)
-
-        train_color = train_palette[indiv]
-        test_color = test_palette[indiv]
-        c2.markdown(
-            _color_dot_html(train_color, enabled=visible and bool(st.session_state.get("show_train", True))),
-            unsafe_allow_html=True,
-        )
-        c3.markdown(
-            _color_dot_html(test_color, enabled=visible and bool(st.session_state.get("show_test", True))),
-            unsafe_allow_html=True,
-        )
-
-    sidebar_messages = st.sidebar.container()
-    selected = {indiv for indiv in individuals if bool(st.session_state.get(_indiv_visible_key(indiv), False))}
-    if not selected:
-        sidebar_messages.warning("No individuals selected.")
-
-    enabled_splits: list[str] = []
-    if bool(st.session_state.get("show_train", True)):
-        enabled_splits.append("train")
-    if bool(st.session_state.get("show_test", True)):
-        enabled_splits.append("test")
-
-    if not enabled_splits:
-        sidebar_messages.warning("No splits selected.")
-    else:
-        missing_splits = [s for s in enabled_splits if (df[SET_COL] == s).sum() == 0]
-        if missing_splits:
-            sidebar_messages.warning(f"No data for enabled split(s): {', '.join(missing_splits)} (rendering what exists).")
-
-    all_rows = build_path_rows(df)
-    if selected and enabled_splits:
-        rows = [r for r in all_rows if r.get("individual") in selected and r.get("set") in enabled_splits]
-    else:
-        rows = []
+    # Build all paths; selection/filtering is handled client-side.
+    rows = build_path_rows(df)
 
     # ---- map-side controls ----
     basemap_options = list(BASEMAP_STYLES.keys())
@@ -921,25 +1196,32 @@ def main() -> None:
                             }
                         )
 
-    times, points = _build_timeline_times_and_points(df, selected=selected, enabled_splits=enabled_splits)
-    coverage = _build_individual_coverage_ms(df, enabled_splits=enabled_splits)
+    times_ms, points = _build_timeline_times_and_points(
+        df, selected=set(individuals), enabled_splits=["train", "test"]
+    )
+    coverage = _build_individual_split_coverage_ms(df)
 
-    bar_colors: dict[str, str] = {}
-    for indiv, rgba in train_palette.items():
-        r, g, b, _ = rgba
-        bar_colors[str(indiv)] = f"rgba({int(r)},{int(g)},{int(b)},{float(TIMELINE_BAR_ALPHA) / 255.0:.3f})"
+    alpha = float(TIMELINE_BAR_ALPHA) / 255.0
+    split_colors: dict[str, dict[str, str]] = {}
+    for indiv in individuals:
+        train_rgba = train_palette.get(indiv) or [0, 0, 0, 255]
+        test_rgba = test_palette.get(indiv) or [0, 0, 0, 255]
+        split_colors[indiv] = {
+            "train": f"rgba({int(train_rgba[0])},{int(train_rgba[1])},{int(train_rgba[2])},{alpha:.3f})",
+            "test": f"rgba({int(test_rgba[0])},{int(test_rgba[1])},{int(test_rgba[2])},{alpha:.3f})",
+        }
 
     _render_deckgl_viewer(
+        study_id=study_id,
         map_style=map_style,
         view_state=view_state,
         path_rows=rows,
         raster_tiles=raster_tiles,
         individuals=individuals,
-        selected=selected,
-        times=times,
+        times_ms=times_ms,
         points=points,
         coverage=coverage,
-        bar_colors=bar_colors,
+        split_colors=split_colors,
     )
 
 
