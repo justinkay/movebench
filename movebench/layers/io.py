@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import warnings
 import numpy as np
 from dataclasses import dataclass
 from functools import lru_cache
@@ -297,6 +298,30 @@ class LayerIO:
         tile_dir = self._tile_dir(layer)
         tiles = idx.get("tiles", [])
 
+        spec = self.registry.get(layer)
+        band_ids = [f"{layer}.{b}" for b in spec.bands]
+
+        def _warn_missing(reason: str) -> None:
+            warnings.warn(
+                f"Missing GEE tile data for layer={layer!r} ({reason}); returning all-NaN raster (samples become invalid).",
+                RuntimeWarning,
+            )
+
+        def _missing_raster() -> Raster:
+            from rasterio.transform import from_bounds
+
+            min_lon, min_lat, max_lon, max_lat = bounds_latlon
+            transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 1, 1)
+            arr = np.full((len(band_ids), 1, 1), np.nan, dtype=np.float32)
+            return Raster(
+                array=arr,
+                transform=transform,
+                crs="EPSG:4326",
+                nodata=float("nan"),
+                bounds=bounds_latlon,
+                band_ids=band_ids,
+            )
+
         min_lon, min_lat, max_lon, max_lat = bounds_latlon
         matches: list[Path] = []
         for t in tiles:
@@ -310,33 +335,43 @@ class LayerIO:
                 matches.append(tile_dir / t["file"])
 
         if not matches:
-            raise FileNotFoundError(f"No tiles found for {layer!r} covering bounds={bounds_latlon}")
+            _warn_missing("no_coverage")
+            return _missing_raster()
 
-        if len(matches) == 1:
-            base = read_geotiff_window(matches[0], bounds_latlon)
-        else:
-            import rasterio
-            from rasterio.merge import merge
+        try:
+            if len(matches) == 1:
+                base = read_geotiff_window(matches[0], bounds_latlon)
+            else:
+                import rasterio
+                from rasterio.merge import merge
 
-            datasets = [rasterio.open(p) for p in matches]
+                datasets = [rasterio.open(p) for p in matches]
+                try:
+                    mosaic, out_transform = merge(datasets, bounds=bounds_latlon, nodata=datasets[0].nodata)
+                    base = Raster(
+                        array=mosaic,
+                        transform=out_transform,
+                        crs=datasets[0].crs,
+                        nodata=datasets[0].nodata,
+                        bounds=bounds_latlon,
+                        band_ids=[f"band_{i+1}" for i in range(mosaic.shape[0])],
+                    )
+                finally:
+                    for ds in datasets:
+                        ds.close()
+        except Exception as exc:
             try:
-                mosaic, out_transform = merge(datasets, bounds=bounds_latlon, nodata=datasets[0].nodata)
-                base = Raster(
-                    array=mosaic,
-                    transform=out_transform,
-                    crs=datasets[0].crs,
-                    nodata=datasets[0].nodata,
-                    bounds=bounds_latlon,
-                    band_ids=[f"band_{i+1}" for i in range(mosaic.shape[0])],
-                )
-            finally:
-                for ds in datasets:
-                    ds.close()
+                from rasterio.errors import RasterioIOError
+            except Exception:
+                RasterioIOError = None  # type: ignore[assignment]
+            if isinstance(exc, FileNotFoundError) or (RasterioIOError is not None and isinstance(exc, RasterioIOError)):
+                _warn_missing("io_error")
+                return _missing_raster()
+            raise
 
         arr = base.array.astype(np.float32, copy=False)
         arr[arr == GEE_NODATA_SENTINEL] = np.nan
 
-        spec = self.registry.get(layer)
         if spec.clip_max is not None:
             arr = np.clip(arr, 0.0, float(spec.clip_max))
         return Raster(
@@ -345,7 +380,7 @@ class LayerIO:
             crs=base.crs,
             nodata=float("nan"),
             bounds=base.bounds,
-            band_ids=[f"{layer}.{b}" for b in spec.bands],
+            band_ids=band_ids,
         )
 
     def _load_local_tiff_layer(self, layer: str, bounds_latlon: tuple[float, float, float, float], timestamp: Any | None) -> Raster:
