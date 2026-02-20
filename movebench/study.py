@@ -229,6 +229,40 @@ class Study:
 
         return DeepSSFDataset(chips)
 
+    def moveformer_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+        max_len: int = 500,
+        min_len: int = 2,
+        num_candidates: int | None = None,
+        random_seed: int | None = None,
+        step_multiplier: float | None = None,
+        step_q: float | None = None,
+        gap_q: float | None = None,
+        bounds_buffer_deg: float | None = None,
+    ):
+        """Create a MoveFormer dataset backed by extracted iSSF point stores."""
+        plan = self.layer_plan(config)
+
+        from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+
+        return MoveFormerPointStoreDataset(
+            study_dir=self.study_dir,
+            trajectories_path=self.trajectories_path,
+            plan=plan,
+            split=split,
+            max_len=max_len,
+            min_len=min_len,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        )
+
     def ssf_dataset(
         self,
         *,

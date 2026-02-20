@@ -19,6 +19,7 @@ dependencies = [
   "scipy",
   "torch",
   "tqdm",
+  "webdataset",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,16 @@ apps = [
   "matplotlib",
   "pydeck",
   "streamlit",
+]
+
+# MoveFormer baseline (vendored in movebench/lib/moveformer)
+moveformer = [
+  "einops",
+  "entmax",
+  "jsonargparse[signatures]",
+  "numba",
+  "pytorch-lightning>=2,<3",
+  "x-transformers==0.25.5",
 ]
 
 [tool.setuptools.packages.find]

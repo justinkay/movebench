@@ -419,3 +419,196 @@ def fit_deepssf(
         "val": final_val,
         "history": history,
     }
+
+
+def collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    """Collate MoveFormer segment dicts using upstream padding behavior."""
+    from movebench.lib.moveformer.geo_transformers.training_utils import collate_sequence_dicts
+
+    return collate_sequence_dicts(batch)
+
+
+@torch.no_grad()
+def eval_moveformer(
+    model: torch.nn.Module,
+    loader: Iterable[dict[str, torch.Tensor]],
+    device: torch.device,
+    *,
+    topk: Sequence[int] = (1, 5, 10, 25, 50),
+    max_items: int | None = None,
+) -> dict:
+    """Evaluate MoveFormer selection head outputs.
+
+    Reports standard cross-entropy (nll) and top-k accuracy with target index 0.
+    Also reports normalized cross-entropy (nce = nll / log(P)).
+    """
+    model.eval()
+    total_nll = 0.0
+    total_items = 0
+    total_tokens = 0
+    correct_topk = {int(k): 0 for k in topk}
+
+    for batch in loader:
+        if max_items is not None and int(total_items) >= int(max_items):
+            break
+
+        features = {k: v.to(device) for k, v in batch.items()}
+        logits, _loss, _metrics = model(features)
+        if logits.ndim != 3:
+            raise ValueError(f"Expected logits with shape (B,L,P); got {tuple(logits.shape)}")
+        B, L, P = logits.shape
+        if P <= 0:
+            raise ValueError(f"P must be > 0; got {P}")
+        total_items += int(B)
+
+        mask = features["mask"].to(torch.bool)
+        target = torch.zeros((B, L), dtype=torch.long, device=device)
+        ce = F.cross_entropy(logits.transpose(1, 2), target, reduction="none")  # (B,L)
+
+        mask_f = mask.to(ce.dtype)
+        n_valid = int(mask.sum().item())
+        if n_valid == 0:
+            continue
+
+        total_nll += float((ce * mask_f).sum().item())
+        total_tokens += n_valid
+
+        for k in topk:
+            k = int(k)
+            k_eff = min(k, int(P))
+            top_idx = logits.topk(k_eff, dim=-1).indices  # (B,L,k)
+            correct = (top_idx == 0).any(dim=-1) & mask  # (B,L)
+            correct_topk[k] += int(correct.sum().item())
+
+    if total_tokens == 0:
+        raise ValueError("Loader yielded zero valid tokens; cannot evaluate")
+
+    nll = float(total_nll / float(total_tokens))
+    return {
+        "nll": nll,
+        "nce": float(nll / float(math.log(int(P)))),
+        "topk": {int(k): float(v) / float(total_tokens) for k, v in correct_topk.items()},
+        "num_items": int(total_items),
+        "num_tokens": int(total_tokens),
+    }
+
+
+def fit_moveformer(
+    model: torch.nn.Module,
+    train_loader: Iterable[dict[str, torch.Tensor]],
+    val_loader: Iterable[dict[str, torch.Tensor]],
+    device: torch.device,
+    *,
+    lr: float = 5e-5,
+    weight_decay: float = 0.0,
+    warmup_steps: int = 1000,
+    lr_gamma: float = 0.98,
+    max_steps: int,
+    eval_interval: int,
+    patience: int,
+    seed: int,
+    max_eval_steps: int | None = None,
+) -> dict:
+    """Step-based training with early stopping on validation NLL."""
+    from movebench.lib.moveformer.geo_transformers.training_utils import LinearWarmupLR
+
+    _seed_everything(seed)
+    model.to(device)
+
+    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    lr_decay = torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=float(lr_gamma))
+    lr_warmup = LinearWarmupLR(opt, warmup_steps=int(warmup_steps))
+
+    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
+    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
+
+    best_state: dict[str, torch.Tensor] | None = None
+    best_val_nll = float("inf")
+    best_step = 0
+    patience_counter = 0
+    history: list[dict[str, float]] = []
+
+    # Used to mimic MoveFormer's var_len_training_v2 attention mask behavior.
+    var_len_training = bool(getattr(model, "var_len_training", False))
+    var_len_training_v2 = bool(getattr(model, "var_len_training_v2", False))
+    max_len_cfg = getattr(model, "max_len", None)
+
+    train_iter = iter(train_loader)
+    steps_per_epoch = None
+    try:
+        steps_per_epoch = len(train_loader)  # type: ignore[arg-type]
+    except Exception:
+        steps_per_epoch = None
+
+    for step in range(int(max_steps)):
+        try:
+            batch = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            batch = next(train_iter)
+
+        features = {k: v.to(device) for k, v in batch.items()}
+        seq_len = int(features["mask"].shape[1])
+        max_len = int(max_len_cfg) if max_len_cfg is not None else seq_len
+
+        attn_mask = None
+        if var_len_training:
+            split_idx = torch.randint(low=1, high=max_len + 1, size=(), device=device)
+            if int(split_idx.item()) < seq_len:
+                attn_mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
+                attn_mask[: int(split_idx), : int(split_idx)] = True
+                attn_mask[int(split_idx) :, int(split_idx) :] = True
+        elif var_len_training_v2:
+            ctx_len = torch.randint(low=1, high=max_len + 1, size=(), device=device)
+            ctx_len_i = int(ctx_len.item())
+            n_blocks = (seq_len + ctx_len_i - 1) // ctx_len_i
+            attn_mask = torch.eye(n_blocks, dtype=torch.bool, device=device)
+            attn_mask = attn_mask.repeat_interleave(ctx_len_i, dim=0)
+            attn_mask = attn_mask.repeat_interleave(ctx_len_i, dim=1)
+            attn_mask = attn_mask[:seq_len, :seq_len]
+
+        model.train()
+        opt.zero_grad(set_to_none=True)
+        _logits, loss, _metrics = model(
+            features,
+            encoder_kwargs={"attn_mask": attn_mask} if attn_mask is not None else None,
+            decoder_kwargs={"attn_mask": attn_mask} if attn_mask is not None else None,
+        )
+        loss.backward()
+        opt.step()
+        lr_warmup.step()
+
+        if steps_per_epoch is not None and (step + 1) % int(steps_per_epoch) == 0:
+            lr_decay.step()
+
+        if (step + 1) % int(eval_interval) == 0:
+            train_metrics = eval_moveformer(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
+            val_metrics = eval_moveformer(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
+            tr = float(train_metrics["nll"])
+            va = float(val_metrics["nll"])
+            history.append({"step": float(step), "train_nll": tr, "val_nll": va})
+
+            if va < best_val_nll:
+                best_val_nll = va
+                best_step = step
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= int(patience):
+                    break
+
+    if best_state is None:
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+    model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+    final_train = eval_moveformer(model, train_loader, device)
+    final_val = eval_moveformer(model, val_loader, device)
+
+    return {
+        "best_step": int(best_step),
+        "best_val_nll": float(best_val_nll),
+        "train": final_train,
+        "val": final_val,
+        "history": history,
+    }

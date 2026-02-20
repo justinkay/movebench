@@ -97,7 +97,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
                     raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (step schedule)")
 
     # Validate methods (no default filling; rely on model/dataset defaults where applicable).
-    allowed_kinds = {"issf_linear", "issf_mlp", "deepssf"}
+    allowed_kinds = {"issf_linear", "issf_mlp", "deepssf", "moveformer"}
     seen_names: set[str] = set()
     methods_out: list[dict[str, Any]] = []
     for m in cfg["methods"]:
@@ -131,6 +131,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
             for key in ("lr_movement", "lr_habitat", "weight_decay"):
                 if key not in hparams:
                     raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
+            _validate_schedule_hparams(method_name=name, hparams=hparams)
+        elif kind == "moveformer":
+            if "moveformer" not in cfg["datasets"] or not isinstance(cfg["datasets"]["moveformer"], dict):
+                raise ValueError("Benchmark config missing required key: datasets.moveformer (required for kind='moveformer')")
             _validate_schedule_hparams(method_name=name, hparams=hparams)
         else:
             raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
@@ -464,22 +468,164 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         ds_kwargs_train[k] = v
         ds_kwargs_test[k] = v
 
-    train_ds = study.deepssf_dataset(
-        **ds_kwargs_train,
-    )
-    test_ds = study.deepssf_dataset(
-        **ds_kwargs_test,
-    )
+    cache_cfg = dcfg.get("cache", None)
+    use_cache = False
+    if cache_cfg is not None:
+        if not isinstance(cache_cfg, dict):
+            raise ValueError("datasets.deepssf.cache must be a mapping/dict when provided")
+        use_cache = bool(cache_cfg.get("enabled", False))
 
-    train_loader, test_loader = _make_loaders(
-        ds_train=train_ds,
-        ds_test=test_ds,
-        collate_fn=collate_deepssf,
-        batch_size=dcfg.get("batch_size", None),
-        num_workers=dcfg.get("num_workers", None),
-    )
+    if use_cache:
+        from movebench.datasets.deepssf_wds_cache import (
+            build_deepssf_wds_cache,
+            cache_dir_for_study,
+            deepssf_wds_cache_hash,
+            make_deepssf_wds_loader,
+            read_deepssf_wds_manifest,
+            steps_per_epoch_from_manifest,
+        )
 
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+        plan = study.layer_plan(str(cfg["layers_config"]))
+
+        samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
+        spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
+        target_dtype = str(cache_cfg.get("target_dtype", "uint8"))
+        compression = str(cache_cfg.get("compression", "none"))
+        build_workers = int(cache_cfg.get("build_workers", 0))
+        shardshuffle = int(cache_cfg.get("shardshuffle", 100))
+        shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
+        seed = int(cache_cfg.get("seed", int(cfg["runtime"]["seed"])))
+        build_if_missing = bool(cache_cfg.get("build_if_missing", True))
+
+        if samples_per_shard <= 0:
+            raise ValueError(f"datasets.deepssf.cache.samples_per_shard must be > 0; got {samples_per_shard}")
+        if spatial_dtype not in {"float16", "float32"}:
+            raise ValueError("datasets.deepssf.cache.spatial_dtype must be one of {'float16','float32'}")
+        if target_dtype not in {"uint8", "float16", "float32"}:
+            raise ValueError("datasets.deepssf.cache.target_dtype must be one of {'uint8','float16','float32'}")
+        if compression not in {"none", "gz"}:
+            raise ValueError("datasets.deepssf.cache.compression must be one of {'none','gz'}")
+        if build_workers < 0:
+            raise ValueError(f"datasets.deepssf.cache.build_workers must be >= 0; got {build_workers}")
+        if shardshuffle < 0:
+            raise ValueError(f"datasets.deepssf.cache.shardshuffle must be >= 0; got {shardshuffle}")
+        if shuffle_buffer < 0:
+            raise ValueError(f"datasets.deepssf.cache.shuffle_buffer must be >= 0; got {shuffle_buffer}")
+
+        output_hw = ds_kwargs_train.get("output_hw", dcfg.get("output_hw", (101, 101)))
+        if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
+            raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+        output_hw = (int(output_hw[0]), int(output_hw[1]))
+
+        normalize = bool(ds_kwargs_train.get("normalize", True))
+        norm_hash: str | None = str(sampler_hash) if normalize else None
+
+        step_multiplier = float(ds_kwargs_train.get("step_multiplier", 2.0))
+        step_q = float(ds_kwargs_train.get("step_q", 0.95))
+        gap_q = float(ds_kwargs_train.get("gap_q", 0.999))
+
+        def _split_cache(split: str, ds_kwargs: dict[str, Any]):
+            ch = deepssf_wds_cache_hash(
+                config_hash=str(plan.config_hash),
+                rasters_hash=str(plan.rasters_hash),
+                split=str(split),
+                output_hw=output_hw,
+                normalize=normalize,
+                normalization_sampler_hash=norm_hash,
+                step_multiplier=float(step_multiplier),
+                step_q=float(step_q),
+                gap_q=float(gap_q),
+                samples_per_shard=int(samples_per_shard),
+                spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
+                target_dtype=target_dtype,  # type: ignore[arg-type]
+                compression=compression,  # type: ignore[arg-type]
+            )
+            cache_dir = cache_dir_for_study(
+                study_dir=study.study_dir,
+                split=str(split),
+                config_hash=str(plan.config_hash),
+                cache_hash=str(ch),
+            )
+            manifest_path = cache_dir / "manifest.json"
+            if not manifest_path.exists():
+                if not build_if_missing:
+                    raise FileNotFoundError(
+                        f"deepSSF cache missing: {manifest_path} (set datasets.deepssf.cache.build_if_missing=true)"
+                    )
+                ds = study.deepssf_dataset(**ds_kwargs)
+                build_deepssf_wds_cache(
+                    ds,
+                    cache_dir,
+                    samples_per_shard=int(samples_per_shard),
+                    spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
+                    target_dtype=target_dtype,  # type: ignore[arg-type]
+                    compression=compression,  # type: ignore[arg-type]
+                    seed=int(seed),
+                    num_workers=int(build_workers),
+                    overwrite=False,
+                    progress=True,
+                    config_path=str(cfg["layers_config"]),
+                    normalization_sampler_hash=norm_hash,
+                )
+            manifest = read_deepssf_wds_manifest(manifest_path)
+            return cache_dir, manifest
+
+        cache_dir_train, m_train = _split_cache("train", ds_kwargs_train)
+        cache_dir_test, m_test = _split_cache("test", ds_kwargs_test)
+
+        batch_size = dcfg.get("batch_size", 1)
+        bs = int(batch_size) if batch_size is not None else 1
+        if bs <= 0:
+            raise ValueError(f"datasets.deepssf.batch_size must be > 0; got {batch_size!r}")
+
+        num_workers = int(dcfg.get("num_workers", 0) or 0)
+        if num_workers < 0:
+            raise ValueError(f"datasets.deepssf.num_workers must be >= 0; got {num_workers!r}")
+
+        train_loader = make_deepssf_wds_loader(
+            cache_dir_train,
+            batch_size=int(bs),
+            num_workers=int(num_workers),
+            shardshuffle=int(shardshuffle),
+            shuffle_buffer=int(shuffle_buffer),
+            seed=int(seed),
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=None,
+        )
+        test_loader = make_deepssf_wds_loader(
+            cache_dir_test,
+            batch_size=int(bs),
+            num_workers=int(num_workers),
+            shardshuffle=0,
+            shuffle_buffer=0,
+            seed=int(seed),
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=None,
+        )
+
+        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch_from_manifest(m_train, batch_size=bs))
+        pixel_size_test = float(m_test.pixel_size_m)
+        pixel_size_train = float(m_train.pixel_size_m)
+
+    else:
+        train_ds = study.deepssf_dataset(
+            **ds_kwargs_train,
+        )
+        test_ds = study.deepssf_dataset(
+            **ds_kwargs_test,
+        )
+
+        train_loader, test_loader = _make_loaders(
+            ds_train=train_ds,
+            ds_test=test_ds,
+            collate_fn=collate_deepssf,
+            batch_size=dcfg.get("batch_size", None),
+            num_workers=dcfg.get("num_workers", None),
+        )
+
+        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
 
     x1, _x2, _x3, _y = next(iter(train_loader))
     b, c_env, h, w = x1.shape
@@ -494,12 +640,15 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     model = DeepSSF(
         int(c_env),
         image_dim=int(image_dim),
-        pixel_size_m=float(train_ds.chips.pixel_size_m),
+        pixel_size_m=float(pixel_size_train if use_cache else train_ds.chips.pixel_size_m),
         device=device,
     )
 
-    pixel_size_test = float(test_ds.chips.pixel_size_m)
-    pixel_size_train = float(model.pixel_size_m)
+    if not use_cache:
+        pixel_size_test = float(test_ds.chips.pixel_size_m)
+        pixel_size_train = float(model.pixel_size_m)
+    else:
+        pixel_size_train = float(model.pixel_size_m)
     if not math.isclose(pixel_size_test, pixel_size_train, rel_tol=1e-6, abs_tol=0.0):
         raise ValueError(
             "deepSSF requires consistent chip grid scale across splits. "
@@ -561,6 +710,105 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     }
 
 
+def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+    from movebench.models.moveformer import build_moveformer_selection_model
+    from movebench.models.ssf import random_baseline_metrics
+    from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
+
+    dcfg = cfg["datasets"]["moveformer"]
+    issf = cfg["datasets"]["issf"]
+    sampler = issf["sampler"]
+
+    ds_kwargs: dict[str, Any] = {
+        "config": str(cfg["layers_config"]),
+        "num_candidates": int(sampler["num_candidates"]),
+        "random_seed": int(sampler["random_seed"]),
+        "step_multiplier": float(sampler["step_multiplier"]),
+        "step_q": float(sampler["step_q"]),
+        "gap_q": float(sampler["gap_q"]),
+        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
+    }
+    if "max_len" in dcfg:
+        ds_kwargs["max_len"] = int(dcfg["max_len"])
+    if "min_len" in dcfg:
+        ds_kwargs["min_len"] = int(dcfg["min_len"])
+
+    train_ds = study.moveformer_dataset(split="train", **ds_kwargs)
+    test_ds = study.moveformer_dataset(split="test", **ds_kwargs)
+
+    train_loader, test_loader = _make_loaders(
+        ds_train=train_ds,
+        ds_test=test_ds,
+        collate_fn=collate_moveformer,
+        batch_size=dcfg.get("batch_size", None),
+        num_workers=dcfg.get("num_workers", None),
+    )
+
+    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+
+    P = int(getattr(train_ds, "num_candidates_total", 0))
+    if P <= 0:
+        raise ValueError("MoveFormer dataset must expose num_candidates_total > 0")
+    random_metrics = random_baseline_metrics(P, TOP_K_VALUES)
+
+    model = build_moveformer_selection_model(num_landcover_classes=18)
+
+    max_eval_steps = _resolve_max_eval_steps(cfg)
+    hparams = dict(method["hparams"])
+    fit = fit_moveformer(
+        model,
+        train_loader,
+        test_loader,
+        device,
+        seed=int(cfg["runtime"]["seed"]),
+        lr=float(hparams.get("lr", 5e-5)),
+        weight_decay=float(hparams.get("weight_decay", 0.0)),
+        warmup_steps=int(hparams.get("warmup_steps", 1000)),
+        lr_gamma=float(hparams.get("lr_gamma", 0.98)),
+        max_steps=int(schedule["max_steps"]),
+        eval_interval=int(schedule["eval_interval"]),
+        patience=int(schedule["patience"]),
+        max_eval_steps=max_eval_steps,
+    )
+
+    # Save the best checkpoint (fit_moveformer restores the best weights before returning).
+    import torch
+
+    out_dir = Path(str(cfg["output_dir"]))
+    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    method_name = str(method["name"])
+    ckpt_path = ckpt_dir / f"{method_name}.pt"
+    torch.save(
+        {
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "meta": {
+                "study_id": str(study.study_id),
+                "method_name": method_name,
+                "kind": str(method["kind"]),
+                "num_candidates_total": int(P),
+                "max_len": int(ds_kwargs.get("max_len", 500)),
+                "best_step": int(fit["best_step"]),
+                "best_test_nll": float(fit["val"]["nll"]),
+            },
+        },
+        ckpt_path,
+    )
+
+    train_metrics = eval_moveformer(model, train_loader, device, topk=TOP_K_VALUES)
+    test_metrics = eval_moveformer(model, test_loader, device, topk=TOP_K_VALUES)
+
+    return {
+        "P": int(P),
+        "random": random_metrics,
+        "schedule": schedule,
+        "fit": fit,
+        "train": train_metrics,
+        "test": test_metrics,
+        "checkpoint_path": str(ckpt_path),
+    }
+
+
 def run_method(*, kind: str, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device):
     if kind == "issf_linear":
         return run_issf_linear(study=study, cfg=cfg, method=method, device=device)
@@ -568,6 +816,8 @@ def run_method(*, kind: str, study, sampler_hash: str, cfg: dict[str, Any], meth
         return run_issf_mlp(study=study, cfg=cfg, method=method, device=device)
     if kind == "deepssf":
         return run_deepssf(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
+    if kind == "moveformer":
+        return run_moveformer(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
     raise ValueError(f"Unknown kind={kind!r}")
 
 
@@ -577,7 +827,7 @@ def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dic
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
 
-    issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp"}]
+    issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
     deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
 
     def _write_nll_csv(*, split: str, methods: list[str], prefix: str, random_key: str, random_label: str) -> None:
