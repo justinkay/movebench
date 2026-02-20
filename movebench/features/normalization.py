@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from movebench.features.manifest import read_manifest, utc_now_iso
+from movebench.features.manifest import utc_now_iso
 from movebench.layers.plan import LayerPlan
 
 
@@ -15,32 +15,32 @@ def load_points_normalization_mean_std(
     *,
     study_dir: Path,
     plan: LayerPlan,
-    sampler_hash: str | None = None,
+    store_id: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Load per-channel mean/std vectors for env normalization from cached stats.json."""
     base_dir = Path(study_dir) / "normalization" / "points" / str(plan.config_hash)
-    if sampler_hash is None:
+    if store_id is None:
         if not base_dir.exists():
             raise FileNotFoundError(
                 "Normalization stats not found. Run "
                 "Study.compute_normalization_vals(from_='points', ...) first. "
-                f"Expected at least one sampler directory under: {base_dir}"
+                f"Expected at least one store directory under: {base_dir}"
             )
         candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
         if not candidates:
             raise FileNotFoundError(
                 "Normalization stats not found. Run "
                 "Study.compute_normalization_vals(from_='points', ...) first. "
-                f"Expected at least one sampler directory under: {base_dir}"
+                f"Expected at least one store directory under: {base_dir}"
             )
         if len(candidates) > 1:
             raise ValueError(
-                "Multiple normalization sampler directories found under "
-                f"{base_dir}: {candidates}. Pass sampler_hash=... to disambiguate."
+                "Multiple normalization store directories found under "
+                f"{base_dir}: {candidates}. Pass store_id=... to disambiguate."
             )
-        sampler_hash = candidates[0]
+        store_id = candidates[0]
 
-    stats_path = base_dir / str(sampler_hash) / "stats.json"
+    stats_path = base_dir / str(store_id) / "stats.json"
     if not stats_path.exists():
         raise FileNotFoundError(
             "Normalization stats not found. Run "
@@ -73,51 +73,51 @@ def load_points_normalization_mean_std(
     return mean, std
 
 
-def _select_sampler_dir(base_dir: Path, sampler_hash: str | None) -> tuple[str, Path]:
-    if sampler_hash is not None:
-        return str(sampler_hash), base_dir / str(sampler_hash)
+def _select_store_dir(base_dir: Path, store_id: str | None) -> tuple[str, Path]:
+    if store_id is not None:
+        return str(store_id), base_dir / str(store_id)
 
     if not base_dir.exists():
         raise FileNotFoundError(f"Feature store directory not found: {base_dir}")
 
     candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
     if not candidates:
-        raise FileNotFoundError(f"No sampler directories found under: {base_dir}")
+        raise FileNotFoundError(f"No store directories found under: {base_dir}")
     if len(candidates) == 1:
-        sh = candidates[0]
-        return sh, base_dir / sh
+        sid = candidates[0]
+        return sid, base_dir / sid
     # Caller can handle this case by iterating the returned candidates.
-    raise ValueError(f"Multiple sampler directories found under {base_dir}: {candidates}")
+    raise ValueError(f"Multiple store directories found under {base_dir}: {candidates}")
 
 
 def compute_points_normalization_stats(
     *,
     study_dir: Path,
     plan: LayerPlan,
-    sampler_hash: str | None = None,
+    store_id: str | None = None,
     split: str = "train",
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     """Compute per-band mean/std from an extracted point feature store on disk."""
     study_dir = Path(study_dir)
     base_dir = study_dir / "features" / "points" / str(split) / str(plan.config_hash)
-    if sampler_hash is None:
+    if store_id is None:
         if not base_dir.exists():
             raise FileNotFoundError(f"Feature store directory not found: {base_dir}")
         candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
         if not candidates:
-            raise FileNotFoundError(f"No sampler directories found under: {base_dir}")
+            raise FileNotFoundError(f"No store directories found under: {base_dir}")
         if len(candidates) == 1:
-            sampler_hash, in_dir = candidates[0], base_dir / candidates[0]
+            store_id, in_dir = candidates[0], base_dir / candidates[0]
         else:
-            # Compute stats for every sampler store present (empirical + parametric, etc).
+            # Compute stats for every point store present (empirical + parametric, etc).
             out = []
-            for sh in candidates:
+            for sid in candidates:
                 out.append(
                     compute_points_normalization_stats(
                         study_dir=study_dir,
                         plan=plan,
-                        sampler_hash=sh,
+                        store_id=sid,
                         split=split,
                         skip_existing=skip_existing,
                     )
@@ -126,37 +126,39 @@ def compute_points_normalization_stats(
                 "status": "multiple",
                 "config_hash": str(plan.config_hash),
                 "split": str(split),
-                "samplers": out,
+                "stores": out,
             }
     else:
-        sampler_hash, in_dir = _select_sampler_dir(base_dir, sampler_hash)
+        store_id, in_dir = _select_store_dir(base_dir, store_id)
 
-    in_pt = in_dir / "features.pt"
+    in_pt = in_dir / "store.pt"
     in_manifest = in_dir / "manifest.json"
     if not in_pt.exists():
-        raise FileNotFoundError(f"features.pt not found: {in_pt}")
+        raise FileNotFoundError(f"store.pt not found: {in_pt}")
     if not in_manifest.exists():
         raise FileNotFoundError(f"manifest.json not found: {in_manifest}")
 
-    m = read_manifest(in_manifest)
+    from movebench.features.points.manifest import read_manifest as read_points_manifest
+
+    m = read_points_manifest(in_manifest)
     if m.config_hash != plan.config_hash:
         raise ValueError("Input manifest config_hash does not match LayerPlan.config_hash")
-    if m.sampler_hash != sampler_hash:
-        raise ValueError("Input manifest sampler_hash does not match the selected sampler_hash directory")
+    if m.store_id != store_id:
+        raise ValueError("Input manifest store_id does not match the selected store_id directory")
 
-    out_dir = study_dir / "normalization" / "points" / str(plan.config_hash) / str(sampler_hash)
+    out_dir = study_dir / "normalization" / "points" / str(plan.config_hash) / str(store_id)
     out_path = out_dir / "stats.json"
     if skip_existing and out_path.exists():
         return {
             "status": "existing",
             "stats_path": str(out_path),
             "config_hash": str(plan.config_hash),
-            "sampler_hash": str(sampler_hash),
+            "store_id": str(store_id),
         }
 
     d = torch.load(in_pt, map_location="cpu")
     if "env" not in d or "valid" not in d:
-        raise ValueError(f"features.pt missing required keys 'env' and 'valid': {in_pt}")
+        raise ValueError(f"store.pt missing required keys 'env' and 'valid': {in_pt}")
     env = d["env"]
     valid = d["valid"]
 
@@ -179,7 +181,7 @@ def compute_points_normalization_stats(
             "scope": "all_candidates",
             "ddof": 0,
             "config_hash": str(plan.config_hash),
-            "sampler_hash": str(sampler_hash),
+            "store_id": str(store_id),
             "n_steps": int(env.shape[0]),
             "points_per_step": int(env.shape[2]),
             "band_stats": {},
@@ -191,7 +193,7 @@ def compute_points_normalization_stats(
             "status": "written",
             "stats_path": str(out_path),
             "config_hash": str(plan.config_hash),
-            "sampler_hash": str(sampler_hash),
+            "store_id": str(store_id),
             "n_bands_normalized": 0,
             "n_steps": int(env.shape[0]),
             "points_per_step": int(env.shape[2]),
@@ -234,7 +236,7 @@ def compute_points_normalization_stats(
         "scope": "all_candidates",
         "ddof": 0,
         "config_hash": str(plan.config_hash),
-        "sampler_hash": str(sampler_hash),
+        "store_id": str(store_id),
         "n_steps": int(env.shape[0]),
         "points_per_step": int(env.shape[2]),
         "band_stats": band_stats,
@@ -248,7 +250,7 @@ def compute_points_normalization_stats(
         "status": "written",
         "stats_path": str(out_path),
         "config_hash": str(plan.config_hash),
-        "sampler_hash": str(sampler_hash),
+        "store_id": str(store_id),
         "n_bands_normalized": int(len(band_stats)),
         "n_steps": int(env.shape[0]),
         "points_per_step": int(env.shape[2]),

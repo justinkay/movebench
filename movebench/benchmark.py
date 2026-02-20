@@ -173,42 +173,39 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
 
 
 def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
-    """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
-    from movebench.features.points import select_point_store_dir
+    """Ensure rasters, parametric point store, and normalization stats exist; return store_id."""
+    from movebench.features.points import PointStoreConfig, resolve_point_store_dir
 
     layers_config = str(cfg["layers_config"])
     setup_workers = int(cfg["runtime"]["setup_workers"])
     sampler = dict(cfg["datasets"]["issf"]["sampler"])
 
     plan = study.layer_plan(layers_config)
+    store_cfg = PointStoreConfig(
+        sampler_type="parametric",
+        num_candidates=int(sampler["num_candidates"]),
+        random_seed=int(sampler["random_seed"]),
+        step_multiplier=float(sampler["step_multiplier"]),
+        step_q=float(sampler["step_q"]),
+        gap_q=float(sampler["gap_q"]),
+        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+    )
 
     try:
-        _train_dir, train_m = select_point_store_dir(
+        _train_dir, train_m = resolve_point_store_dir(
             study_dir=study.study_dir,
             split="train",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+            cfg=store_cfg,
         )
-        sampler_hash = str(train_m.sampler_hash)
+        store_id = str(train_m.store_id)
 
         # Also require the test split point store (benchmark evaluates on test).
-        select_point_store_dir(
+        resolve_point_store_dir(
             study_dir=study.study_dir,
             split="test",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+            cfg=store_cfg,
         )
     except FileNotFoundError:
         try:
@@ -247,16 +244,16 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
                 gap_q=float(sampler["gap_q"]),
                 bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
             )
-        sampler_hash = str(rep["sampler_hash"])
+        store_id = str(rep["store_id"])
 
     study.compute_normalization_vals(
         from_="points",
         config=layers_config,
-        sampler_hash=sampler_hash,
+        store_id=store_id,
         split="train",
         skip_existing=True,
     )
-    return sampler_hash
+    return store_id
 
 
 def _make_loaders(*, ds_train, ds_test, collate_fn, batch_size: int | None, num_workers: int | None):
@@ -448,7 +445,7 @@ def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) 
     return _run_issf(study=study, cfg=cfg, method=method, device=device, model_kind="mlp")
 
 
-def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+def run_deepssf(*, study, store_id: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
     from movebench.models.deepssf import DeepSSF
     from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
 
@@ -457,7 +454,7 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     ds_kwargs_train: dict[str, Any] = {
         "split": "train",
         "config": str(cfg["layers_config"]),
-        "normalization_sampler_hash": str(sampler_hash),
+        "normalization_store_id": str(store_id),
     }
     ds_kwargs_test = dict(ds_kwargs_train)
     ds_kwargs_test["split"] = "test"
@@ -604,7 +601,7 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     }
 
 
-def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+def run_moveformer(*, study, store_id: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
     from movebench.models.moveformer import build_moveformer_selection_model
     from movebench.models.ssf import random_baseline_metrics
     from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
@@ -710,15 +707,15 @@ def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dic
     }
 
 
-def run_method(*, kind: str, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device):
+def run_method(*, kind: str, study, store_id: str, cfg: dict[str, Any], method: dict[str, Any], device):
     if kind == "issf_linear":
         return run_issf_linear(study=study, cfg=cfg, method=method, device=device)
     if kind == "issf_mlp":
         return run_issf_mlp(study=study, cfg=cfg, method=method, device=device)
     if kind == "deepssf":
-        return run_deepssf(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
+        return run_deepssf(study=study, store_id=store_id, cfg=cfg, method=method, device=device)
     if kind == "moveformer":
-        return run_moveformer(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
+        return run_moveformer(study=study, store_id=store_id, cfg=cfg, method=method, device=device)
     raise ValueError(f"Unknown kind={kind!r}")
 
 
@@ -841,7 +838,7 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
                 continue
 
         study = Study(study_id)
-        sampler_hash = ensure_study_ready(study=study, cfg=cfg)
+        store_id = ensure_study_ready(study=study, cfg=cfg)
 
         study_results: dict[str, Any] = dict(existing_study)
         for method in cfg["methods"]:
@@ -853,7 +850,7 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
             study_results[name] = run_method(
                 kind=kind,
                 study=study,
-                sampler_hash=str(sampler_hash),
+                store_id=str(store_id),
                 cfg=cfg,
                 method=method,
                 device=device,

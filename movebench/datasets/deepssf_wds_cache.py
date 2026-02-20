@@ -51,7 +51,7 @@ def deepssf_wds_cache_hash(
     split: str,
     output_hw: tuple[int, int],
     normalize: bool,
-    normalization_sampler_hash: str | None,
+    normalization_store_id: str | None,
     step_multiplier: float,
     step_q: float,
     gap_q: float,
@@ -70,7 +70,7 @@ def deepssf_wds_cache_hash(
             "split": str(split),
             "output_hw": [int(output_hw[0]), int(output_hw[1])],
             "normalize": bool(normalize),
-            "normalization_sampler_hash": str(normalization_sampler_hash) if normalization_sampler_hash is not None else None,
+            "normalization_store_id": str(normalization_store_id) if normalization_store_id is not None else None,
             "step_multiplier": float(step_multiplier),
             "step_q": float(step_q),
             "gap_q": float(gap_q),
@@ -323,8 +323,8 @@ def ensure_deepssf_wds_cache_split(
     output_hw = (int(output_hw[0]), int(output_hw[1]))
 
     normalize = bool(ds_kwargs.get("normalize", True))
-    norm_hash_raw = ds_kwargs.get("normalization_sampler_hash", None)
-    norm_hash = str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+    norm_id_raw = ds_kwargs.get("normalization_store_id", None)
+    norm_id = str(norm_id_raw) if (normalize and norm_id_raw is not None) else None
 
     step_multiplier = float(ds_kwargs.get("step_multiplier", 2.0))
     step_q = float(ds_kwargs.get("step_q", 0.95))
@@ -336,7 +336,7 @@ def ensure_deepssf_wds_cache_split(
         split=split,
         output_hw=output_hw,
         normalize=normalize,
-        normalization_sampler_hash=norm_hash,
+        normalization_store_id=norm_id,
         step_multiplier=step_multiplier,
         step_q=step_q,
         gap_q=gap_q,

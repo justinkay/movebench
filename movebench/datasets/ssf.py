@@ -4,7 +4,7 @@ These datasets are intentionally thin wrappers over the on-disk point feature
 stores written by `Study.extract_point_features(...)`.
 
 They do not perform raster IO or candidate generation. They:
-- load `features.pt` and `manifest.json`,
+- load `store.pt` and `manifest.json`,
 - optionally apply cached env normalization,
 - (iSSF only) append movement/time/id features and interaction terms.
 """
@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
-from movebench.features.points import select_point_store_dir
+from movebench.features.points import PointStoreConfig, resolve_point_store_dir
 from movebench.layers.plan import Channel, LayerPlan
 from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
@@ -133,11 +133,8 @@ class SSFDataset(Dataset):
         self.study_dir = Path(study_dir)
         self.split = str(split)
 
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="empirical",
+        store_cfg = PointStoreConfig(
+            sampler_type="empirical",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
@@ -145,20 +142,33 @@ class SSFDataset(Dataset):
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
+        store_dir, m = resolve_point_store_dir(
+            study_dir=self.study_dir,
+            split=self.split,
+            config_hash=str(plan.config_hash),
+            cfg=store_cfg,
+        )
 
         self.store_dir = store_dir
         self.manifest = m
         self.plan = m.layer_plan
-        self.sampler_hash = str(m.sampler_hash)
+        self.store_id = str(m.store_id)
         self.normalize = bool(normalize)
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
+        d = torch.load(store_dir / "store.pt", map_location="cpu")
         self.env = d["env"]
         self.valid = d["valid"]
-        self.step_length_m = d.get("step_length_m")
-        self.turn_angle_rad = d.get("turn_angle_rad")
-        self.point_id_start = d.get("point_id_start")
-        self.timestamp_ns = d.get("timestamp_ns")
+        self.step_length_m = d["step_length_m"]
+        self.turn_angle_rad = d["turn_angle_rad"]
+        self.point_id_start = d["point_id_start"]
+        self.point_id_end = d["point_id_end"]
+        self.timestamp_ns = d["timestamp_ns"]
+        self.end_timestamp_ns = d["end_timestamp_ns"]
+        self.start_lon = d["start_lon"]
+        self.start_lat = d["start_lat"]
+        self.start_bearing = d["start_bearing"]
+        self.end_lon = d["end_lon"]
+        self.end_lat = d["end_lat"]
 
         if self.env.ndim != 3 or self.valid.ndim != 3:
             raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
@@ -177,7 +187,7 @@ class SSFDataset(Dataset):
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=self.sampler_hash,
+                store_id=self.store_id,
             )
         else:
             self._mean = None
@@ -185,6 +195,38 @@ class SSFDataset(Dataset):
 
     def __len__(self) -> int:
         return int(self.env.shape[0])
+
+    @property
+    def steps_df(self) -> pd.DataFrame:
+        """Step metadata for each dataset index, as a pandas DataFrame.
+
+        This is intended for linking dataset items back to rows in trajectories.csv via `point_id`.
+        """
+        cached = getattr(self, "_steps_df_cache", None)
+        if cached is not None:
+            return cached
+
+        ts_ns = self.timestamp_ns.to(dtype=torch.int64).numpy()
+        ts = pd.to_datetime(ts_ns, unit="ns", utc=True)
+        end_ts_ns = self.end_timestamp_ns.to(dtype=torch.int64).numpy()
+        end_ts = pd.to_datetime(end_ts_ns, unit="ns", utc=True)
+        df = pd.DataFrame(
+            {
+                "point_id_start": self.point_id_start.to(dtype=torch.int64).numpy(),
+                "point_id_end": self.point_id_end.to(dtype=torch.int64).numpy(),
+                "timestamp_ns": ts_ns,
+                "timestamp": ts,
+                "end_timestamp_ns": end_ts_ns,
+                "end_timestamp": end_ts,
+                "start_lon": self.start_lon.to(dtype=torch.float32).numpy(),
+                "start_lat": self.start_lat.to(dtype=torch.float32).numpy(),
+                "start_bearing": self.start_bearing.to(dtype=torch.float32).numpy(),
+                "end_lon": self.end_lon.to(dtype=torch.float32).numpy(),
+                "end_lat": self.end_lat.to(dtype=torch.float32).numpy(),
+            }
+        )
+        self._steps_df_cache = df
+        return df
 
     def _get_env_valid(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         env = self.env[int(idx)]
@@ -234,11 +276,8 @@ class iSSFDataset(SSFDataset):
         self.split = str(split)
         self.trajectories_path = Path(trajectories_path)
 
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+        store_cfg = PointStoreConfig(
+            sampler_type="parametric",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
@@ -246,23 +285,33 @@ class iSSFDataset(SSFDataset):
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
+        store_dir, m = resolve_point_store_dir(
+            study_dir=self.study_dir,
+            split=self.split,
+            config_hash=str(plan.config_hash),
+            cfg=store_cfg,
+        )
 
         self.store_dir = store_dir
         self.manifest = m
         self.plan = m.layer_plan
-        self.sampler_hash = str(m.sampler_hash)
+        self.store_id = str(m.store_id)
         self.normalize = bool(normalize)
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
+        d = torch.load(store_dir / "store.pt", map_location="cpu")
         self.env = d["env"]
         self.valid = d["valid"]
-        self.step_length_m = d.get("step_length_m")
-        self.turn_angle_rad = d.get("turn_angle_rad")
-        self.point_id_start = d.get("point_id_start")
-        self.timestamp_ns = d.get("timestamp_ns")
-
-        if self.step_length_m is None or self.turn_angle_rad is None or self.point_id_start is None or self.timestamp_ns is None:
-            raise ValueError("features.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
+        self.step_length_m = d["step_length_m"]
+        self.turn_angle_rad = d["turn_angle_rad"]
+        self.point_id_start = d["point_id_start"]
+        self.point_id_end = d["point_id_end"]
+        self.timestamp_ns = d["timestamp_ns"]
+        self.end_timestamp_ns = d["end_timestamp_ns"]
+        self.start_lon = d["start_lon"]
+        self.start_lat = d["start_lat"]
+        self.start_bearing = d["start_bearing"]
+        self.end_lon = d["end_lon"]
+        self.end_lat = d["end_lat"]
 
         if self.env.ndim != 3 or self.valid.ndim != 3:
             raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
@@ -281,7 +330,7 @@ class iSSFDataset(SSFDataset):
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=self.sampler_hash,
+                store_id=self.store_id,
             )
         else:
             self._mean = None
@@ -303,9 +352,9 @@ class iSSFDataset(SSFDataset):
                     / "points"
                     / "train"
                     / str(self.plan.config_hash)
-                    / str(self.sampler_hash)
+                    / str(self.store_id)
                 )
-                train_pt = train_dir / "features.pt"
+                train_pt = train_dir / "store.pt"
                 if not train_pt.exists():
                     raise FileNotFoundError(
                         "Train point feature store not found to compute movement_stats. "

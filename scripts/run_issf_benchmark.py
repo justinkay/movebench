@@ -108,34 +108,32 @@ def _ensure_study_ready(*, study: Study, config: str, setup_workers: int) -> Non
     """Ensure rasters, parametric point features, and normalization stats exist."""
     plan = study.layer_plan(config)
 
-    from movebench.features.points import select_point_store_dir
+    from movebench.features.points import PointStoreConfig, resolve_point_store_dir
+
+    store_cfg = PointStoreConfig(
+        sampler_type="parametric",
+        num_candidates=NUM_CANDIDATES,
+        random_seed=SAMPLER_RANDOM_SEED,
+        step_multiplier=STEP_MULTIPLIER,
+        step_q=STEP_Q,
+        gap_q=GAP_Q,
+        bounds_buffer_deg=BOUNDS_BUFFER_DEG,
+    )
 
     try:
-        _train_dir, train_m = select_point_store_dir(
+        _train_dir, train_m = resolve_point_store_dir(
             study_dir=study.study_dir,
             split="train",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=NUM_CANDIDATES,
-            random_seed=SAMPLER_RANDOM_SEED,
-            step_multiplier=STEP_MULTIPLIER,
-            step_q=STEP_Q,
-            gap_q=GAP_Q,
-            bounds_buffer_deg=BOUNDS_BUFFER_DEG,
+            cfg=store_cfg,
         )
-        sampler_hash = str(train_m.sampler_hash)
+        store_id = str(train_m.store_id)
         # Also require the test split to exist (benchmark evaluates on test).
-        select_point_store_dir(
+        resolve_point_store_dir(
             study_dir=study.study_dir,
             split="test",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=NUM_CANDIDATES,
-            random_seed=SAMPLER_RANDOM_SEED,
-            step_multiplier=STEP_MULTIPLIER,
-            step_q=STEP_Q,
-            gap_q=GAP_Q,
-            bounds_buffer_deg=BOUNDS_BUFFER_DEG,
+            cfg=store_cfg,
         )
     except FileNotFoundError:
         # Missing feature store: extract it. If rasters are missing, download first.
@@ -175,13 +173,13 @@ def _ensure_study_ready(*, study: Study, config: str, setup_workers: int) -> Non
                 gap_q=GAP_Q,
                 bounds_buffer_deg=BOUNDS_BUFFER_DEG,
             )
-        sampler_hash = str(rep["sampler_hash"])
+        store_id = str(rep["store_id"])
 
     # Ensure normalization stats exist for this sampler.
     study.compute_normalization_vals(
         from_="points",
         config=config,
-        sampler_hash=sampler_hash,
+        store_id=store_id,
         split="train",
         skip_existing=True,
     )

@@ -47,7 +47,7 @@ def compute_movement_features(
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
     df = df.dropna(subset=[TIME_COL])
 
-    # Sort so diffs make sense; keep original index (point ids).
+    # Sort so diffs make sense; preserve row identity via POINT_ID_COL.
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL])
 
     df["lat_rad"] = np.deg2rad(df[LAT_COL])
@@ -98,13 +98,17 @@ def compute_movement_features(
     df["burst_id"] = g["burst_start"].cumsum()
 
     # ---- step sample starts ----
-    df["next_index"] = df.index.to_series().shift(-1).astype("Int64")
+    # Use group-wise shifts so we never rely on the DataFrame index to identify the next row.
+    df["next_point_id"] = g[POINT_ID_COL].shift(-1)
+    df["next_timestamp"] = g[TIME_COL].shift(-1)
+    df["next_lon"] = g[LON_COL].shift(-1)
+    df["next_lat"] = g[LAT_COL].shift(-1)
 
-    same_indiv_next = df[INDIVIDUAL_COL].eq(df[INDIVIDUAL_COL].shift(-1))
-    same_burst_next = df["burst_id"].eq(df["burst_id"].shift(-1))
-    valid_step_next = df["valid_step"].shift(-1).fillna(False).astype(bool)
+    same_burst_next = df["burst_id"].eq(g["burst_id"].shift(-1))
+    valid_step_next = g["valid_step"].shift(-1).fillna(False).astype(bool)
 
-    df["can_be_step_start"] = (~df["is_first_in_indiv"]) & same_indiv_next & same_burst_next & valid_step_next
+    # We need a defined start_bearing, which requires a previous observation within the individual track.
+    df["can_be_step_start"] = (~df["is_first_in_indiv"]) & same_burst_next & valid_step_next
 
     df = df.drop(
         columns=[
@@ -149,7 +153,9 @@ def select_step_starts(
         return pd.DataFrame(
             {
                 "point_id_start": pd.Series(dtype="int64"),
+                "point_id_end": pd.Series(dtype="int64"),
                 "timestamp": pd.Series(dtype="datetime64[ns]"),
+                "end_timestamp": pd.Series(dtype="datetime64[ns]"),
                 "start_lon": pd.Series(dtype="float64"),
                 "start_lat": pd.Series(dtype="float64"),
                 "start_bearing": pd.Series(dtype="float64"),
@@ -158,26 +164,21 @@ def select_step_starts(
             }
         )
 
-    next_idx = starts["next_index"]
-    starts = starts[next_idx.notna()].copy()
-    next_idx_int = next_idx[next_idx.notna()].astype(int).to_numpy()
-
-    # Align endpoints to starts by reindexing in the same order.
-    ends = d.loc[next_idx_int].copy()
-    starts = starts.reset_index(drop=True)
-    ends = ends.reset_index(drop=True)
-    if len(starts) != len(ends):
-        raise RuntimeError(f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})")
+    if "next_point_id" not in starts.columns:
+        raise RuntimeError("Internal error: compute_movement_features did not populate next_point_id.")
+    starts = starts[starts["next_point_id"].notna()].copy()
 
     out = pd.DataFrame(
         {
             "point_id_start": starts[POINT_ID_COL].astype(int),
+            "point_id_end": starts["next_point_id"].astype(int),
             "timestamp": starts[TIME_COL],
+            "end_timestamp": starts["next_timestamp"],
             "start_lon": starts[LON_COL].astype(float),
             "start_lat": starts[LAT_COL].astype(float),
             "start_bearing": starts["bearing"].astype(float),
-            "end_lon": ends[LON_COL].astype(float),
-            "end_lat": ends[LAT_COL].astype(float),
+            "end_lon": starts["next_lon"].astype(float),
+            "end_lat": starts["next_lat"].astype(float),
         }
     )
 

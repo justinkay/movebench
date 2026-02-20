@@ -86,7 +86,7 @@ class ChipDataset(Dataset):
         plan: LayerPlan,
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
+        normalization_store_id: str | None = None,
         mode: Literal["points", "steps"] = "points",
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
@@ -126,7 +126,7 @@ class ChipDataset(Dataset):
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=normalization_sampler_hash,
+                store_id=normalization_store_id,
             )
         else:
             self._mean = None

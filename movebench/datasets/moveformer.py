@@ -19,7 +19,7 @@ import torch
 from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
-from movebench.features.points import select_point_store_dir
+from movebench.features.points import PointStoreConfig, resolve_point_store_dir
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     INDIVIDUAL_COL,
@@ -76,7 +76,6 @@ def _select_step_starts_with_targets(
         gap_q=float(gap_q),
     )
     starts = d[d["can_be_step_start"]].copy()
-    starts = starts[starts["next_index"].notna()].copy()
     if len(starts) == 0:
         return _StepStarts(
             point_id_start=np.zeros((0,), dtype=np.int64),
@@ -91,13 +90,7 @@ def _select_step_starts_with_targets(
             burst_id=np.zeros((0,), dtype=np.int64),
         )
 
-    next_idx = starts["next_index"].astype(int).to_numpy()
-    ends = d.loc[next_idx].copy()
-
-    starts = starts.reset_index(drop=True)
-    ends = ends.reset_index(drop=True)
-    if len(starts) != len(ends):
-        raise RuntimeError(f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})")
+    starts = starts[starts["next_point_id"].notna()].copy()
 
     out = _StepStarts(
         point_id_start=starts[POINT_ID_COL].to_numpy(dtype=np.int64, copy=False),
@@ -107,9 +100,9 @@ def _select_step_starts_with_targets(
         start_lon=starts[LON_COL].to_numpy(dtype=np.float64, copy=False),
         start_lat=starts[LAT_COL].to_numpy(dtype=np.float64, copy=False),
         start_bearing=starts["bearing"].to_numpy(dtype=np.float64, copy=False),
-        end_ts=ends[TIME_COL].to_numpy(dtype="datetime64[us]", copy=False),
-        end_lon=ends[LON_COL].to_numpy(dtype=np.float64, copy=False),
-        end_lat=ends[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        end_ts=starts["next_timestamp"].to_numpy(dtype="datetime64[us]", copy=False),
+        end_lon=starts["next_lon"].to_numpy(dtype=np.float64, copy=False),
+        end_lat=starts["next_lat"].to_numpy(dtype=np.float64, copy=False),
         individual=starts[INDIVIDUAL_COL].to_numpy(copy=False),
         burst_id=starts["burst_id"].to_numpy(dtype=np.int64, copy=False),
     )
@@ -167,11 +160,8 @@ class MoveFormerPointStoreDataset(Dataset):
         self.normalize_env = bool(normalize_env)
         self.require_normalization_stats = bool(require_normalization_stats)
 
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+        store_cfg = PointStoreConfig(
+            sampler_type="parametric",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
@@ -179,17 +169,30 @@ class MoveFormerPointStoreDataset(Dataset):
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
+        store_dir, m = resolve_point_store_dir(
+            study_dir=self.study_dir,
+            split=self.split,
+            config_hash=str(plan.config_hash),
+            cfg=store_cfg,
+        )
         self.store_dir = store_dir
         self.manifest = m
         self.plan = m.layer_plan
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
+        d = torch.load(store_dir / "store.pt", map_location="cpu")
         self.env: torch.Tensor = d["env"]
         self.valid: torch.Tensor = d["valid"]
         self.step_length_m: torch.Tensor = d["step_length_m"]
         self.turn_angle_rad: torch.Tensor = d["turn_angle_rad"]
         self.point_id_start: torch.Tensor = d["point_id_start"]
+        self.point_id_end: torch.Tensor = d["point_id_end"]
         self.timestamp_ns: torch.Tensor = d["timestamp_ns"]
+        self.end_timestamp_ns: torch.Tensor = d["end_timestamp_ns"]
+        self.start_lon: torch.Tensor = d["start_lon"]
+        self.start_lat: torch.Tensor = d["start_lat"]
+        self.start_bearing: torch.Tensor = d["start_bearing"]
+        self.end_lon: torch.Tensor = d["end_lon"]
+        self.end_lat: torch.Tensor = d["end_lat"]
 
         if self.env.ndim != 3:
             raise ValueError(f"Expected env shape (N,C,P); got {tuple(self.env.shape)}")
@@ -223,9 +226,9 @@ class MoveFormerPointStoreDataset(Dataset):
                 / "points"
                 / "train"
                 / str(self.plan.config_hash)
-                / str(self.manifest.sampler_hash)
+                / str(self.manifest.store_id)
             )
-            train_pt = train_dir / "features.pt"
+            train_pt = train_dir / "store.pt"
             if not train_pt.exists():
                 raise FileNotFoundError(
                     "Train point feature store not found to compute mov_vec_scale. "
@@ -243,7 +246,7 @@ class MoveFormerPointStoreDataset(Dataset):
                 self._mean, self._std = load_points_normalization_mean_std(
                     study_dir=self.study_dir,
                     plan=self.plan,
-                    sampler_hash=str(self.manifest.sampler_hash),
+                    store_id=str(self.manifest.store_id),
                 )
             except FileNotFoundError as e:
                 if self.require_normalization_stats:
@@ -362,6 +365,35 @@ class MoveFormerPointStoreDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._segments)
+
+    @property
+    def steps_df(self) -> pd.DataFrame:
+        """Step metadata for each point-store index, as a pandas DataFrame."""
+        cached = getattr(self, "_steps_df_cache", None)
+        if cached is not None:
+            return cached
+
+        ts_ns = self.timestamp_ns.to(dtype=torch.int64).numpy()
+        ts = pd.to_datetime(ts_ns, unit="ns", utc=True)
+        end_ts_ns = self.end_timestamp_ns.to(dtype=torch.int64).numpy()
+        end_ts = pd.to_datetime(end_ts_ns, unit="ns", utc=True)
+        df = pd.DataFrame(
+            {
+                "point_id_start": self.point_id_start.to(dtype=torch.int64).numpy(),
+                "point_id_end": self.point_id_end.to(dtype=torch.int64).numpy(),
+                "timestamp_ns": ts_ns,
+                "timestamp": ts,
+                "end_timestamp_ns": end_ts_ns,
+                "end_timestamp": end_ts,
+                "start_lon": self.start_lon.to(dtype=torch.float32).numpy(),
+                "start_lat": self.start_lat.to(dtype=torch.float32).numpy(),
+                "start_bearing": self.start_bearing.to(dtype=torch.float32).numpy(),
+                "end_lon": self.end_lon.to(dtype=torch.float32).numpy(),
+                "end_lat": self.end_lat.to(dtype=torch.float32).numpy(),
+            }
+        )
+        self._steps_df_cache = df
+        return df
 
     def _reconstruct_candidates(self, start: int, end: int) -> tuple[np.ndarray, np.ndarray]:
         """Return (lons, lats) for candidates with MoveFormer ordering (true is index 0)."""

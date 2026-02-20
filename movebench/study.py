@@ -134,8 +134,8 @@ class Study:
         """Extract SSF / iSSF point feature stores for a layers config.
 
         Writes to:
-          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/features.pt`
-          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/manifest.json`
+          `study_dir/features/points/<split>/<config_hash>/<store_id>/store.pt`
+          `study_dir/features/points/<split>/<config_hash>/<store_id>/manifest.json`
         """
         plan = self.layer_plan(config)
 
@@ -168,7 +168,7 @@ class Study:
         mode: str = "points",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
+        normalization_store_id: str | None = None,
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
         gap_q: float = 0.999,
@@ -190,7 +190,7 @@ class Study:
             mode=mode,
             output_hw=output_hw,
             normalize=normalize,
-            normalization_sampler_hash=normalization_sampler_hash,
+            normalization_store_id=normalization_store_id,
             step_multiplier=step_multiplier,
             step_q=step_q,
             gap_q=gap_q,
@@ -203,7 +203,7 @@ class Study:
         config: str | Path = "configs/layers_all.yaml",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
+        normalization_store_id: str | None = None,
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
         gap_q: float = 0.999,
@@ -219,7 +219,7 @@ class Study:
             mode="steps",
             output_hw=output_hw,
             normalize=normalize,
-            normalization_sampler_hash=normalization_sampler_hash,
+            normalization_store_id=normalization_store_id,
             step_multiplier=step_multiplier,
             step_q=step_q,
             gap_q=gap_q,
@@ -351,7 +351,7 @@ class Study:
         *,
         from_: str = "points",
         config: str | Path = "configs/layers_all.yaml",
-        sampler_hash: str | None = None,
+        store_id: str | None = None,
         split: str = "train",
         skip_existing: bool = True,
     ) -> dict:
@@ -366,7 +366,7 @@ class Study:
         return compute_points_normalization_stats(
             study_dir=self.study_dir,
             plan=plan,
-            sampler_hash=sampler_hash,
+            store_id=store_id,
             split=split,
             skip_existing=skip_existing,
         )

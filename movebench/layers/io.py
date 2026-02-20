@@ -5,7 +5,6 @@ import json
 import os
 import numpy as np
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ from movebench import paths
 from movebench.layers.download import GEE_NODATA_SENTINEL
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.layers.modis import modis_tiles_for_bounds
 from movebench.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
 
 
@@ -31,38 +31,9 @@ def _clamp_year(year: int, year_bounds: tuple[int, int] | None) -> int:
     return max(min(year, hi), lo)
 
 
-@lru_cache(maxsize=1)
-def _modis_grid_rows() -> list[tuple[int, int, float, float, float, float]]:
-    """Rows from sn_bound_10deg.txt as (h, v, lon_min, lon_max, lat_min, lat_max)."""
-
-    grid_path = paths.get_path("modis_grid")
-    rows: list[tuple[int, int, float, float, float, float]] = []
-    with open(grid_path, "r") as f:
-        for line in f:
-            s = line.strip()
-            if not s or not s[0].isdigit():
-                continue
-            parts = s.split()
-            if len(parts) < 6:
-                continue
-            v = int(parts[0])
-            h = int(parts[1])
-            lon_min = float(parts[2])
-            lon_max = float(parts[3])
-            lat_min = float(parts[4])
-            lat_max = float(parts[5])
-            rows.append((h, v, lon_min, lon_max, lat_min, lat_max))
-    return rows
-
-
-def _modis_tiles_for_bounds(bounds_latlon: tuple[float, float, float, float]) -> list[tuple[int, int]]:
-    lon_min, lat_min, lon_max, lat_max = bounds_latlon
-    out: list[tuple[int, int]] = []
-    for h, v, lo0, lo1, la0, la1 in _modis_grid_rows():
-        if lo0 <= lon_max and lo1 >= lon_min and la0 <= lat_max and la1 >= lat_min:
-            out.append((h, v))
-    out.sort(key=lambda hv: (hv[1], hv[0]))
-    return out
+#
+# NOTE: MODIS grid helpers live in movebench.layers.modis.
+#
 
 
 @dataclass
@@ -418,7 +389,7 @@ class LayerIO:
             raise ValueError(f"local_hdf layer {layer!r} missing spec.hdf_path_suffix")
 
         year = _clamp_year(_year_from_timestamp(timestamp), spec.year_bounds)
-        hvs = _modis_tiles_for_bounds(bounds_latlon)
+        hvs = modis_tiles_for_bounds(bounds_latlon)
 
         idx = self._hdf_index_for_layer(layer)
 

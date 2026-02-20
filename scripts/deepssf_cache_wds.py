@@ -78,36 +78,33 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def _ensure_ready(*, study: Study, layers_config: str, setup_workers: int, step_multiplier: float, step_q: float, gap_q: float) -> str:
-    """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
-    from movebench.features.points import select_point_store_dir
+    """Ensure rasters, parametric point store, and normalization stats exist; return store_id."""
+    from movebench.features.points import PointStoreConfig, resolve_point_store_dir
 
     plan = study.layer_plan(layers_config)
+    store_cfg = PointStoreConfig(
+        sampler_type="parametric",
+        num_candidates=int(NUM_CANDIDATES),
+        random_seed=int(SAMPLER_RANDOM_SEED),
+        step_multiplier=float(step_multiplier),
+        step_q=float(step_q),
+        gap_q=float(gap_q),
+        bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
+    )
     try:
-        _train_dir, train_m = select_point_store_dir(
+        _train_dir, train_m = resolve_point_store_dir(
             study_dir=study.study_dir,
             split="train",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(NUM_CANDIDATES),
-            random_seed=int(SAMPLER_RANDOM_SEED),
-            step_multiplier=float(step_multiplier),
-            step_q=float(step_q),
-            gap_q=float(gap_q),
-            bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
+            cfg=store_cfg,
         )
-        sampler_hash = str(train_m.sampler_hash)
+        store_id = str(train_m.store_id)
         # Also require the test split point store (benchmarks evaluate on test).
-        select_point_store_dir(
+        resolve_point_store_dir(
             study_dir=study.study_dir,
             split="test",
             config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(NUM_CANDIDATES),
-            random_seed=int(SAMPLER_RANDOM_SEED),
-            step_multiplier=float(step_multiplier),
-            step_q=float(step_q),
-            gap_q=float(gap_q),
-            bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
+            cfg=store_cfg,
         )
     except FileNotFoundError:
         try:
@@ -146,16 +143,16 @@ def _ensure_ready(*, study: Study, layers_config: str, setup_workers: int, step_
                 gap_q=float(gap_q),
                 bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
             )
-        sampler_hash = str(rep["sampler_hash"])
+        store_id = str(rep["store_id"])
 
     study.compute_normalization_vals(
         from_="points",
         config=layers_config,
-        sampler_hash=sampler_hash,
+        store_id=store_id,
         split="train",
         skip_existing=True,
     )
-    return sampler_hash
+    return store_id
 
 
 def _sync(device: torch.device) -> None:
@@ -315,7 +312,7 @@ def _cmd_build(args: argparse.Namespace) -> None:
     for study_id in studies:
         study = Study(str(study_id))
 
-        sampler_hash = _ensure_ready(
+        store_id = _ensure_ready(
             study=study,
             layers_config=str(args.config),
             setup_workers=int(args.setup_workers),
@@ -325,7 +322,7 @@ def _cmd_build(args: argparse.Namespace) -> None:
         )
 
         normalize = bool(args.normalize)
-        norm_hash = str(sampler_hash) if normalize else None
+        norm_id = str(store_id) if normalize else None
 
         for split in list(args.splits):
             ds_kwargs = {
@@ -333,7 +330,7 @@ def _cmd_build(args: argparse.Namespace) -> None:
                 "config": str(args.config),
                 "output_hw": tuple(args.output_hw),
                 "normalize": bool(normalize),
-                "normalization_sampler_hash": norm_hash,
+                "normalization_store_id": norm_id,
                 "step_multiplier": float(args.step_multiplier),
                 "step_q": float(args.step_q),
                 "gap_q": float(args.gap_q),
@@ -361,7 +358,7 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     study = Study(str(args.study))
     plan = study.layer_plan(str(args.config))
 
-    sampler_hash = _ensure_ready(
+    store_id = _ensure_ready(
         study=study,
         layers_config=str(args.config),
         setup_workers=int(args.setup_workers),
@@ -371,14 +368,14 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     )
 
     normalize = bool(args.normalize)
-    norm_hash = str(sampler_hash) if normalize else None
+    norm_id = str(store_id) if normalize else None
 
     ds_kwargs = {
         "split": str(args.split),
         "config": str(args.config),
         "output_hw": tuple(args.output_hw),
         "normalize": normalize,
-        "normalization_sampler_hash": norm_hash,
+        "normalization_store_id": norm_id,
         "step_multiplier": float(args.step_multiplier),
         "step_q": float(args.step_q),
         "gap_q": float(args.gap_q),
@@ -402,7 +399,7 @@ def _cmd_bench(args: argparse.Namespace) -> None:
         config=str(args.config),
         output_hw=tuple(args.output_hw),
         normalize=normalize,
-        normalization_sampler_hash=norm_hash,
+        normalization_store_id=norm_id,
         step_multiplier=float(args.step_multiplier),
         step_q=float(args.step_q),
         gap_q=float(args.gap_q),
