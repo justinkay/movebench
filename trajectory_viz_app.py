@@ -696,6 +696,7 @@ def _render_deckgl_viewer(
           <div class="mb-title-controls">
             <label><input type="checkbox" id="mb-show-train" /> Train</label>
             <label><input type="checkbox" id="mb-show-test" /> Test</label>
+            <label><input type="checkbox" id="mb-show-fixes" /> show fix positions</label>
             <button type="button" id="mb-select-all">All</button>
             <button type="button" id="mb-select-none">None</button>
           </div>
@@ -789,6 +790,8 @@ def _render_deckgl_viewer(
       if (typeof showTrain !== "boolean") showTrain = true;
       let showTest = storedState.showTest;
       if (typeof showTest !== "boolean") showTest = true;
+      let showFixPositions = storedState.showFixPositions;
+      if (typeof showFixPositions !== "boolean") showFixPositions = false;
 
       const indivSet = new Set(indivs);
       let selectedIndividuals = new Set();
@@ -821,6 +824,7 @@ def _render_deckgl_viewer(
           saveJSON(STATE_KEY, {{
             showTrain,
             showTest,
+            showFixPositions,
             selectedIndividuals: Array.from(selectedIndividuals),
             timeMs: currentTimeMs,
           }});
@@ -986,6 +990,20 @@ def _render_deckgl_viewer(
         }});
       }}
 
+      function makeFixLayer(data) {{
+        return new deck.ScatterplotLayer({{
+          id: "fixes",
+          data: data,
+          getPosition: (d) => d.position,
+          getFillColor: (d) => d.color || [120, 120, 120, 160],
+          stroked: false,
+          getRadius: 1,
+          radiusMinPixels: 2,
+          radiusMaxPixels: 4,
+          pickable: false,
+        }});
+      }}
+
       function makeDotLayer(dots) {{
         return new deck.ScatterplotLayer({{
           id: "dots",
@@ -1001,32 +1019,61 @@ def _render_deckgl_viewer(
         }});
       }}
 
+      let filtersVersion = 0;
+      let fixDotsVersion = -1;
+      let fixDotsFiltered = [];
+
+      function bumpFilters() {{
+        filtersVersion += 1;
+      }}
+
+      function getFilteredFixDots() {{
+        if (!showFixPositions) return [];
+        if (fixDotsVersion === filtersVersion) return fixDotsFiltered;
+        fixDotsFiltered = points.filter((p) => selectedIndividuals.has(String(p.individual)) && splitEnabled(String(p.set)));
+        fixDotsVersion = filtersVersion;
+        return fixDotsFiltered;
+      }}
+
       function renderLayers() {{
         if (!overlay) return;
         const filteredPaths = paths.filter((p) => selectedIndividuals.has(String(p.individual)) && splitEnabled(String(p.set)));
+        const fixDots = getFilteredFixDots();
         const dots = dotsAtTime(currentTimeMs);
+        const layers = [...bitmapLayers, makePathLayer(filteredPaths)];
+        if (showFixPositions) layers.push(makeFixLayer(fixDots));
+        layers.push(makeDotLayer(dots));
         overlay.setProps({{
-          layers: [...bitmapLayers, makePathLayer(filteredPaths), makeDotLayer(dots)],
+          layers,
         }});
       }}
 
       // ---- data availability controls ----
       const showTrainEl = document.getElementById("mb-show-train");
       const showTestEl = document.getElementById("mb-show-test");
+      const showFixesEl = document.getElementById("mb-show-fixes");
       const selectAllEl = document.getElementById("mb-select-all");
       const selectNoneEl = document.getElementById("mb-select-none");
       showTrainEl.checked = showTrain;
       showTestEl.checked = showTest;
+      showFixesEl.checked = showFixPositions;
 
       showTrainEl.addEventListener("change", () => {{
         showTrain = !!showTrainEl.checked;
+        bumpFilters();
         updateBarsUI();
         renderLayers();
         saveStateSoon();
       }});
       showTestEl.addEventListener("change", () => {{
         showTest = !!showTestEl.checked;
+        bumpFilters();
         updateBarsUI();
+        renderLayers();
+        saveStateSoon();
+      }});
+      showFixesEl.addEventListener("change", () => {{
+        showFixPositions = !!showFixesEl.checked;
         renderLayers();
         saveStateSoon();
       }});
@@ -1125,6 +1172,7 @@ def _render_deckgl_viewer(
         cb.addEventListener("change", () => {{
           if (cb.checked) selectedIndividuals.add(indiv);
           else selectedIndividuals.delete(indiv);
+          bumpFilters();
           updateBarsUI();
           renderLayers();
           saveStateSoon();
@@ -1134,6 +1182,7 @@ def _render_deckgl_viewer(
       selectAllEl.addEventListener("click", () => {{
         selectedIndividuals = new Set(indivs);
         for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = true;
+        bumpFilters();
         updateBarsUI();
         renderLayers();
         saveStateSoon();
@@ -1141,6 +1190,7 @@ def _render_deckgl_viewer(
       selectNoneEl.addEventListener("click", () => {{
         selectedIndividuals = new Set();
         for (const [indiv, cb] of indivCheckboxes.entries()) cb.checked = false;
+        bumpFilters();
         updateBarsUI();
         renderLayers();
         saveStateSoon();
@@ -1284,7 +1334,7 @@ def main() -> None:
                 index=2,
                 key="dem_style",
             )
-            dem_opacity = st.slider("Opacity", 0.0, 1.0, 0.1, 0.05, key="dem_opacity")
+            dem_opacity = st.slider("Opacity", 0.0, 1.0, 0.6, 0.05, key="dem_opacity")
 
             if bool(st.session_state.get("dem_overlay_enabled", False)):
                 dem_tiles_dir = rasters_root / str(dem_hash) / "tiles" / "dem"
@@ -1337,6 +1387,18 @@ def main() -> None:
     times_ms, points = _build_timeline_times_and_points(
         df, selected=set(individuals), enabled_splits=["train", "test"]
     )
+    for p in points:
+        indiv = str(p.get("individual", ""))
+        split = str(p.get("set", ""))
+        if split == "train":
+            c = train_palette.get(indiv)
+        elif split == "test":
+            c = test_palette.get(indiv)
+        else:
+            c = None
+        if c is None:
+            c = [120, 120, 120, PATH_ALPHA]
+        p["color"] = [int(c[0]), int(c[1]), int(c[2]), int(c[3])]
     coverage = _build_individual_split_coverage_ms(df)
     indiv_stats = _build_individual_movement_stats(df)
 

@@ -33,9 +33,6 @@ from movebench.trajectories import (
 )
 
 
-_MOV_VEC_SCALE = 2.8799098626533034e-05  # from MoveFormer config/forecast_mbk+ung_12h_sel_nofut.yaml
-
-
 @lru_cache(maxsize=1)
 def _crs_transformers():
     from pyproj import Transformer
@@ -215,6 +212,30 @@ class MoveFormerPointStoreDataset(Dataset):
             dtype=torch.long,
         )
 
+        from movebench.datasets.ssf import _compute_movement_stats
+
+        if self.split == "train":
+            stats = _compute_movement_stats(self.step_length_m, self.turn_angle_rad)
+        else:
+            train_dir = (
+                self.study_dir
+                / "features"
+                / "points"
+                / "train"
+                / str(self.plan.config_hash)
+                / str(self.manifest.sampler_hash)
+            )
+            train_pt = train_dir / "features.pt"
+            if not train_pt.exists():
+                raise FileNotFoundError(
+                    "Train point feature store not found to compute mov_vec_scale. "
+                    f"Expected: {train_pt}"
+                )
+            td = torch.load(train_pt, map_location="cpu")
+            stats = _compute_movement_stats(td["step_length_m"], td["turn_angle_rad"])
+
+        self._mov_vec_scale = 1.0 / float(stats["sl_std"])
+
         self._mean: torch.Tensor | None = None
         self._std: torch.Tensor | None = None
         if self.normalize_env:
@@ -312,7 +333,7 @@ class MoveFormerPointStoreDataset(Dataset):
             use_candidates=True,
             add_dtime=True,
             add_mov_vec=True,
-            mov_vec_scale=float(_MOV_VEC_SCALE),
+            mov_vec_scale=float(self._mov_vec_scale),
             handle_nan=False,
             pass_through=["taxon", "cov", "cov_cand"],
         )
@@ -446,4 +467,5 @@ class MoveFormerPointStoreDataset(Dataset):
         )
 
         encoded = self._processor.encode(traj)
+        encoded["loss_mask"] = has_prev.astype(np.bool_, copy=False)
         return encoded

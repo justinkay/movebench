@@ -118,7 +118,6 @@ def build_deepssf_wds_cache(
     num_workers: int = 0,
     overwrite: bool = False,
     progress: bool = True,
-    normalization_sampler_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build a WebDataset cache from a DeepSSFDataset-like dataset."""
     out_dir = Path(out_dir)
@@ -368,7 +367,6 @@ def ensure_deepssf_wds_cache_split(
             num_workers=int(build_workers),
             overwrite=True,
             progress=True,
-            normalization_sampler_hash=norm_hash,
         )
     elif not manifest_path.exists():
         if not build_if_missing:
@@ -387,8 +385,99 @@ def ensure_deepssf_wds_cache_split(
             num_workers=int(build_workers),
             overwrite=False,
             progress=True,
-            normalization_sampler_hash=norm_hash,
         )
 
     manifest = read_deepssf_wds_manifest(manifest_path)
     return cache_dir, manifest
+
+
+def make_deepssf_wds_train_test_loaders(
+    *,
+    study: Any,
+    layers_config: str,
+    ds_kwargs_train: dict[str, Any],
+    ds_kwargs_test: dict[str, Any],
+    cache_cfg: dict[str, Any],
+    batch_size: int,
+    num_workers: int,
+    runtime_seed: int,
+) -> tuple[
+    Any,  # train_loader
+    Any,  # test_loader
+    dict[str, Any],  # train_manifest
+    dict[str, Any],  # test_manifest
+    int,  # steps_per_epoch
+]:
+    """Build/load deepSSF WebDataset caches and return train/test loaders + manifests.
+
+    This helper centralizes defaults and build-if-missing behavior so call sites
+    (e.g., benchmark.py) stay minimal.
+    """
+    if not isinstance(cache_cfg, dict):
+        raise ValueError("cache_cfg must be a mapping/dict")
+
+    bs = int(batch_size) if batch_size is not None else 1
+    nw = int(num_workers or 0)
+
+    samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
+    spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
+    target_dtype = str(cache_cfg.get("target_dtype", "uint8"))
+    compression = str(cache_cfg.get("compression", "none"))
+    build_workers = int(cache_cfg.get("build_workers", 0))
+    shardshuffle = int(cache_cfg.get("shardshuffle", 100))
+    shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
+    seed = int(cache_cfg.get("seed", int(runtime_seed)))
+    build_if_missing = bool(cache_cfg.get("build_if_missing", True))
+
+    cache_dir_train, m_train = ensure_deepssf_wds_cache_split(
+        study=study,
+        split="train",
+        layers_config=str(layers_config),
+        ds_kwargs=dict(ds_kwargs_train),
+        samples_per_shard=int(samples_per_shard),
+        spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
+        target_dtype=target_dtype,  # type: ignore[arg-type]
+        compression=compression,  # type: ignore[arg-type]
+        seed=int(seed),
+        build_workers=int(build_workers),
+        build_if_missing=bool(build_if_missing),
+    )
+    cache_dir_test, m_test = ensure_deepssf_wds_cache_split(
+        study=study,
+        split="test",
+        layers_config=str(layers_config),
+        ds_kwargs=dict(ds_kwargs_test),
+        samples_per_shard=int(samples_per_shard),
+        spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
+        target_dtype=target_dtype,  # type: ignore[arg-type]
+        compression=compression,  # type: ignore[arg-type]
+        seed=int(seed),
+        build_workers=int(build_workers),
+        build_if_missing=bool(build_if_missing),
+    )
+
+    train_loader = make_deepssf_wds_loader(
+        cache_dir_train,
+        batch_size=int(bs),
+        num_workers=int(nw),
+        shardshuffle=int(shardshuffle),
+        shuffle_buffer=int(shuffle_buffer),
+        seed=int(seed),
+        pin_memory=False,
+        persistent_workers=False,
+        prefetch_factor=None,
+    )
+    test_loader = make_deepssf_wds_loader(
+        cache_dir_test,
+        batch_size=int(bs),
+        num_workers=int(nw),
+        shardshuffle=0,
+        shuffle_buffer=0,
+        seed=int(seed),
+        pin_memory=False,
+        persistent_workers=False,
+        prefetch_factor=None,
+    )
+
+    steps_per_epoch = steps_per_epoch_from_manifest(m_train, batch_size=int(bs))
+    return train_loader, test_loader, m_train, m_test, int(steps_per_epoch)

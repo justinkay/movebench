@@ -481,80 +481,25 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         use_cache = bool(cache_cfg.get("enabled", False))
 
     if use_cache:
-        from movebench.datasets.deepssf_wds_cache import (
-            ensure_deepssf_wds_cache_split,
-            make_deepssf_wds_loader,
-            steps_per_epoch_from_manifest,
-        )
+        from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_train_test_loaders
 
         assert isinstance(cache_cfg, dict)
         batch_size = dcfg.get("batch_size", None)
         bs = int(batch_size) if batch_size is not None else 1
         num_workers = int(dcfg.get("num_workers", 0) or 0)
 
-        samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
-        spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
-        target_dtype = str(cache_cfg.get("target_dtype", "uint8"))
-        compression = str(cache_cfg.get("compression", "none"))
-        build_workers = int(cache_cfg.get("build_workers", 0))
-        shardshuffle = int(cache_cfg.get("shardshuffle", 100))
-        shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
-        seed = int(cache_cfg.get("seed", int(cfg["runtime"]["seed"])))
-        build_if_missing = bool(cache_cfg.get("build_if_missing", True))
-
-        cache_dir_train, m_train = ensure_deepssf_wds_cache_split(
+        train_loader, test_loader, m_train, m_test, steps_per_epoch = make_deepssf_wds_train_test_loaders(
             study=study,
-            split="train",
             layers_config=str(cfg["layers_config"]),
-            ds_kwargs=ds_kwargs_train,
-            samples_per_shard=int(samples_per_shard),
-            spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-            target_dtype=target_dtype,  # type: ignore[arg-type]
-            compression=compression,  # type: ignore[arg-type]
-            seed=int(seed),
-            build_workers=int(build_workers),
-            build_if_missing=bool(build_if_missing),
-        )
-        cache_dir_test, m_test = ensure_deepssf_wds_cache_split(
-            study=study,
-            split="test",
-            layers_config=str(cfg["layers_config"]),
-            ds_kwargs=ds_kwargs_test,
-            samples_per_shard=int(samples_per_shard),
-            spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-            target_dtype=target_dtype,  # type: ignore[arg-type]
-            compression=compression,  # type: ignore[arg-type]
-            seed=int(seed),
-            build_workers=int(build_workers),
-            build_if_missing=bool(build_if_missing),
-        )
-
-        train_loader = make_deepssf_wds_loader(
-            cache_dir_train,
+            ds_kwargs_train=ds_kwargs_train,
+            ds_kwargs_test=ds_kwargs_test,
+            cache_cfg=cache_cfg,
             batch_size=int(bs),
             num_workers=int(num_workers),
-            shardshuffle=int(shardshuffle),
-            shuffle_buffer=int(shuffle_buffer),
-            seed=int(seed),
-            pin_memory=False,
-            persistent_workers=False,
-            prefetch_factor=None,
-        )
-        test_loader = make_deepssf_wds_loader(
-            cache_dir_test,
-            batch_size=int(bs),
-            num_workers=int(num_workers),
-            shardshuffle=0,
-            shuffle_buffer=0,
-            seed=int(seed),
-            pin_memory=False,
-            persistent_workers=False,
-            prefetch_factor=None,
+            runtime_seed=int(cfg["runtime"]["seed"]),
         )
 
-        schedule = _resolve_fit_schedule(
-            hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch_from_manifest(m_train, batch_size=bs)
-        )
+        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=int(steps_per_epoch))
         pixel_size_test = float(m_test["pixel_size_m"])
         pixel_size_train = float(m_train["pixel_size_m"])
 

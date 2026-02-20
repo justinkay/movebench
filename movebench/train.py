@@ -461,7 +461,7 @@ def eval_moveformer(
             raise ValueError(f"P must be > 0; got {P}")
         total_items += int(B)
 
-        mask = features["mask"].to(torch.bool)
+        mask = features.get("loss_mask", features["mask"]).to(torch.bool)
         target = torch.zeros((B, L), dtype=torch.long, device=device)
         ce = F.cross_entropy(logits.transpose(1, 2), target, reduction="none")  # (B,L)
 
