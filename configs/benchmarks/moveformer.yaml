@@ -1,0 +1,51 @@
+version: 1
+
+# MoveFormer baseline configuration.
+#
+# Notes:
+# - Reuses the iSSF parametric point-store sampler to get P=101 candidates (100 pseudo + 1 true).
+# - Consumes whatever layers exist in the point-store env tensor as a generic continuous covariate vector.
+
+layers_config: configs/layers_all.yaml
+output_dir: results/benchmarks
+
+runtime:
+  device: cuda
+  seed: 42
+  setup_workers: 16
+  max_eval_steps: 2500
+
+datasets:
+  # Still required: point-store extraction and disambiguation parameters live here.
+  issf:
+    batch_size: 32
+    num_workers: 32
+    normalize: true
+    include_time: true
+    sampler:
+      num_candidates: 100
+      random_seed: 0
+      step_multiplier: 2.0
+      step_q: 0.95
+      gap_q: 0.999
+      bounds_buffer_deg: 0.01
+
+  moveformer:
+    batch_size: 24
+    num_workers: 8
+    max_len: 500
+    min_len: 2
+    normalize_env: true
+    require_normalization_stats: false
+
+methods:
+  - name: moveformer
+    kind: moveformer
+    hparams:
+      lr: 0.00005
+      weight_decay: 0.0
+      warmup_steps: 1000
+      lr_gamma: 0.98
+      max_epochs: 180
+      eval_every_epochs: 1
+      patience_epochs: 10
