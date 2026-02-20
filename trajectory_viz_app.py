@@ -409,6 +409,80 @@ def _build_individual_split_coverage_ms(df: pd.DataFrame) -> list[dict]:
     return out
 
 
+@st.cache_data(show_spinner=False)
+def _build_individual_movement_stats(df: pd.DataFrame) -> dict[str, dict[str, float | None]]:
+    """Compute per-individual movement summary stats.
+
+    - median fix time: median seconds between consecutive fixes
+    - median step length: median meters between consecutive fixes
+    - 95th percentile step length: p95 meters between consecutive fixes
+
+    Computed within each split (train/test) and pooled, so we don't create
+    artificial cross-split steps.
+    """
+
+    def _haversine_m(
+        lon1_deg: np.ndarray, lat1_deg: np.ndarray, lon2_deg: np.ndarray, lat2_deg: np.ndarray
+    ) -> np.ndarray:
+        r = 6_371_000.0
+        lon1 = np.deg2rad(lon1_deg)
+        lat1 = np.deg2rad(lat1_deg)
+        lon2 = np.deg2rad(lon2_deg)
+        lat2 = np.deg2rad(lat2_deg)
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+        c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+        return r * c
+
+    out: dict[str, dict[str, float | None]] = {}
+    for indiv, g_indiv in df.groupby(INDIVIDUAL_COL, sort=False):
+        dt_s_parts: list[np.ndarray] = []
+        step_m_parts: list[np.ndarray] = []
+
+        for _, g in g_indiv.groupby(SET_COL, sort=False):
+            g2 = g.dropna(subset=[TIME_COL, LON_COL, LAT_COL]).drop_duplicates(subset=[TIME_COL], keep="last")
+            if len(g2) < 2:
+                continue
+            g2 = g2.sort_values(TIME_COL, kind="mergesort")
+
+            coords = g2[[LON_COL, LAT_COL]].to_numpy(dtype=np.float64, copy=False)
+            finite = np.isfinite(coords).all(axis=1)
+            if not finite.all():
+                g2 = g2.iloc[np.flatnonzero(finite)].copy()
+                coords = coords[finite]
+            if len(coords) < 2:
+                continue
+
+            times_ns = (
+                g2[TIME_COL]
+                .to_numpy(dtype="datetime64[ns]", copy=False)
+                .astype(np.int64, copy=False)
+            )
+            dt_s = np.diff(times_ns).astype(np.float64) / 1_000_000_000.0
+            dt_s = dt_s[np.isfinite(dt_s) & (dt_s > 0)]
+            if dt_s.size:
+                dt_s_parts.append(dt_s)
+
+            lon = coords[:, 0]
+            lat = coords[:, 1]
+            step_m = _haversine_m(lon[:-1], lat[:-1], lon[1:], lat[1:])
+            step_m = step_m[np.isfinite(step_m) & (step_m > 0)]
+            if step_m.size:
+                step_m_parts.append(step_m)
+
+        dt_s_all = np.concatenate(dt_s_parts) if dt_s_parts else np.array([], dtype=np.float64)
+        step_m_all = np.concatenate(step_m_parts) if step_m_parts else np.array([], dtype=np.float64)
+
+        out[str(indiv)] = {
+            "median_fix_s": float(np.median(dt_s_all)) if dt_s_all.size else None,
+            "median_step_m": float(np.median(step_m_all)) if step_m_all.size else None,
+            "p95_step_m": float(np.quantile(step_m_all, 0.95)) if step_m_all.size else None,
+        }
+
+    return out
+
+
 def _render_deckgl_viewer(
     *,
     study_id: str,
@@ -421,9 +495,12 @@ def _render_deckgl_viewer(
     points: list[dict],
     coverage: list[dict],
     split_colors: dict[str, dict[str, str]],
+    indiv_stats: dict[str, dict[str, float | None]],
 ) -> None:
     map_h = 600
-    bars_h = min(260, max(120, 22 * max(1, len(individuals))))
+    # Rows are taller now (checkbox + 2 lines of stats), so allocate more height
+    # to avoid an internal scrollbar for typical studies (e.g., 10 individuals).
+    bars_h = min(900, max(200, 60 * max(1, len(individuals)) + 24))
     total_h = int(map_h + bars_h + 220)
 
     payload = {
@@ -437,6 +514,7 @@ def _render_deckgl_viewer(
         "points": points,
         "coverage": coverage,
         "splitColors": split_colors,
+        "indivStats": indiv_stats,
     }
     payload_json = json.dumps(payload).replace("</", "<\\/")
 
@@ -521,7 +599,7 @@ def _render_deckgl_viewer(
       }}
       .mb-row {{
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 10px;
         margin: 6px 0;
       }}
@@ -529,18 +607,36 @@ def _render_deckgl_viewer(
         width: 170px;
         flex: 0 0 170px;
         display: flex;
-        align-items: center;
+        flex-direction: column;
+        align-items: stretch;
         font-size: 12px;
-        gap: 8px;
+        gap: 2px;
         cursor: pointer;
+      }}
+      .mb-label-top {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 18px;
       }}
       .mb-label input[type="checkbox"] {{
         margin: 0;
         flex: 0 0 auto;
       }}
+      .mb-indiv-stats {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        font-size: 11px;
+        color: rgba(49, 51, 63, 0.65);
+      }}
+      .mb-indiv-stats span {{
+        white-space: nowrap;
+      }}
       .mb-track {{
         flex: 1;
         height: 10px;
+        margin-top: 4px;
         background: rgba(49, 51, 63, 0.08);
         border-radius: 999px;
         position: relative;
@@ -653,6 +749,26 @@ def _render_deckgl_viewer(
         return d.toISOString().replace("T", " ").replace(".000Z", "Z");
       }}
 
+      function fmtDurationS(sec) {{
+        if (!Number.isFinite(sec) || sec < 0) return "—";
+        const s = sec;
+        if (s < 60) return Math.round(s) + "s";
+        const m = s / 60.0;
+        if (m < 60) return (m < 10 ? m.toFixed(1) : m.toFixed(0)) + "m";
+        const h = m / 60.0;
+        if (h < 48) return (h < 10 ? h.toFixed(1) : h.toFixed(0)) + "h";
+        const d = h / 24.0;
+        return (d < 10 ? d.toFixed(1) : d.toFixed(0)) + "d";
+      }}
+
+      function fmtDistanceM(meters) {{
+        if (!Number.isFinite(meters) || meters < 0) return "—";
+        const m = meters;
+        if (m < 1000) return Math.round(m) + "m";
+        const km = m / 1000.0;
+        return (km < 10 ? km.toFixed(1) : km.toFixed(0)) + "km";
+      }}
+
       function upperBound(sortedArr, x) {{
         let lo = 0;
         let hi = sortedArr.length;
@@ -666,6 +782,7 @@ def _render_deckgl_viewer(
 
       const indivs = Array.isArray(DATA.individuals) ? DATA.individuals.map(String) : [];
       const splitColors = (DATA.splitColors && typeof DATA.splitColors === "object") ? DATA.splitColors : {{}};
+      const indivStats = (DATA.indivStats && typeof DATA.indivStats === "object") ? DATA.indivStats : {{}};
 
       const storedState = loadJSON(STATE_KEY) || {{}};
       let showTrain = storedState.showTrain;
@@ -946,14 +1063,34 @@ def _render_deckgl_viewer(
 
         const label = document.createElement("label");
         label.className = "mb-label";
+        const top = document.createElement("div");
+        top.className = "mb-label-top";
+
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = selectedIndividuals.has(indiv);
+
         const name = document.createElement("span");
         name.className = "mb-indiv-name";
         name.textContent = indiv;
-        label.appendChild(cb);
-        label.appendChild(name);
+        top.appendChild(cb);
+        top.appendChild(name);
+
+        const stats = document.createElement("div");
+        stats.className = "mb-indiv-stats";
+        const st = indivStats[indiv] || {{}};
+        const stat1 = document.createElement("span");
+        stat1.textContent = "fix med: " + fmtDurationS(st.median_fix_s);
+        const stat2 = document.createElement("span");
+        stat2.textContent = "step med: " + fmtDistanceM(st.median_step_m);
+        const stat3 = document.createElement("span");
+        stat3.textContent = "step p95: " + fmtDistanceM(st.p95_step_m);
+        stats.appendChild(stat1);
+        stats.appendChild(stat2);
+        stats.appendChild(stat3);
+
+        label.appendChild(top);
+        label.appendChild(stats);
 
         const track = document.createElement("div");
         track.className = "mb-track";
@@ -1129,22 +1266,13 @@ def main() -> None:
     # Build all paths; selection/filtering is handled client-side.
     rows = build_path_rows(df)
 
-    # ---- map-side controls ----
+    # ---- sidebar controls ----
     basemap_options = list(BASEMAP_STYLES.keys())
-    try:
-        basemap_name = st.radio(
-            "Basemap",
-            basemap_options,
-            index=0,
-            horizontal=True,
-            key="basemap_name",
-        )
-    except TypeError:
-        basemap_name = st.radio("Basemap", basemap_options, index=0, key="basemap_name")
+    basemap_name = st.sidebar.radio("Basemap", basemap_options, index=0, key="basemap_name")
     map_style = BASEMAP_STYLES[basemap_name]
 
     raster_tiles: list[dict] = []
-    with st.expander("Raster overlay (DEM)", expanded=False):
+    with st.sidebar.expander("Raster overlay (DEM)", expanded=False):
         if not raster_hashes:
             st.info("No rasters found for this study.")
         else:
@@ -1210,6 +1338,7 @@ def main() -> None:
         df, selected=set(individuals), enabled_splits=["train", "test"]
     )
     coverage = _build_individual_split_coverage_ms(df)
+    indiv_stats = _build_individual_movement_stats(df)
 
     alpha = float(TIMELINE_BAR_ALPHA) / 255.0
     split_colors: dict[str, dict[str, str]] = {}
@@ -1232,6 +1361,7 @@ def main() -> None:
         points=points,
         coverage=coverage,
         split_colors=split_colors,
+        indiv_stats=indiv_stats,
     )
 
 
