@@ -29,11 +29,8 @@ if str(_REPO_ROOT) not in sys.path:
 from movebench import Study
 from movebench.datasets.deepssf_wds_cache import (
     build_deepssf_wds_cache,
-    cache_dir_for_study,
-    cache_size_bytes,
-    deepssf_wds_cache_hash,
+    ensure_deepssf_wds_cache_split,
     make_deepssf_wds_loader,
-    read_deepssf_wds_manifest,
 )
 from movebench.models.deepssf import DeepSSF
 from movebench.train import collate_deepssf
@@ -318,7 +315,6 @@ def _cmd_build(args: argparse.Namespace) -> None:
 
     for study_id in studies:
         study = Study(str(study_id))
-        plan = study.layer_plan(str(args.config))
 
         sampler_hash = _ensure_ready(
             study=study,
@@ -333,57 +329,78 @@ def _cmd_build(args: argparse.Namespace) -> None:
         norm_hash = str(sampler_hash) if normalize else None
 
         for split in list(args.splits):
-            cache_hash = deepssf_wds_cache_hash(
-                config_hash=str(plan.config_hash),
-                rasters_hash=str(plan.rasters_hash),
-                split=str(split),
-                output_hw=tuple(args.output_hw),
-                normalize=normalize,
-                normalization_sampler_hash=norm_hash,
-                step_multiplier=float(args.step_multiplier),
-                step_q=float(args.step_q),
-                gap_q=float(args.gap_q),
-                samples_per_shard=int(args.samples_per_shard),
-                spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
-                target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
-                compression=str(args.compression),  # type: ignore[arg-type]
-            )
-            out_dir = cache_dir_for_study(
-                study_dir=study.study_dir,
-                split=str(split),
-                config_hash=str(plan.config_hash),
-                cache_hash=str(cache_hash),
-            )
-            manifest_path = out_dir / "manifest.json"
-            if manifest_path.exists() and not bool(args.overwrite):
-                print(f"[{study_id}::{split}] exists; skipping: {out_dir}")
-                continue
+            ds_kwargs = {
+                "split": str(split),
+                "config": str(args.config),
+                "output_hw": tuple(args.output_hw),
+                "normalize": bool(normalize),
+                "normalization_sampler_hash": norm_hash,
+                "step_multiplier": float(args.step_multiplier),
+                "step_q": float(args.step_q),
+                "gap_q": float(args.gap_q),
+            }
 
-            ds = study.deepssf_dataset(
-                split=str(split),
-                config=str(args.config),
-                output_hw=tuple(args.output_hw),
-                normalize=normalize,
-                normalization_sampler_hash=norm_hash,
-                step_multiplier=float(args.step_multiplier),
-                step_q=float(args.step_q),
-                gap_q=float(args.gap_q),
-            )
-            build_deepssf_wds_cache(
-                ds,
-                out_dir,
-                samples_per_shard=int(args.samples_per_shard),
-                spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
-                target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
-                compression=str(args.compression),  # type: ignore[arg-type]
-                seed=int(args.seed),
-                num_workers=int(args.build_workers),
-                overwrite=bool(args.overwrite),
-                progress=True,
-                config_path=str(args.config),
-                normalization_sampler_hash=norm_hash,
-            )
-            print(f"[{study_id}::{split}] wrote: {out_dir}")
+            if bool(args.overwrite):
+                try:
+                    out_dir, _m = ensure_deepssf_wds_cache_split(
+                        study=study,
+                        split=str(split),
+                        layers_config=str(args.config),
+                        ds_kwargs=ds_kwargs,
+                        samples_per_shard=int(args.samples_per_shard),
+                        spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
+                        target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
+                        compression=str(args.compression),  # type: ignore[arg-type]
+                        seed=int(args.seed),
+                        build_workers=int(args.build_workers),
+                        build_if_missing=False,
+                    )
+                except FileNotFoundError:
+                    out_dir, _m = ensure_deepssf_wds_cache_split(
+                        study=study,
+                        split=str(split),
+                        layers_config=str(args.config),
+                        ds_kwargs=ds_kwargs,
+                        samples_per_shard=int(args.samples_per_shard),
+                        spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
+                        target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
+                        compression=str(args.compression),  # type: ignore[arg-type]
+                        seed=int(args.seed),
+                        build_workers=int(args.build_workers),
+                        build_if_missing=True,
+                    )
+                else:
+                    ds = study.deepssf_dataset(**ds_kwargs)
+                    build_deepssf_wds_cache(
+                        ds,
+                        out_dir,
+                        samples_per_shard=int(args.samples_per_shard),
+                        spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
+                        target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
+                        compression=str(args.compression),  # type: ignore[arg-type]
+                        seed=int(args.seed),
+                        num_workers=int(args.build_workers),
+                        overwrite=True,
+                        progress=True,
+                        config_path=str(args.config),
+                        normalization_sampler_hash=norm_hash,
+                    )
+                print(f"[{study_id}::{split}] wrote: {out_dir}")
+            else:
+                out_dir, _m = ensure_deepssf_wds_cache_split(
+                    study=study,
+                    split=str(split),
+                    layers_config=str(args.config),
+                    ds_kwargs=ds_kwargs,
+                    samples_per_shard=int(args.samples_per_shard),
+                    spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
+                    target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
+                    compression=str(args.compression),  # type: ignore[arg-type]
+                    seed=int(args.seed),
+                    build_workers=int(args.build_workers),
+                    build_if_missing=True,
+                )
+                print(f"[{study_id}::{split}] ready: {out_dir}")
 
 
 def _cmd_bench(args: argparse.Namespace) -> None:
@@ -403,56 +420,29 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     normalize = bool(args.normalize)
     norm_hash = str(sampler_hash) if normalize else None
 
-    cache_hash = deepssf_wds_cache_hash(
-        config_hash=str(plan.config_hash),
-        rasters_hash=str(plan.rasters_hash),
+    ds_kwargs = {
+        "split": str(args.split),
+        "config": str(args.config),
+        "output_hw": tuple(args.output_hw),
+        "normalize": normalize,
+        "normalization_sampler_hash": norm_hash,
+        "step_multiplier": float(args.step_multiplier),
+        "step_q": float(args.step_q),
+        "gap_q": float(args.gap_q),
+    }
+    cache_dir, manifest = ensure_deepssf_wds_cache_split(
+        study=study,
         split=str(args.split),
-        output_hw=tuple(args.output_hw),
-        normalize=normalize,
-        normalization_sampler_hash=norm_hash,
-        step_multiplier=float(args.step_multiplier),
-        step_q=float(args.step_q),
-        gap_q=float(args.gap_q),
+        layers_config=str(args.config),
+        ds_kwargs=ds_kwargs,
         samples_per_shard=int(args.samples_per_shard),
         spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
         target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
         compression=str(args.compression),  # type: ignore[arg-type]
+        seed=int(args.seed),
+        build_workers=int(args.build_workers),
+        build_if_missing=True,
     )
-    cache_dir = cache_dir_for_study(
-        study_dir=study.study_dir,
-        split=str(args.split),
-        config_hash=str(plan.config_hash),
-        cache_hash=str(cache_hash),
-    )
-
-    manifest_path = cache_dir / "manifest.json"
-    if not manifest_path.exists():
-        ds_build = study.deepssf_dataset(
-            split=str(args.split),
-            config=str(args.config),
-            output_hw=tuple(args.output_hw),
-            normalize=normalize,
-            normalization_sampler_hash=norm_hash,
-            step_multiplier=float(args.step_multiplier),
-            step_q=float(args.step_q),
-            gap_q=float(args.gap_q),
-        )
-        build_deepssf_wds_cache(
-            ds_build,
-            cache_dir,
-            samples_per_shard=int(args.samples_per_shard),
-            spatial_dtype=str(args.spatial_dtype),  # type: ignore[arg-type]
-            target_dtype=str(args.target_dtype),  # type: ignore[arg-type]
-            compression=str(args.compression),  # type: ignore[arg-type]
-            seed=int(args.seed),
-            num_workers=int(args.build_workers),
-            overwrite=False,
-            progress=True,
-            config_path=str(args.config),
-            normalization_sampler_hash=norm_hash,
-        )
-
-    manifest = read_deepssf_wds_manifest(manifest_path)
 
     baseline_ds = study.deepssf_dataset(
         split=str(args.split),
@@ -502,7 +492,7 @@ def _cmd_bench(args: argparse.Namespace) -> None:
         m.load_state_dict({k: v.to(device) for k, v in init_state.items()})
         return m
 
-    cache_bytes = cache_size_bytes(cache_dir)
+    cache_bytes = _dir_size_bytes(cache_dir)
     rasters_dir = study.study_dir / "rasters" / str(plan.rasters_hash)
     rasters_bytes = _dir_size_bytes(rasters_dir)
 
@@ -669,4 +659,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

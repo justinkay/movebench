@@ -157,6 +157,45 @@ def select_point_store_dir(
         )
 
     if len(matches) != 1:
+        # When the caller provided a full sampler specification but multiple stores still match
+        # (e.g., extracted multiple times with slightly different internal sampler fits),
+        # prefer the most recently created store.
+        fully_specified = all(
+            v is not None
+            for v in (
+                num_candidates,
+                random_seed,
+                step_multiplier,
+                step_q,
+                gap_q,
+                bounds_buffer_deg,
+            )
+        )
+        if fully_specified:
+            import warnings
+            from datetime import datetime
+
+            def _created_at_key(m: PointFeatureManifest):
+                try:
+                    return datetime.fromisoformat(str(m.created_at).replace("Z", "+00:00"))
+                except Exception:
+                    # Fallback: ISO timestamps are lexicographically sortable.
+                    return str(m.created_at)
+
+            sampler_hash, m = max(matches, key=lambda x: _created_at_key(x[1]))
+            store_dir = base_dir / sampler_hash
+            if not (store_dir / "features.pt").exists():
+                raise FileNotFoundError(f"features.pt not found under: {store_dir}")
+
+            warnings.warn(
+                "Multiple matching point feature stores found even though the sampler was fully specified; "
+                f"choosing the most recently created store: {store_dir}. "
+                "To avoid this warning, delete older matching stores under the same config_hash directory.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return store_dir, m
+
         lines = [
             "Multiple matching point feature stores found. Disambiguate by passing one or more of:",
             "num_candidates, random_seed, step_multiplier, step_q, gap_q, bounds_buffer_deg.",

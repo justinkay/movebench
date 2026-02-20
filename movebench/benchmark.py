@@ -135,6 +135,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
         elif kind == "moveformer":
             if "moveformer" not in cfg["datasets"] or not isinstance(cfg["datasets"]["moveformer"], dict):
                 raise ValueError("Benchmark config missing required key: datasets.moveformer (required for kind='moveformer')")
+            dcfg = cfg["datasets"]["moveformer"]
+            if "normalize_env" in dcfg and not isinstance(dcfg["normalize_env"], bool):
+                raise ValueError("datasets.moveformer.normalize_env must be a boolean if provided")
+            if "require_normalization_stats" in dcfg and not isinstance(dcfg["require_normalization_stats"], bool):
+                raise ValueError("datasets.moveformer.require_normalization_stats must be a boolean if provided")
             _validate_schedule_hparams(method_name=name, hparams=hparams)
         else:
             raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
@@ -476,136 +481,25 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         use_cache = bool(cache_cfg.get("enabled", False))
 
     if use_cache:
-        from movebench.datasets.deepssf_wds_cache import (
-            build_deepssf_wds_cache,
-            cache_dir_for_study,
-            deepssf_wds_cache_hash,
-            make_deepssf_wds_loader,
-            read_deepssf_wds_manifest,
-            steps_per_epoch_from_manifest,
-        )
+        from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_train_test_loaders
 
-        plan = study.layer_plan(str(cfg["layers_config"]))
-
-        samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
-        spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
-        target_dtype = str(cache_cfg.get("target_dtype", "uint8"))
-        compression = str(cache_cfg.get("compression", "none"))
-        build_workers = int(cache_cfg.get("build_workers", 0))
-        shardshuffle = int(cache_cfg.get("shardshuffle", 100))
-        shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
-        seed = int(cache_cfg.get("seed", int(cfg["runtime"]["seed"])))
-        build_if_missing = bool(cache_cfg.get("build_if_missing", True))
-
-        if samples_per_shard <= 0:
-            raise ValueError(f"datasets.deepssf.cache.samples_per_shard must be > 0; got {samples_per_shard}")
-        if spatial_dtype not in {"float16", "float32"}:
-            raise ValueError("datasets.deepssf.cache.spatial_dtype must be one of {'float16','float32'}")
-        if target_dtype not in {"uint8", "float16", "float32"}:
-            raise ValueError("datasets.deepssf.cache.target_dtype must be one of {'uint8','float16','float32'}")
-        if compression not in {"none", "gz"}:
-            raise ValueError("datasets.deepssf.cache.compression must be one of {'none','gz'}")
-        if build_workers < 0:
-            raise ValueError(f"datasets.deepssf.cache.build_workers must be >= 0; got {build_workers}")
-        if shardshuffle < 0:
-            raise ValueError(f"datasets.deepssf.cache.shardshuffle must be >= 0; got {shardshuffle}")
-        if shuffle_buffer < 0:
-            raise ValueError(f"datasets.deepssf.cache.shuffle_buffer must be >= 0; got {shuffle_buffer}")
-
-        output_hw = ds_kwargs_train.get("output_hw", dcfg.get("output_hw", (101, 101)))
-        if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
-            raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
-        output_hw = (int(output_hw[0]), int(output_hw[1]))
-
-        normalize = bool(ds_kwargs_train.get("normalize", True))
-        norm_hash: str | None = str(sampler_hash) if normalize else None
-
-        step_multiplier = float(ds_kwargs_train.get("step_multiplier", 2.0))
-        step_q = float(ds_kwargs_train.get("step_q", 0.95))
-        gap_q = float(ds_kwargs_train.get("gap_q", 0.999))
-
-        def _split_cache(split: str, ds_kwargs: dict[str, Any]):
-            ch = deepssf_wds_cache_hash(
-                config_hash=str(plan.config_hash),
-                rasters_hash=str(plan.rasters_hash),
-                split=str(split),
-                output_hw=output_hw,
-                normalize=normalize,
-                normalization_sampler_hash=norm_hash,
-                step_multiplier=float(step_multiplier),
-                step_q=float(step_q),
-                gap_q=float(gap_q),
-                samples_per_shard=int(samples_per_shard),
-                spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-                target_dtype=target_dtype,  # type: ignore[arg-type]
-                compression=compression,  # type: ignore[arg-type]
-            )
-            cache_dir = cache_dir_for_study(
-                study_dir=study.study_dir,
-                split=str(split),
-                config_hash=str(plan.config_hash),
-                cache_hash=str(ch),
-            )
-            manifest_path = cache_dir / "manifest.json"
-            if not manifest_path.exists():
-                if not build_if_missing:
-                    raise FileNotFoundError(
-                        f"deepSSF cache missing: {manifest_path} (set datasets.deepssf.cache.build_if_missing=true)"
-                    )
-                ds = study.deepssf_dataset(**ds_kwargs)
-                build_deepssf_wds_cache(
-                    ds,
-                    cache_dir,
-                    samples_per_shard=int(samples_per_shard),
-                    spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-                    target_dtype=target_dtype,  # type: ignore[arg-type]
-                    compression=compression,  # type: ignore[arg-type]
-                    seed=int(seed),
-                    num_workers=int(build_workers),
-                    overwrite=False,
-                    progress=True,
-                    config_path=str(cfg["layers_config"]),
-                    normalization_sampler_hash=norm_hash,
-                )
-            manifest = read_deepssf_wds_manifest(manifest_path)
-            return cache_dir, manifest
-
-        cache_dir_train, m_train = _split_cache("train", ds_kwargs_train)
-        cache_dir_test, m_test = _split_cache("test", ds_kwargs_test)
-
-        batch_size = dcfg.get("batch_size", 1)
+        assert isinstance(cache_cfg, dict)
+        batch_size = dcfg.get("batch_size", None)
         bs = int(batch_size) if batch_size is not None else 1
-        if bs <= 0:
-            raise ValueError(f"datasets.deepssf.batch_size must be > 0; got {batch_size!r}")
-
         num_workers = int(dcfg.get("num_workers", 0) or 0)
-        if num_workers < 0:
-            raise ValueError(f"datasets.deepssf.num_workers must be >= 0; got {num_workers!r}")
 
-        train_loader = make_deepssf_wds_loader(
-            cache_dir_train,
+        train_loader, test_loader, m_train, m_test, steps_per_epoch = make_deepssf_wds_train_test_loaders(
+            study=study,
+            layers_config=str(cfg["layers_config"]),
+            ds_kwargs_train=ds_kwargs_train,
+            ds_kwargs_test=ds_kwargs_test,
+            cache_cfg=cache_cfg,
             batch_size=int(bs),
             num_workers=int(num_workers),
-            shardshuffle=int(shardshuffle),
-            shuffle_buffer=int(shuffle_buffer),
-            seed=int(seed),
-            pin_memory=False,
-            persistent_workers=False,
-            prefetch_factor=None,
-        )
-        test_loader = make_deepssf_wds_loader(
-            cache_dir_test,
-            batch_size=int(bs),
-            num_workers=int(num_workers),
-            shardshuffle=0,
-            shuffle_buffer=0,
-            seed=int(seed),
-            pin_memory=False,
-            persistent_workers=False,
-            prefetch_factor=None,
+            runtime_seed=int(cfg["runtime"]["seed"]),
         )
 
-        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch_from_manifest(m_train, batch_size=bs))
+        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=int(steps_per_epoch))
         pixel_size_test = float(m_test.pixel_size_m)
         pixel_size_train = float(m_train.pixel_size_m)
 
@@ -732,6 +626,10 @@ def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dic
         ds_kwargs["max_len"] = int(dcfg["max_len"])
     if "min_len" in dcfg:
         ds_kwargs["min_len"] = int(dcfg["min_len"])
+    if "normalize_env" in dcfg:
+        ds_kwargs["normalize_env"] = bool(dcfg["normalize_env"])
+    if "require_normalization_stats" in dcfg:
+        ds_kwargs["require_normalization_stats"] = bool(dcfg["require_normalization_stats"])
 
     train_ds = study.moveformer_dataset(split="train", **ds_kwargs)
     test_ds = study.moveformer_dataset(split="test", **ds_kwargs)
@@ -751,7 +649,10 @@ def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dic
         raise ValueError("MoveFormer dataset must expose num_candidates_total > 0")
     random_metrics = random_baseline_metrics(P, TOP_K_VALUES)
 
-    model = build_moveformer_selection_model(num_landcover_classes=18)
+    cov_dim = int(getattr(train_ds, "cov_dim", 0))
+    if cov_dim <= 0:
+        raise ValueError("MoveFormer dataset must expose cov_dim > 0")
+    model = build_moveformer_selection_model(cov_dim=cov_dim)
 
     max_eval_steps = _resolve_max_eval_steps(cfg)
     hparams = dict(method["hparams"])
