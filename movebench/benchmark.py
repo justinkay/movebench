@@ -933,6 +933,8 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
                 continue
             kind = str(method["kind"])
 
+            print(f"Running {study_id} {method_name}")
+
             with maybe_wandb_benchmark_log_callback(
                 wandb_cfg,
                 output_dir=out_dir,
