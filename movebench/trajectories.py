@@ -21,7 +21,7 @@ TIME_COL = "timestamp"
 INDIVIDUAL_COL = "individual-local-identifier"
 SET_COL = "set"
 POINT_ID_COL = "point_id"
-
+OUTLIER_COL = "manually-marked-outlier"
 
 def load_trajectories_csv(path: str) -> pd.DataFrame:
     """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
