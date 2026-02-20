@@ -35,7 +35,7 @@ from movebench.models.deepssf import DeepSSF
 from movebench.train import collate_deepssf
 
 
-# Match configs/benchmarks/default.yaml iSSF sampler settings (used for normalization stats).
+# Match configs/benchmarks/all.yaml iSSF sampler settings (used for normalization stats).
 NUM_CANDIDATES = 100
 SAMPLER_RANDOM_SEED = 0
 BOUNDS_BUFFER_DEG = 0.01

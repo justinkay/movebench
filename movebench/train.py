@@ -5,10 +5,14 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Protocol
 
 import torch
 import torch.nn.functional as F
+
+
+class LogCallback(Protocol):
+    def __call__(self, metrics: dict[str, float], *, step: int) -> None: ...
 
 
 def _seed_everything(seed: int) -> None:
@@ -154,6 +158,7 @@ def fit_step_select(
     patience: int,
     seed: int,
     max_eval_steps: int | None = None,
+    log_callback: LogCallback | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
     _seed_everything(seed)
@@ -191,6 +196,9 @@ def fit_step_select(
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
+
+            if log_callback is not None:
+                log_callback({"loss/train": tr, "loss/test": va}, step=int(step))
 
             if va < best_val_nll:
                 best_val_nll = va
@@ -321,6 +329,7 @@ def fit_deepssf(
     patience: int,
     seed: int,
     max_eval_steps: int | None = None,
+    log_callback: LogCallback | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
     _seed_everything(seed)
@@ -395,6 +404,9 @@ def fit_deepssf(
 
             if PRINT:
                 print(history[-1])
+
+            if log_callback is not None:
+                log_callback({"loss/train": tr, "loss/test": va}, step=int(step))
 
             if va < best_val_nll:
                 best_val_nll = va
@@ -508,6 +520,7 @@ def fit_moveformer(
     patience: int,
     seed: int,
     max_eval_steps: int | None = None,
+    log_callback: LogCallback | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
     from movebench.lib.moveformer.geo_transformers.training_utils import LinearWarmupLR
@@ -587,6 +600,9 @@ def fit_moveformer(
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
+
+            if log_callback is not None:
+                log_callback({"loss/train": tr, "loss/test": va}, step=int(step))
 
             if va < best_val_nll:
                 best_val_nll = va

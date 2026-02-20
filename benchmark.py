@@ -2,7 +2,7 @@
 """YAML-driven benchmark runner for MoveBench baselines.
 
 Usage:
-  python benchmark.py --config configs/benchmarks/default.yaml
+  python benchmark.py --config configs/benchmarks/all.yaml
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--config",
         type=str,
-        default="configs/benchmarks/default.yaml",
+        default="configs/benchmarks/all.yaml",
         help="Benchmark YAML config path.",
     )
     p.add_argument(

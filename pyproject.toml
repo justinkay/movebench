@@ -31,6 +31,11 @@ apps = [
   "streamlit",
 ]
 
+# Optional: Weights & Biases experiment tracking/logging.
+wandb = [
+  "wandb>=0.16",
+]
+
 # MoveFormer baseline (vendored in movebench/lib/moveformer)
 moveformer = [
   "einops",

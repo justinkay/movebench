@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
 from movebench import Study
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
 from movebench.train import collate_step_select, eval_step_select, fit_step_select
+from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
 
 
 TOP_K_VALUES = (1, 5, 10, 25, 50)
@@ -75,6 +76,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
     p.add_argument("--setup-workers", type=int, default=16, help="Workers for download/extract setup steps.")
     p.add_argument("--seed", type=int, default=0, help="Random seed.")
+    p.add_argument("--wandb", dest="wandb", action="store_true", help="Enable Weights & Biases logging.")
+    p.add_argument("--no-wandb", dest="wandb", action="store_false", help="Disable Weights & Biases logging (default).")
+    p.set_defaults(wandb=False)
+    p.add_argument("--wandb-project", type=str, default=None, help="W&B project name (default: WANDB_PROJECT or 'movebench').")
+    p.add_argument("--wandb-entity", type=str, default=None, help="W&B entity/team (default: WANDB_ENTITY).")
+    p.add_argument(
+        "--wandb-mode",
+        type=str,
+        default=None,
+        choices=["online", "offline", "disabled"],
+        help="W&B mode (online/offline/disabled). Default: WANDB_MODE or online.",
+    )
     return p.parse_args()
 
 
@@ -190,6 +203,15 @@ def _ensure_study_ready(*, study: Study, config: str, setup_workers: int) -> Non
 def main() -> None:
     args = _parse_args()
     device = torch.device(str(args.device))
+    config_stem = Path(__file__).stem
+
+    wandb_cfg: dict[str, object] = {"enabled": bool(getattr(args, "wandb", False))}
+    if args.wandb_project:
+        wandb_cfg["project"] = str(args.wandb_project)
+    if args.wandb_entity:
+        wandb_cfg["entity"] = str(args.wandb_entity)
+    if args.wandb_mode:
+        wandb_cfg["mode"] = str(args.wandb_mode)
 
     subset_env_layers = (
         [s.strip() for s in str(args.subset_env_layers).split(",") if s.strip()]
@@ -256,33 +278,57 @@ def main() -> None:
 
         # Linear
         linear = LinearStepSelect(int(C))
-        linear_fit = fit_step_select(
-            linear,
-            train_loader,
-            test_loader,
-            device,
+        with maybe_wandb_benchmark_log_callback(
+            wandb_cfg,  # type: ignore[arg-type]
+            output_dir=out_dir,
+            study_id=str(study_id),
+            benchmark_name=str(config_stem),
+            method_name="issf_linear",
+            kind="issf_linear",
+            layers_config=str(args.config),
+            device=str(args.device),
             seed=int(args.seed),
-            **LINEAR_HPARAMS,
-        )
-        linear_train = eval_step_select(linear, train_loader, device, topk=TOP_K_VALUES)
-        linear_test = eval_step_select(linear, test_loader, device, topk=TOP_K_VALUES)
+        ) as log_callback:
+            linear_fit = fit_step_select(
+                linear,
+                train_loader,
+                test_loader,
+                device,
+                seed=int(args.seed),
+                log_callback=log_callback,
+                **LINEAR_HPARAMS,
+            )
+            linear_train = eval_step_select(linear, train_loader, device, topk=TOP_K_VALUES)
+            linear_test = eval_step_select(linear, test_loader, device, topk=TOP_K_VALUES)
 
         # MLP
         mlp = MLPStepSelect(int(C), hidden_dims=MLP_HPARAMS["hidden_dims"], dropout=MLP_HPARAMS["dropout"])
-        mlp_fit = fit_step_select(
-            mlp,
-            train_loader,
-            test_loader,
-            device,
+        with maybe_wandb_benchmark_log_callback(
+            wandb_cfg,  # type: ignore[arg-type]
+            output_dir=out_dir,
+            study_id=str(study_id),
+            benchmark_name=str(config_stem),
+            method_name="issf_mlp",
+            kind="issf_mlp",
+            layers_config=str(args.config),
+            device=str(args.device),
             seed=int(args.seed),
-            lr=float(MLP_HPARAMS["lr"]),
-            weight_decay=float(MLP_HPARAMS["weight_decay"]),
-            max_steps=int(MLP_HPARAMS["max_steps"]),
-            eval_interval=int(MLP_HPARAMS["eval_interval"]),
-            patience=int(MLP_HPARAMS["patience"]),
-        )
-        mlp_train = eval_step_select(mlp, train_loader, device, topk=TOP_K_VALUES)
-        mlp_test = eval_step_select(mlp, test_loader, device, topk=TOP_K_VALUES)
+        ) as log_callback:
+            mlp_fit = fit_step_select(
+                mlp,
+                train_loader,
+                test_loader,
+                device,
+                seed=int(args.seed),
+                lr=float(MLP_HPARAMS["lr"]),
+                weight_decay=float(MLP_HPARAMS["weight_decay"]),
+                max_steps=int(MLP_HPARAMS["max_steps"]),
+                eval_interval=int(MLP_HPARAMS["eval_interval"]),
+                patience=int(MLP_HPARAMS["patience"]),
+                log_callback=log_callback,
+            )
+            mlp_train = eval_step_select(mlp, train_loader, device, topk=TOP_K_VALUES)
+            mlp_test = eval_step_select(mlp, test_loader, device, topk=TOP_K_VALUES)
 
         results[study_id] = {
             "config": str(args.config),

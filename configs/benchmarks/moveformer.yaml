@@ -9,6 +9,13 @@ version: 1
 layers_config: configs/layers_all.yaml
 output_dir: results/benchmarks
 
+# Optional W&B logging (disabled by default).
+wandb:
+  enabled: true
+  project: movebench
+  # entity: your-team
+  mode: online  # or offline
+
 runtime:
   device: cuda
   seed: 42

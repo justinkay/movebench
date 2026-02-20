@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
+
 
 TOP_K_VALUES = (1, 5, 10, 25, 50)
 
@@ -145,6 +147,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
             raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
 
         methods_out.append({"name": name, "kind": kind, "model": model_cfg, "hparams": hparams})
+
+    wandb_cfg = cfg.get("wandb", None)
+    if wandb_cfg is not None:
+        if not isinstance(wandb_cfg, dict):
+            raise ValueError("Benchmark config `wandb` must be a mapping/dict when provided.")
+        if "enabled" in wandb_cfg and not isinstance(wandb_cfg["enabled"], bool):
+            raise ValueError("wandb.enabled must be a boolean if provided.")
+        if "tags" in wandb_cfg and wandb_cfg["tags"] is not None and not isinstance(wandb_cfg["tags"], list):
+            raise ValueError("wandb.tags must be a list of strings if provided.")
 
     cfg["methods"] = methods_out
     return cfg
@@ -336,7 +347,15 @@ def _resolve_max_eval_steps(cfg: dict[str, Any]) -> int | None:
     return int(max_eval)
 
 
-def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, model_kind: str) -> dict[str, Any]:
+def _run_issf(
+    *,
+    study,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    model_kind: str,
+    log_callback: Any | None = None,
+) -> dict[str, Any]:
     from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
     from movebench.train import collate_step_select, eval_step_select, fit_step_select
 
@@ -401,6 +420,7 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
         max_eval_steps=max_eval_steps,
+        log_callback=log_callback,
     )
 
     # Save the best checkpoint (fit_step_select restores the best weights before returning).
@@ -440,15 +460,41 @@ def _run_issf(*, study, cfg: dict[str, Any], method: dict[str, Any], device, mod
     }
 
 
-def run_issf_linear(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
-    return _run_issf(study=study, cfg=cfg, method=method, device=device, model_kind="linear")
+def run_issf_linear(
+    *, study, cfg: dict[str, Any], method: dict[str, Any], device, log_callback: Any | None = None
+) -> dict[str, Any]:
+    return _run_issf(
+        study=study,
+        cfg=cfg,
+        method=method,
+        device=device,
+        model_kind="linear",
+        log_callback=log_callback,
+    )
 
 
-def run_issf_mlp(*, study, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
-    return _run_issf(study=study, cfg=cfg, method=method, device=device, model_kind="mlp")
+def run_issf_mlp(
+    *, study, cfg: dict[str, Any], method: dict[str, Any], device, log_callback: Any | None = None
+) -> dict[str, Any]:
+    return _run_issf(
+        study=study,
+        cfg=cfg,
+        method=method,
+        device=device,
+        model_kind="mlp",
+        log_callback=log_callback,
+    )
 
 
-def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+def run_deepssf(
+    *,
+    study,
+    sampler_hash: str,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    log_callback: Any | None = None,
+) -> dict[str, Any]:
     from movebench.models.deepssf import DeepSSF
     from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
 
@@ -563,6 +609,7 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
         max_eval_steps=max_eval_steps,
+        log_callback=log_callback,
     )
 
     # Save the best checkpoint (fit_deepssf restores the best weights before returning).
@@ -604,7 +651,15 @@ def run_deepssf(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[s
     }
 
 
-def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device) -> dict[str, Any]:
+def run_moveformer(
+    *,
+    study,
+    sampler_hash: str,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    log_callback: Any | None = None,
+) -> dict[str, Any]:
     from movebench.models.moveformer import build_moveformer_selection_model
     from movebench.models.ssf import random_baseline_metrics
     from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
@@ -670,6 +725,7 @@ def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dic
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
         max_eval_steps=max_eval_steps,
+        log_callback=log_callback,
     )
 
     # Save the best checkpoint (fit_moveformer restores the best weights before returning).
@@ -710,15 +766,38 @@ def run_moveformer(*, study, sampler_hash: str, cfg: dict[str, Any], method: dic
     }
 
 
-def run_method(*, kind: str, study, sampler_hash: str, cfg: dict[str, Any], method: dict[str, Any], device):
+def run_method(
+    *,
+    kind: str,
+    study,
+    sampler_hash: str,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    log_callback: Any | None = None,
+):
     if kind == "issf_linear":
-        return run_issf_linear(study=study, cfg=cfg, method=method, device=device)
+        return run_issf_linear(study=study, cfg=cfg, method=method, device=device, log_callback=log_callback)
     if kind == "issf_mlp":
-        return run_issf_mlp(study=study, cfg=cfg, method=method, device=device)
+        return run_issf_mlp(study=study, cfg=cfg, method=method, device=device, log_callback=log_callback)
     if kind == "deepssf":
-        return run_deepssf(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
+        return run_deepssf(
+            study=study,
+            sampler_hash=sampler_hash,
+            cfg=cfg,
+            method=method,
+            device=device,
+            log_callback=log_callback,
+        )
     if kind == "moveformer":
-        return run_moveformer(study=study, sampler_hash=sampler_hash, cfg=cfg, method=method, device=device)
+        return run_moveformer(
+            study=study,
+            sampler_hash=sampler_hash,
+            cfg=cfg,
+            method=method,
+            device=device,
+            log_callback=log_callback,
+        )
     raise ValueError(f"Unknown kind={kind!r}")
 
 
@@ -817,6 +896,9 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_results_path = out_dir / "raw_results.json"
 
+    wandb_cfg = cfg.get("wandb", None)
+    config_stem = str(Path(str(config_path)).stem)
+
     device = torch.device(str(cfg["runtime"]["device"]))
 
     results: dict[str, dict[str, Any]] = {}
@@ -845,22 +927,35 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
 
         study_results: dict[str, Any] = dict(existing_study)
         for method in cfg["methods"]:
-            name = str(method["name"])
-            if resume and _is_complete(study_results.get(name)):
-                print(f"[{study_id}] {name} exists; skipping (--resume)")
+            method_name = str(method["name"])
+            if resume and _is_complete(study_results.get(method_name)):
+                print(f"[{study_id}] {method_name} exists; skipping (--resume)")
                 continue
             kind = str(method["kind"])
-            study_results[name] = run_method(
-                kind=kind,
-                study=study,
-                sampler_hash=str(sampler_hash),
-                cfg=cfg,
-                method=method,
-                device=device,
-            )
+
+            with maybe_wandb_benchmark_log_callback(
+                wandb_cfg,
+                output_dir=out_dir,
+                study_id=str(study_id),
+                benchmark_name=str(config_stem),
+                method_name=str(method_name),
+                kind=str(kind),
+                layers_config=str(cfg["layers_config"]),
+                device=str(cfg["runtime"]["device"]),
+                seed=int(cfg["runtime"]["seed"]),
+            ) as log_callback:
+                study_results[method_name] = run_method(
+                    kind=kind,
+                    study=study,
+                    sampler_hash=str(sampler_hash),
+                    cfg=cfg,
+                    method=method,
+                    device=device,
+                    log_callback=log_callback,
+                )
             results[study_id] = study_results
             raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
-            print(f"[{study_id}] {name} done")
+            print(f"[{study_id}] {method_name} done")
 
         results[study_id] = study_results
         write_outputs(results=results, out_dir=out_dir, cfg=cfg)
