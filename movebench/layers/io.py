@@ -311,8 +311,10 @@ class LayerIO:
             from rasterio.transform import from_bounds
 
             min_lon, min_lat, max_lon, max_lat = bounds_latlon
-            transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 1, 1)
-            arr = np.full((len(band_ids), 1, 1), np.nan, dtype=np.float32)
+            # Some derived layers (e.g. slope/aspect) require >=2 pixels to run
+            # numerical gradients without crashing.
+            transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 2, 2)
+            arr = np.full((len(band_ids), 2, 2), np.nan, dtype=np.float32)
             return Raster(
                 array=arr,
                 transform=transform,
