@@ -80,20 +80,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory for Slurm stdout/stderr logs (default: results/slurm/extract_points/<config_stem>/).",
     )
-    p.add_argument("--partition", type=str, default=None, help="Slurm partition (-p).")
-    p.add_argument("--qos", type=str, default=None, help="Slurm QoS (-q).")
-    p.add_argument("--time", type=str, default="1-00:00:00", help="Slurm time limit (-t), e.g. '1-00:00:00'.")
-    p.add_argument("--mem", type=str, default="64G", help="Slurm memory request, e.g. '64G'.")
+    p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
+    p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
+    p.add_argument("--time", type=str, default="7-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
+    p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
     p.add_argument(
         "--cpus-per-task",
         type=int,
-        default=None,
-        help="Slurm CPUs per task (--cpus-per-task). Default: runtime.setup_workers from config.",
+        default=16,
+        help="Slurm CPUs per task (--cpus-per-task).",
     )
     p.add_argument(
         "--gpus-per-node",
         type=int,
-        default=0,
+        default=1,
         help="Slurm GPUs per node (--gpus-per-node). Only passed if > 0.",
     )
     p.add_argument("--dry-run", action="store_true", help="Print actions/commands but do not submit jobs.")
