@@ -806,6 +806,8 @@ def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dic
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+    if not results:
+        return
 
     issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
     deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
@@ -908,6 +910,8 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
             raise ValueError(f"Expected raw_results.json to contain a dict; got {type(loaded).__name__}")
         results = loaded  # type: ignore[assignment]
 
+    skipped_studies: list[tuple[str, str]] = []
+
     for study_id in studies:
         existing_study = results.get(study_id, {})
         if not isinstance(existing_study, dict):
@@ -922,8 +926,21 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
                 print(f"[{study_id}] all methods already present; skipping (--resume)")
                 continue
 
-        study = Study(study_id)
-        sampler_hash = ensure_study_ready(study=study, cfg=cfg)
+        try:
+            study = Study(study_id)
+        except FileNotFoundError as e:
+            msg = f"missing study files: {e}"
+            skipped_studies.append((str(study_id), msg))
+            print(f"[{study_id}] WARNING: {msg} (skipping)", flush=True)
+            continue
+
+        try:
+            sampler_hash = ensure_study_ready(study=study, cfg=cfg)
+        except (FileNotFoundError, ValueError) as e:
+            msg = f"study setup failed: {type(e).__name__}: {e}"
+            skipped_studies.append((str(study_id), msg))
+            print(f"[{study_id}] WARNING: {msg} (skipping)", flush=True)
+            continue
 
         study_results: dict[str, Any] = dict(existing_study)
         for method in cfg["methods"]:
@@ -935,26 +952,32 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
 
             print(f"Running {study_id} {method_name}")
 
-            with maybe_wandb_benchmark_log_callback(
-                wandb_cfg,
-                output_dir=out_dir,
-                study_id=str(study_id),
-                benchmark_name=str(config_stem),
-                method_name=str(method_name),
-                kind=str(kind),
-                layers_config=str(cfg["layers_config"]),
-                device=str(cfg["runtime"]["device"]),
-                seed=int(cfg["runtime"]["seed"]),
-            ) as log_callback:
-                study_results[method_name] = run_method(
-                    kind=kind,
-                    study=study,
-                    sampler_hash=str(sampler_hash),
-                    cfg=cfg,
-                    method=method,
-                    device=device,
-                    log_callback=log_callback,
-                )
+            try:
+                with maybe_wandb_benchmark_log_callback(
+                    wandb_cfg,
+                    output_dir=out_dir,
+                    study_id=str(study_id),
+                    benchmark_name=str(config_stem),
+                    method_name=str(method_name),
+                    kind=str(kind),
+                    layers_config=str(cfg["layers_config"]),
+                    device=str(cfg["runtime"]["device"]),
+                    seed=int(cfg["runtime"]["seed"]),
+                ) as log_callback:
+                    study_results[method_name] = run_method(
+                        kind=kind,
+                        study=study,
+                        sampler_hash=str(sampler_hash),
+                        cfg=cfg,
+                        method=method,
+                        device=device,
+                        log_callback=log_callback,
+                    )
+            except (FileNotFoundError, ValueError) as e:
+                msg = f"{method_name} failed: {type(e).__name__}: {e}"
+                skipped_studies.append((str(study_id), msg))
+                print(f"[{study_id}] WARNING: {msg} (skipping method)", flush=True)
+                continue
             results[study_id] = study_results
             raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
             print(f"[{study_id}] {method_name} done")
@@ -963,3 +986,5 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
         write_outputs(results=results, out_dir=out_dir, cfg=cfg)
 
     write_outputs(results=results, out_dir=out_dir, cfg=cfg)
+    if skipped_studies:
+        print(f"WARNING: skipped {len(skipped_studies)} study/method runs due to errors.", flush=True)

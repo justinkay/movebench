@@ -106,7 +106,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
     p.add_argument("--time", type=str, default="7-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
     p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
-    p.add_argument("--cpus-per-task", type=int, default=16, help="Slurm CPUs per task (--cpus-per-task).")
+    p.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=None,
+        help="Slurm CPUs per task (--cpus-per-task). Default: use --build-workers if set, else 16.",
+    )
     p.add_argument(
         "--gpus-per-node",
         type=int,
@@ -207,20 +212,28 @@ def _resolve_cache_params(args: argparse.Namespace, cfg: dict[str, Any]) -> _Cac
         raise ValueError("Benchmark config datasets.deepssf must be a mapping/dict.")
     cache_cfg = dcfg.get("cache", {}) if isinstance(dcfg.get("cache", {}), dict) else {}
 
+    def cache_get(key: str) -> Any | None:
+        if key in cache_cfg:
+            return cache_cfg.get(key)
+        alt = str(key).replace("_", "-")
+        return cache_cfg.get(alt)
+
     def pick_int(name: str, default: int) -> int:
         v = getattr(args, name)
         if v is not None:
             return int(v)
-        if name in cache_cfg and cache_cfg[name] is not None:
-            return int(cache_cfg[name])
+        v2 = cache_get(name)
+        if v2 is not None:
+            return int(v2)
         return int(default)
 
     def pick_str(name: str, default: str) -> str:
         v = getattr(args, name)
         if v is not None:
             return str(v)
-        if name in cache_cfg and cache_cfg[name] is not None:
-            return str(cache_cfg[name])
+        v2 = cache_get(name)
+        if v2 is not None:
+            return str(v2)
         return str(default)
 
     runtime = cfg.get("runtime", {}) if isinstance(cfg.get("runtime", {}), dict) else {}
@@ -346,6 +359,7 @@ def _build_srun_cmd(
     splits: list[str],
     log_dir: Path,
     cache_params: _CacheParams,
+    cpus_per_task: int,
 ) -> list[str]:
     script_path = Path(__file__).resolve()
 
@@ -364,7 +378,7 @@ def _build_srun_cmd(
         cmd.extend(["-t", str(args.time)])
     if args.mem:
         cmd.append(f"--mem={args.mem}")
-    cmd.extend(["--cpus-per-task", str(int(args.cpus_per_task))])
+    cmd.extend(["--cpus-per-task", str(int(cpus_per_task))])
     if int(getattr(args, "gpus_per_node", 0)) > 0:
         cmd.extend(["--gpus-per-node", str(int(args.gpus_per_node))])
     cmd.extend(["--output", str(out_path), "--error", str(err_path)])
@@ -470,6 +484,11 @@ def _launcher(args: argparse.Namespace) -> int:
     plan = _resolve_layer_plan(layers_config)
     issf_sampler = _issf_sampler_params(cfg)
     cache_params = _resolve_cache_params(args, cfg)
+    cpus_per_task = (
+        int(args.cpus_per_task)
+        if args.cpus_per_task is not None
+        else (int(cache_params.build_workers) if int(cache_params.build_workers) > 0 else 16)
+    )
 
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
@@ -543,6 +562,7 @@ def _launcher(args: argparse.Namespace) -> int:
                     splits=list(args.splits),
                     log_dir=log_dir,
                     cache_params=cache_params,
+                    cpus_per_task=cpus_per_task,
                 )
                 print("[wds] ", shlex.join(cmd), flush=True)
             if len(queue) > 10:
@@ -573,6 +593,7 @@ def _launcher(args: argparse.Namespace) -> int:
             splits=list(args.splits),
             log_dir=log_dir,
             cache_params=cache_params,
+            cpus_per_task=cpus_per_task,
         )
         print(f"[wds] Launching study={study_id}: {shlex.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd, cwd=str(_REPO_ROOT))
