@@ -352,6 +352,7 @@ def _cmd_build(args: argparse.Namespace) -> None:
                 build_workers=int(args.build_workers),
                 build_if_missing=True,
                 overwrite=bool(args.overwrite),
+                resume=bool(args.resume),
             )
             print(f"[{study_id}::{split}] ready: {out_dir}")
 
@@ -395,6 +396,7 @@ def _cmd_bench(args: argparse.Namespace) -> None:
         seed=int(args.seed),
         build_workers=int(args.build_workers),
         build_if_missing=True,
+        resume=bool(args.resume),
     )
 
     baseline_ds = study.deepssf_dataset(
@@ -571,6 +573,7 @@ def _parse_args() -> argparse.Namespace:
     b.add_argument("--compression", type=str, default="none", choices=("none", "gz"))
     b.add_argument("--build-workers", type=int, default=0, help="DataLoader workers used while building the cache.")
     b.add_argument("--overwrite", action="store_true", help="Overwrite existing caches.")
+    b.add_argument("--resume", action="store_true", help="Resume partially-built caches (missing manifest).")
     b.add_argument("--seed", type=int, default=0)
     b.set_defaults(func=_cmd_build)
 
@@ -584,6 +587,7 @@ def _parse_args() -> argparse.Namespace:
     q.add_argument("--target-dtype", type=str, default="uint8", choices=("uint8", "float16", "float32"))
     q.add_argument("--compression", type=str, default="none", choices=("none", "gz"))
     q.add_argument("--build-workers", type=int, default=0)
+    q.add_argument("--resume", action="store_true", help="Resume partially-built caches (missing manifest).")
     q.add_argument("--device", type=str, default="cpu")
     q.add_argument("--batch-size", type=int, default=32)
     q.add_argument("--num-workers", type=int, default=0)

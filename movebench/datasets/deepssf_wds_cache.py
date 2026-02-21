@@ -24,6 +24,8 @@ import hashlib
 import json
 import math
 import random
+import tarfile
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -117,19 +119,27 @@ def build_deepssf_wds_cache(
     seed: int = 0,
     num_workers: int = 0,
     overwrite: bool = False,
+    resume: bool = False,
     progress: bool = True,
 ) -> dict[str, Any]:
     """Build a WebDataset cache from a DeepSSFDataset-like dataset."""
     out_dir = Path(out_dir)
     shards_dir = out_dir / "shards"
     manifest_path = out_dir / "manifest.json"
+    resuming = bool(resume) and out_dir.exists() and not bool(overwrite)
 
     if out_dir.exists():
-        if not overwrite:
-            raise FileExistsError(f"Output dir exists (pass overwrite=True to replace): {out_dir}")
+        if not overwrite and not resume:
+            raise FileExistsError(
+                f"Output dir exists (pass overwrite=True to replace, or resume=True to continue): {out_dir}"
+            )
         import shutil
 
-        shutil.rmtree(out_dir)
+        if overwrite:
+            shutil.rmtree(out_dir)
+
+    if manifest_path.exists() and not overwrite:
+        return read_deepssf_wds_manifest(manifest_path)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     shards_dir.mkdir(parents=True, exist_ok=True)
@@ -160,6 +170,9 @@ def build_deepssf_wds_cache(
     if n <= 0:
         raise ValueError(f"Dataset is empty (len={n}); nothing to cache")
 
+    if int(samples_per_shard) <= 0:
+        raise ValueError(f"samples_per_shard must be > 0; got {samples_per_shard}")
+
     spatial_torch_dtype = torch.float16 if spatial_dtype == "float16" else torch.float32
     if target_dtype == "uint8":
         target_torch_dtype = torch.uint8
@@ -168,28 +181,105 @@ def build_deepssf_wds_cache(
     else:
         target_torch_dtype = torch.float32
 
+    def _resume_offset() -> int:
+        if not shards_dir.exists():
+            return 0
+        shard_paths = sorted([p for p in shards_dir.glob("shard-*.tar*") if p.is_file()])
+        if not shard_paths:
+            return 0
+
+        existing = 0
+        for i, p in enumerate(shard_paths):
+            pth_count = 0
+            try:
+                with tarfile.open(p, mode="r:*") as tf:
+                    for m in tf:
+                        if m.isfile() and str(m.name).endswith(".pth"):
+                            existing += 1
+                            pth_count += 1
+            except (tarfile.TarError, EOFError, OSError) as e:
+                if i != (len(shard_paths) - 1):
+                    raise RuntimeError(f"Corrupt shard found (not last): {p}") from e
+                warnings.warn(
+                    f"Last shard appears incomplete/corrupt; deleting and resuming: {p} ({e})",
+                    RuntimeWarning,
+                )
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+                break
+
+            # Empty trailing shard is usually just a leftover from a crash; remove it.
+            if pth_count == 0 and i == (len(shard_paths) - 1):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+
+        return int(existing)
+
+    start_idx = 0
+    if resuming:
+        start_idx = _resume_offset()
+        if start_idx < 0:
+            start_idx = 0
+        if start_idx > n:
+            raise RuntimeError(f"Cache already has {start_idx} samples but dataset has len={n}; rebuild with overwrite=True.")
+        if start_idx == n:
+            # Shards already contain the full dataset; just write the manifest.
+            env_channels = int(plan.num_channels())
+            H, W = output_hw
+            manifest: dict[str, Any] = {
+                "schema_version": _MANIFEST_SCHEMA_VERSION,
+                "payload_format": _PAYLOAD_FORMAT,
+                "cache_hash": str(out_dir.name),
+                "output_hw": [int(H), int(W)],
+                "pixel_size_m": float(pixel_size_m),
+                "env_channels": int(env_channels),
+                "num_samples": int(n),
+            }
+            write_deepssf_wds_manifest(manifest_path, manifest)
+            return dict(manifest)
+
     g = torch.Generator()
     g.manual_seed(int(seed))
+    perm = torch.randperm(n, generator=g)
+    remaining = perm[int(start_idx) :].tolist()
+    if not remaining:
+        raise RuntimeError("No remaining samples to write (resume offset consumed dataset).")
+
+    from torch.utils.data import Subset
+
+    subset = Subset(dataset, remaining)
     loader = DataLoader(
-        dataset,
+        subset,
         batch_size=1,
-        shuffle=True,
+        shuffle=False,
         num_workers=int(num_workers),
-        generator=g,
         collate_fn=lambda batch: batch[0],
         drop_last=False,
     )
 
     ext = ".tar.gz" if compression == "gz" else ".tar"
-    pattern = str(shards_dir / f"shard-%06d{ext}")
+    if resuming:
+        tag = 0
+        while any(shards_dir.glob(f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-*{ext}")):
+            tag += 1
+        pattern = str(shards_dir / f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-%06d{ext}")
+    else:
+        pattern = str(shards_dir / f"shard-%06d{ext}")
     sink = wds.ShardWriter(pattern, maxcount=int(samples_per_shard))
 
     it: Iterable[Any] = loader
     if progress:
-        it = tqdm(loader, total=n, desc=f"build_deepssf_wds_cache[{split}]", unit="samples")
+        total = int(n - int(start_idx))
+        prefix = "resume_" if int(start_idx) > 0 else ""
+        it = tqdm(loader, total=total, desc=f"{prefix}build_deepssf_wds_cache[{split}]", unit="samples")
 
     try:
-        for idx, (spatial, scalars, bearing, target) in enumerate(it):
+        for j, (spatial, scalars, bearing, target) in enumerate(it):
+            idx = int(start_idx) + int(j)
             spatial_t = spatial.detach().to(device="cpu", dtype=spatial_torch_dtype).contiguous()
             scalars_t = scalars.detach().to(device="cpu", dtype=torch.float32).contiguous()
             bearing_t = bearing.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -307,6 +397,7 @@ def ensure_deepssf_wds_cache_split(
     build_workers: int,
     build_if_missing: bool,
     overwrite: bool = False,
+    resume: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Ensure a deepSSF WebDataset cache exists for a study+split and return (cache_dir, manifest)."""
     split = str(split)
@@ -366,6 +457,7 @@ def ensure_deepssf_wds_cache_split(
             seed=int(seed),
             num_workers=int(build_workers),
             overwrite=True,
+            resume=bool(resume),
             progress=True,
         )
     elif not manifest_path.exists():
@@ -384,6 +476,7 @@ def ensure_deepssf_wds_cache_split(
             seed=int(seed),
             num_workers=int(build_workers),
             overwrite=False,
+            resume=bool(resume),
             progress=True,
         )
 
@@ -428,6 +521,8 @@ def make_deepssf_wds_train_test_loaders(
     shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
     seed = int(cache_cfg.get("seed", int(runtime_seed)))
     build_if_missing = bool(cache_cfg.get("build_if_missing", True))
+    resume = bool(cache_cfg.get("resume", False))
+    overwrite = bool(cache_cfg.get("overwrite", False))
 
     cache_dir_train, m_train = ensure_deepssf_wds_cache_split(
         study=study,
@@ -441,6 +536,8 @@ def make_deepssf_wds_train_test_loaders(
         seed=int(seed),
         build_workers=int(build_workers),
         build_if_missing=bool(build_if_missing),
+        overwrite=bool(overwrite),
+        resume=bool(resume),
     )
     cache_dir_test, m_test = ensure_deepssf_wds_cache_split(
         study=study,
@@ -454,6 +551,8 @@ def make_deepssf_wds_train_test_loaders(
         seed=int(seed),
         build_workers=int(build_workers),
         build_if_missing=bool(build_if_missing),
+        overwrite=bool(overwrite),
+        resume=bool(resume),
     )
 
     train_loader = make_deepssf_wds_loader(
