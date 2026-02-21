@@ -82,6 +82,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
     p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
+    p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
     p.add_argument("--time", type=str, default="7-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
     p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
     p.add_argument(
@@ -212,6 +213,8 @@ def _build_srun_cmd(
         cmd.extend(["-p", str(args.partition)])
     if args.qos:
         cmd.extend(["-q", str(args.qos)])
+    if args.account:
+        cmd.extend(["-A", str(args.account)])
     if args.time:
         cmd.extend(["-t", str(args.time)])
     if args.mem:
