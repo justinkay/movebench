@@ -454,6 +454,21 @@ class LayerIO:
         if not spec.hdf_path_suffix:
             raise ValueError(f"local_hdf layer {layer!r} missing spec.hdf_path_suffix")
 
+        def _missing_raster() -> Raster:
+            from rasterio.transform import from_bounds
+
+            min_lon, min_lat, max_lon, max_lat = bounds_latlon
+            transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 2, 2)
+            arr = np.full((len(spec.bands), 2, 2), np.nan, dtype=np.float32)
+            return Raster(
+                array=arr,
+                transform=transform,
+                crs="EPSG:4326",
+                nodata=float("nan"),
+                bounds=bounds_latlon,
+                band_ids=[f"{layer}.{b}" for b in spec.bands],
+            )
+
         year = _clamp_year(_year_from_timestamp(timestamp), spec.year_bounds)
         hvs = _modis_tiles_for_bounds(bounds_latlon)
 
@@ -463,8 +478,22 @@ class LayerIO:
         for h, v in hvs:
             hdf_path = idx.get_path(year, int(h), int(v))
             if hdf_path is None:
-                raise FileNotFoundError(f"No MODIS file for layer={layer!r} year={year} h={h} v={v}")
+                warnings.warn(
+                    f"Missing MODIS file for layer={layer!r} year={year} h={h} v={v}; proceeding with remaining tiles.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
             subdataset_paths.append(f"HDF4_EOS:EOS_GRID:{hdf_path}{spec.hdf_path_suffix}")
+
+        if not subdataset_paths:
+            warnings.warn(
+                f"NO MODIS files found for layer={layer!r} year={year} under {idx.base_dir}; "
+                "returning all-NaN raster (samples become invalid).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return _missing_raster()
 
         r = merge_hdf_window(tuple(subdataset_paths), bounds_latlon)
         return Raster(

@@ -209,13 +209,24 @@ def compute_points_normalization_stats(
 
     zero = (count == 0).nonzero(as_tuple=False).flatten().tolist()
     if zero:
-        bad_band_ids = [band_ids[normalize_idxs[i]] for i in zero]
-        raise ValueError(f"No valid points for normalized channel(s): {bad_band_ids}")
+        import warnings
 
-    mean = sum_ / count_f
-    var = sumsq / count_f - mean.square()
+        bad_band_ids = [band_ids[normalize_idxs[i]] for i in zero]
+        warnings.warn(
+            f"No valid points for normalized channel(s): {bad_band_ids}; using mean=0 and std=1.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    count_f_safe = count_f.clone()
+    count_f_safe[count_f_safe == 0] = 1.0
+    mean = sum_ / count_f_safe
+    var = sumsq / count_f_safe - mean.square()
     var = torch.clamp(var, min=0.0)
     std = torch.sqrt(var)
+    if zero:
+        mean[zero] = 0.0
+        std[zero] = 1.0
 
     band_stats: dict[str, dict[str, Any]] = {}
     for j, idx in enumerate(normalize_idxs):
