@@ -190,23 +190,29 @@ def build_deepssf_wds_cache(
 
         existing = 0
         for i, p in enumerate(shard_paths):
-            pth_count = 0
             try:
+                pth_count = 0
                 with tarfile.open(p, mode="r:*") as tf:
                     for m in tf:
                         if m.isfile() and str(m.name).endswith(".pth"):
-                            existing += 1
                             pth_count += 1
+                existing += int(pth_count)
             except (tarfile.TarError, EOFError, OSError) as e:
-                if i != (len(shard_paths) - 1):
-                    raise RuntimeError(f"Corrupt shard found (not last): {p}") from e
                 warnings.warn(
-                    f"Last shard appears incomplete/corrupt; deleting and resuming: {p} ({e})",
+                    f"Corrupt shard found; deleting and resuming from here: {p} ({e})",
                     RuntimeWarning,
                 )
                 try:
-                    p.unlink()
-                except FileNotFoundError:
+                    # Delete this shard and any that come after it. We can't safely
+                    # resume from later shards if there's a gap/corruption.
+                    for q in shard_paths[i:]:
+                        try:
+                            q.unlink()
+                        except FileNotFoundError:
+                            pass
+                except Exception:
+                    # Best-effort cleanup; resume will still proceed from the
+                    # last known-good offset.
                     pass
                 break
 
