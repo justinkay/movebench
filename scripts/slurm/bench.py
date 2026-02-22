@@ -526,6 +526,15 @@ def _launcher(args: argparse.Namespace) -> int:
 
     # Determine completion based on per-study JSON files.
     want_methods = [str(m["name"]) for m in cfg["methods"] if isinstance(m, dict) and "name" in m]
+    raw_results: dict[str, Any] = {}
+    raw_results_path = out_dir / "raw_results.json"
+    if not bool(args.overwrite) and raw_results_path.exists():
+        try:
+            loaded = _load_json(raw_results_path)
+            if isinstance(loaded, dict):
+                raw_results = dict(loaded)
+        except Exception:
+            raw_results = {}
     for study_id in studies:
         ok, _sampler_hash, reason = _check_prereqs(
             study_id=str(study_id),
@@ -544,14 +553,26 @@ def _launcher(args: argparse.Namespace) -> int:
 
         pth = _study_results_path(out_dir, str(study_id))
         if not pth.exists():
+            rr = raw_results.get(str(study_id))
+            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+                skipped.append(str(study_id))
+                continue
             queue.append(str(study_id))
             continue
         try:
             d = _load_json(pth)
         except Exception:
+            rr = raw_results.get(str(study_id))
+            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+                skipped.append(str(study_id))
+                continue
             queue.append(str(study_id))
             continue
         if not isinstance(d, dict):
+            rr = raw_results.get(str(study_id))
+            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+                skipped.append(str(study_id))
+                continue
             queue.append(str(study_id))
             continue
         if all(_method_complete(d.get(m)) for m in want_methods):
@@ -671,4 +692,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

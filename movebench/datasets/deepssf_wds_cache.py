@@ -348,6 +348,13 @@ def make_deepssf_wds_loader(
     if not urls:
         raise FileNotFoundError(f"No shards found under: {shards_dir}")
 
+    # WebDataset splits shards across DataLoader workers. If num_workers exceeds
+    # the number of shards, some workers would receive no shards and can error
+    # (or hang) depending on the loader pipeline. Cap workers to shards.
+    nw = int(num_workers or 0)
+    if nw > len(urls):
+        nw = int(len(urls))
+
     ds = wds.WebDataset(
         urls,
         shardshuffle=int(shardshuffle),
@@ -359,11 +366,11 @@ def make_deepssf_wds_loader(
     ds = ds.map(_decode_pth_sample)
 
     loader_kwargs: dict[str, Any] = {
-        "num_workers": int(num_workers),
+        "num_workers": int(nw),
         "batch_size": int(batch_size),
         "pin_memory": bool(pin_memory),
     }
-    if int(num_workers) > 0:
+    if int(nw) > 0:
         loader_kwargs["persistent_workers"] = bool(persistent_workers)
         if prefetch_factor is not None:
             loader_kwargs["prefetch_factor"] = int(prefetch_factor)

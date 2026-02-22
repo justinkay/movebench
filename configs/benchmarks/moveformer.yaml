@@ -13,7 +13,7 @@ output_dir: results/benchmarks
 wandb:
   enabled: true
   project: movebench
-  # entity: your-team
+  entity: justinkay
   mode: online  # or offline
 
 runtime:
