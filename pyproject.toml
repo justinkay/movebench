@@ -13,14 +13,13 @@ dependencies = [
   "earthengine-api",
   "numpy",
   "pandas",
-  "pyproj",
-  "rasterio",
   "requests",
   "scipy",
   "torch",
   "tqdm",
   "webdataset",
 ]
+# removed rasterio and pyproj - should be installed with conda
 
 [project.optional-dependencies]
 # Streamlit apps (trajectory viewer + review app)

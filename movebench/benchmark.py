@@ -801,85 +801,83 @@ def run_method(
     raise ValueError(f"Unknown kind={kind!r}")
 
 
-def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dict[str, Any]) -> None:
-    import pandas as pd
+# def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dict[str, Any]) -> None:
+#     import pandas as pd
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-    if not results:
-        return
+#     out_dir.mkdir(parents=True, exist_ok=True)
+#     (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
 
-    issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
-    deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
+#     issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
+#     deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
 
-    def _write_nll_csv(*, split: str, methods: list[str], prefix: str, random_key: str, random_label: str) -> None:
-        if not methods:
-            return
-        rows = []
-        for study_id, sr in results.items():
-            row: dict[str, Any] = {"study": study_id}
+#     def _write_nll_csv(*, split: str, methods: list[str], prefix: str, random_key: str, random_label: str) -> None:
+#         if not methods:
+#             return
+#         rows = []
+#         for study_id, sr in results.items():
+#             row: dict[str, Any] = {"study": study_id}
 
-            first = sr.get(methods[0], {})
-            r = first.get(random_key, {})
-            if isinstance(r, dict) and "nll" in r:
-                row[random_label] = float(r["nll"])
+#             first = sr.get(methods[0], {})
+#             r = first.get(random_key, {})
+#             if isinstance(r, dict) and "nll" in r:
+#                 row[random_label] = float(r["nll"])
 
-            for m in methods:
-                if m in sr and split in sr[m]:
-                    row[m] = float(sr[m][split]["nll"])
-            rows.append(row)
-        df = pd.DataFrame(rows).set_index("study")
-        df.to_csv(out_dir / f"{prefix}nll_{split}.csv")
+#             for m in methods:
+#                 if m in sr and split in sr[m]:
+#                     row[m] = float(sr[m][split]["nll"])
+#             rows.append(row)
+#         df = pd.DataFrame(rows).set_index("study")
+#         df.to_csv(out_dir / f"{prefix}nll_{split}.csv")
 
-    def _write_topk_csvs(
-        *,
-        split: str,
-        methods: list[str],
-        prefix: str,
-        random_key: str,
-        random_label: str,
-        topk: Sequence[int] = TOP_K_VALUES,
-    ) -> None:
-        if not methods:
-            return
-        for k in topk:
-            rows = []
-            for study_id, sr in results.items():
-                row: dict[str, Any] = {"study": study_id}
+#     def _write_topk_csvs(
+#         *,
+#         split: str,
+#         methods: list[str],
+#         prefix: str,
+#         random_key: str,
+#         random_label: str,
+#         topk: Sequence[int] = TOP_K_VALUES,
+#     ) -> None:
+#         if not methods:
+#             return
+#         for k in topk:
+#             rows = []
+#             for study_id, sr in results.items():
+#                 row: dict[str, Any] = {"study": study_id}
 
-                first = sr.get(methods[0], {})
-                r = first.get(random_key, {})
-                if isinstance(r, dict) and "topk" in r and int(k) in r["topk"]:
-                    row[random_label] = float(r["topk"][int(k)])
+#                 first = sr.get(methods[0], {})
+#                 r = first.get(random_key, {})
+#                 if isinstance(r, dict) and "topk" in r and int(k) in r["topk"]:
+#                     row[random_label] = float(r["topk"][int(k)])
 
-                for m in methods:
-                    if m in sr and split in sr[m]:
-                        row[m] = float(sr[m][split]["topk"][int(k)])
-                rows.append(row)
-            df = pd.DataFrame(rows).set_index("study")
-            df.to_csv(out_dir / f"{prefix}top{int(k)}_{split}.csv")
+#                 for m in methods:
+#                     if m in sr and split in sr[m]:
+#                         row[m] = float(sr[m][split]["topk"][int(k)])
+#                 rows.append(row)
+#             df = pd.DataFrame(rows).set_index("study")
+#             df.to_csv(out_dir / f"{prefix}top{int(k)}_{split}.csv")
 
-    _write_nll_csv(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-    _write_nll_csv(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-    _write_topk_csvs(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-    _write_topk_csvs(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
+#     _write_nll_csv(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
+#     _write_nll_csv(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
+#     _write_topk_csvs(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
+#     _write_topk_csvs(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
 
-    _write_nll_csv(split="train", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
-    _write_nll_csv(split="test", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
-    _write_topk_csvs(
-        split="train",
-        methods=deepssf_methods,
-        prefix="deepssf_",
-        random_key="random_grid",
-        random_label="RandomGrid",
-    )
-    _write_topk_csvs(
-        split="test",
-        methods=deepssf_methods,
-        prefix="deepssf_",
-        random_key="random_grid",
-        random_label="RandomGrid",
-    )
+#     _write_nll_csv(split="train", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
+#     _write_nll_csv(split="test", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
+#     _write_topk_csvs(
+#         split="train",
+#         methods=deepssf_methods,
+#         prefix="deepssf_",
+#         random_key="random_grid",
+#         random_label="RandomGrid",
+#     )
+#     _write_topk_csvs(
+#         split="test",
+#         methods=deepssf_methods,
+#         prefix="deepssf_",
+#         random_key="random_grid",
+#         random_label="RandomGrid",
+#     )
 
 
 def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, resume: bool = False) -> None:
@@ -983,8 +981,6 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
             print(f"[{study_id}] {method_name} done")
 
         results[study_id] = study_results
-        write_outputs(results=results, out_dir=out_dir, cfg=cfg)
+        # write_outputs(results=results, out_dir=out_dir, cfg=cfg)
 
-    write_outputs(results=results, out_dir=out_dir, cfg=cfg)
-    if skipped_studies:
-        print(f"WARNING: skipped {len(skipped_studies)} study/method runs due to errors.", flush=True)
+    # write_outputs(results=results, out_dir=out_dir, cfg=cfg)

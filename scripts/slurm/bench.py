@@ -94,7 +94,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
     p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
     p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
-    p.add_argument("--time", type=str, default="7-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
+    p.add_argument("--time", type=str, default="1-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
     p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
     p.add_argument("--cpus-per-task", type=int, default=16, help="Slurm CPUs per task (--cpus-per-task).")
     p.add_argument(
