@@ -10,6 +10,7 @@ single file with a small set of functions for:
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -23,6 +24,16 @@ from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
 
 
 TOP_K_VALUES = (1, 5, 10, 25, 50)
+
+
+def _collate_deepssf_subset(batch, *, subset_idxs: Sequence[int]):
+    from movebench.train import collate_deepssf
+
+    x1, x2, x3, y = collate_deepssf(batch)
+    import torch
+
+    idx = torch.as_tensor(list(subset_idxs), dtype=torch.long)
+    return x1.index_select(1, idx), x2, x3, y
 
 
 def _deep_update(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -499,6 +510,16 @@ def run_deepssf(
     from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
 
     dcfg = cfg["datasets"]["deepssf"]
+    subset_idxs = None
+    subset_band_ids = dcfg.get("subset_band_ids")
+    if subset_band_ids:
+        plan0 = study.layer_plan(str(cfg["layers_config"]))
+        band_ids = plan0.band_ids_in_order()
+        want = {str(x) for x in subset_band_ids}
+        missing = sorted(want - set(band_ids))
+        if missing:
+            raise ValueError(f"datasets.deepssf.subset_band_ids contains unknown band_id(s): {missing}")
+        subset_idxs = [i for i, bid in enumerate(band_ids) if bid in want]
 
     ds_kwargs_train: dict[str, Any] = {
         "split": "train",
@@ -557,10 +578,13 @@ def run_deepssf(
             **ds_kwargs_test,
         )
 
+        collate_fn = collate_deepssf
+        if subset_idxs is not None:
+            collate_fn = functools.partial(_collate_deepssf_subset, subset_idxs=subset_idxs)
         train_loader, test_loader = _make_loaders(
             ds_train=train_ds,
             ds_test=test_ds,
-            collate_fn=collate_deepssf,
+            collate_fn=collate_fn,
             batch_size=dcfg.get("batch_size", None),
             num_workers=dcfg.get("num_workers", None),
         )
@@ -685,6 +709,8 @@ def run_moveformer(
         ds_kwargs["normalize_env"] = bool(dcfg["normalize_env"])
     if "require_normalization_stats" in dcfg:
         ds_kwargs["require_normalization_stats"] = bool(dcfg["require_normalization_stats"])
+    if "subset_band_ids" in dcfg:
+        ds_kwargs["subset_band_ids"] = dcfg["subset_band_ids"]
 
     train_ds = study.moveformer_dataset(split="train", **ds_kwargs)
     test_ds = study.moveformer_dataset(split="test", **ds_kwargs)

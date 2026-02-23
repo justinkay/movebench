@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from movebench.datasets.ssf import _subset_plan_env_channels
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import select_point_store_dir
 from movebench.layers.plan import LayerPlan
@@ -151,6 +152,7 @@ class MoveFormerPointStoreDataset(Dataset):
         min_len: int = 2,
         normalize_env: bool = True,
         require_normalization_stats: bool = False,
+        subset_band_ids: list[str] | None = None,
         num_candidates: int | None = None,
         random_seed: int | None = None,
         step_multiplier: float | None = None,
@@ -202,6 +204,12 @@ class MoveFormerPointStoreDataset(Dataset):
                 "Expected step_length_m shape (N,P) matching env; "
                 f"got step_length_m={tuple(self.step_length_m.shape)} env={tuple(self.env.shape)}"
             )
+
+        idxs, view_plan = _subset_plan_env_channels(self.plan, subset_env_layers=None, subset_band_ids=subset_band_ids)
+        if len(idxs) != int(self.plan.num_channels()):
+            self.env = self.env[:, idxs, :]
+            self.valid = self.valid[:, idxs, :]
+            self.plan = view_plan
 
         self.num_candidates_total = int(self.env.shape[2])
         if self.num_candidates_total <= 1:
