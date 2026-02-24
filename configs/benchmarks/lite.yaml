@@ -3,12 +3,11 @@ version: 1
 layers_config: configs/layers_all.yaml
 output_dir: results/benchmarks_lite
 
-# Optional W&B logging (disabled by default).
 wandb:
   enabled: true
   project: movebench
-  # entity: your-team
-  mode: online  # or offline
+  entity: justinkay
+  mode: online
 
 runtime:
   device: cuda
@@ -19,7 +18,7 @@ runtime:
 datasets:
   issf:
     batch_size: 32
-    num_workers: 32
+    num_workers: 16
     normalize: true
     include_time: true
     subset_band_ids: ["modis_vi.NDVI", "dem.elevation"]
@@ -33,7 +32,7 @@ datasets:
 
   deepssf:
     batch_size: 32
-    num_workers: 32
+    num_workers: 16
     output_hw: [101, 101]
     normalize: true
     step_multiplier: 2.0
@@ -51,7 +50,7 @@ datasets:
     subset_band_ids: ["modis_vi.NDVI", "dem.elevation"]
 
 methods:
-  - name: issf_linear
+  - name: issf_linear_lite
     kind: issf_linear
     hparams:
       lr: 0.01
@@ -60,7 +59,7 @@ methods:
       eval_every_epochs: 1
       patience_epochs: 5
 
-  - name: issf_mlp
+  - name: issf_mlp_lite
     kind: issf_mlp
     model:
       hidden_dims: [128]
@@ -72,7 +71,7 @@ methods:
       eval_every_epochs: 1
       patience_epochs: 5
 
-  - name: deepssf
+  - name: deepssf_lite
     kind: deepssf
     model:
       image_dim: 101
@@ -84,7 +83,7 @@ methods:
       eval_every_epochs: 1
       patience_epochs: 5
 
-  - name: moveformer
+  - name: moveformer_lite
     kind: moveformer
     hparams:
       lr: 0.00005

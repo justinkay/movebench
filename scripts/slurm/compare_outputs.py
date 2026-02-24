@@ -86,11 +86,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Sampling params (defaults match the notebook).
     p.add_argument("--issf-surface-num-candidates", type=int, default=10_000)
-    p.add_argument("--issf-surface-num-samples", type=int, default=1_000)
+    p.add_argument("--issf-surface-num-samples", type=int, default=500)
     p.add_argument("--deepssf-surface-num-samples", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-workers", type=int, default=8, help="Max workers for threaded iSSF extraction/scoring.")
-    p.add_argument("--max-steps", type=int, default=None, help="Optional cap on number of steps (debug).")
+    p.add_argument("--max-steps", type=int, default=2500, help="Optional cap on number of steps (debug).")
     p.add_argument("--device", type=str, default=None, help="Override torch device (e.g. 'cuda' or 'cpu').")
     p.add_argument("--skip-energy", action="store_true", help="Skip energy-score computation (faster).")
 
@@ -583,6 +583,10 @@ def _worker(args: argparse.Namespace) -> int:
     idxs = list(range(n_steps))
     if args.max_steps is not None:
         idxs = idxs[: max(0, int(args.max_steps))]
+    else:
+        k = min(int(args.max_steps), n)
+        rng = np.random.default_rng(0)
+        idxs = sorted(int(x) for x in rng.choice(n, size=k, replace=False).tolist())
 
     # Truth dx/dy in meters.
     to_m = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
