@@ -1127,7 +1127,14 @@ def download_tile_layer(
                 "failed": int(len(errors_out)),
             }
 
-            for tile_index, region, bounds_latlon in zip(tile_indices, tile_regions, tile_bounds_latlon):
+            from tqdm import tqdm
+
+            for tile_index, region, bounds_latlon in tqdm(
+                zip(tile_indices, tile_regions, tile_bounds_latlon),
+                total=len(tile_indices),
+                desc=f"Downloading tiles ({layer} {int(year)})",
+                unit="tile",
+            ):
                 out_path = tile_dir / f"tile_{int(tile_index):03d}_{int(year)}.tif"
                 tile_meta = {
                     "file": out_path.name,
@@ -1208,7 +1215,14 @@ def download_tile_layer(
     ]
     stats = {"total": int(n_tiles_reported), "downloaded": 0, "existing": 0, "failed": int(len(errors_out))}
 
-    for tile_index, region, bounds_latlon in zip(tile_indices, tile_regions, tile_bounds_latlon):
+    from tqdm import tqdm
+
+    for tile_index, region, bounds_latlon in tqdm(
+        zip(tile_indices, tile_regions, tile_bounds_latlon),
+        total=len(tile_indices),
+        desc=f"Downloading tiles ({layer})",
+        unit="tile",
+    ):
         out_path = tile_dir / f"tile_{int(tile_index):03d}.tif"
 
         tile_meta = {

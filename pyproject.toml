@@ -21,6 +21,9 @@ dependencies = [
 ]
 # removed rasterio and pyproj - should be installed with conda
 
+[project.scripts]
+movebench = "movebench.cli.main:main"
+
 [project.optional-dependencies]
 # Streamlit apps (trajectory viewer + review app)
 apps = [
@@ -47,4 +50,4 @@ moveformer = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["movebench",]
+include = ["movebench*"]

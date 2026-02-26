@@ -1,0 +1,1 @@
+"""MoveBench command line interface."""

@@ -55,7 +55,7 @@ python scripts/download_study.py <study_id> --config configs/layers_all.yaml
 Download GEE rasters for all studies present under the studies root:
 
 ```bash
-python scripts/download_all_rasters.py --config configs/layers_all.yaml
+movebench download --config configs/layers_all.yaml
 ```
 
 ## Example notebook
