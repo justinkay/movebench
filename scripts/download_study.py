@@ -35,12 +35,6 @@ def main(argv: list[str]) -> int:
         help="Do not skip existing rasters on disk.",
     )
     parser.add_argument(
-        "--px-per-side",
-        type=int,
-        default=500,
-        help="Tile download grid pixel size per side (default: 500).",
-    )
-    parser.add_argument(
         "--data-root",
         default=None,
         help="Override MOVEBENCH_DATA_ROOT for this run.",
@@ -77,7 +71,6 @@ def main(argv: list[str]) -> int:
         splits=args.splits,
         n_workers=int(args.n_workers),
         skip_existing=not bool(args.no_skip_existing),
-        px_per_side=int(args.px_per_side),
     )
 
     print(json.dumps(result, indent=2, sort_keys=True))

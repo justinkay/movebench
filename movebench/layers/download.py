@@ -3,7 +3,9 @@
 This module writes rasters to the on-disk layout expected by `movebench.layers.io.LayerIO`:
 
 - Chips (per-point): `study_dir/rasters/<rasters_hash>/chips/<chip_group>/<point_id:05d>.tif`
-- Tiles (per-study): `study_dir/rasters/<rasters_hash>/tiles/<layer>/tile_XXX.tif` + `index.json`
+- Tiles (per-study):
+  - Static: `study_dir/rasters/<rasters_hash>/tiles/<layer>/tile_XXX.tif` + `index.json`
+  - Annual: `study_dir/rasters/<rasters_hash>/tiles/<layer>/tile_XXX_<year>.tif` + `index_<year>.json` (also writes `index.json`)
 
 All masked pixels are materialized as the numeric sentinel `-9999` in GeoTIFFs.
 `LayerIO` converts this sentinel to NaN immediately after reading.
@@ -12,6 +14,7 @@ All masked pixels are materialized as the numeric sentinel `-9999` in GeoTIFFs.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import multiprocessing as mp
 import requests
@@ -38,15 +41,7 @@ POINT_ID_COL = "point_id"
 
 
 # Train/test region multipliers used when constructing chip regions.
-REGION_MULTIPLIER: dict[str, float] = {
-    "train": 1.0,
-    "test": 1.0,
-}
-
-
-# Chip-scale constraints 
-MIN_PIXELS = 3
-MAX_PIXELS = 100
+# These values are configured via `raster_params.region_multiplier` in the layers YAML.
 
 
 GEE_NODATA_SENTINEL = -9999.0
@@ -75,8 +70,8 @@ def compute_group_scale(
     buffer_km: float,
     native_scale_m: float,
     *,
-    min_pixels: int = MIN_PIXELS,
-    max_pixels: int = MAX_PIXELS,
+    min_pixels: int,
+    max_pixels: int,
 ) -> float:
     """Compute meters/pixel scale, clamped so chips are not too big/small."""
     if buffer_km <= 0:
@@ -104,15 +99,29 @@ def download_tiff(url: str, out_path: Path, *, tries: int = 5) -> None:
 
     delay_s = 2.0
     for attempt in range(tries):
+        tmp_path: Path | None = None
         try:
             r = requests.get(url, stream=True, timeout=300)
             r.raise_for_status()
-            with open(out_path, "wb") as f:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                delete=False,
+                dir=str(out_path.parent),
+                prefix=f"{out_path.name}.",
+                suffix=".tmp",
+            ) as tmp:
+                tmp_path = Path(tmp.name)
                 for chunk in r.iter_content(1 << 20):
                     if chunk:
-                        f.write(chunk)
+                        tmp.write(chunk)
+            tmp_path.replace(out_path)
             return
         except requests.RequestException:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
             if attempt == tries - 1:
                 raise
             time.sleep(delay_s)
@@ -257,17 +266,29 @@ def build_chip_group_image(
     return ee.Image(img).unmask(GEE_NODATA_SENTINEL).toFloat()
 
 
-def download_tiled_image(img, region, *, scale: float, out_path: Path, num_bands: int, crs: str = "EPSG:4326") -> None:
+def download_tiled_image(
+    img,
+    region,
+    *,
+    scale: float,
+    out_path: Path,
+    num_bands: int,
+    crs: str = "EPSG:4326",
+    bounds_latlon: tuple[float, float, float, float] | None = None,
+) -> None:
     """Download an ee.Image, tiling if needed, and write GeoTIFF to out_path."""
     ee = ensure_ee_initialized()
 
-    # Get region bounds.
-    bounds_info = region.bounds().getInfo()
-    coords = bounds_info["coordinates"][0]
-    min_lon = min(c[0] for c in coords)
-    max_lon = max(c[0] for c in coords)
-    min_lat = min(c[1] for c in coords)
-    max_lat = max(c[1] for c in coords)
+    if bounds_latlon is None:
+        # Get region bounds.
+        bounds_info = region.bounds().getInfo()
+        coords = bounds_info["coordinates"][0]
+        min_lon = min(c[0] for c in coords)
+        max_lon = max(c[0] for c in coords)
+        min_lat = min(c[1] for c in coords)
+        max_lat = max(c[1] for c in coords)
+    else:
+        min_lon, min_lat, max_lon, max_lat = (float(x) for x in bounds_latlon)
 
     # Estimate size (rough).
     center_lat = (min_lat + max_lat) / 2.0
@@ -359,7 +380,7 @@ def download_tiled_image(img, region, *, scale: float, out_path: Path, num_bands
                 ds.close()
 
 
-def _tile_image(layer: str, *, registry: LayerRegistry):
+def _tile_image(layer: str, *, registry: LayerRegistry, year: int | None = None):
     """Build an ee.Image for a gee_tile layer."""
     ee = ensure_ee_initialized()
     spec = registry.get(layer)
@@ -367,6 +388,18 @@ def _tile_image(layer: str, *, registry: LayerRegistry):
     if layer == "dem":
         # COPERNICUS/DEM/GLO30 uses band "DEM"; we export one band.
         return ee.ImageCollection(spec.gee_collection).mosaic().select("DEM").toFloat()
+
+    if layer == "alphaearth_embeddings":
+        if year is None:
+            raise ValueError("alphaearth_embeddings requires a year for gee_tile export")
+        col = (
+            ee.ImageCollection(spec.gee_collection)
+            .filterDate(f"{int(year)}-01-01", f"{int(year) + 1}-01-01")
+            .select(spec.bands)
+        )
+        fallback = _fully_masked_image(spec.bands)
+        img = ee.Image(ee.Algorithms.If(col.size().gt(0), col.mosaic(), fallback))
+        return img.toFloat()
 
     if layer == "dist_water":
         if spec.clip_max is None:
@@ -404,15 +437,33 @@ def _expected_band_count_for_chip_group(plan: LayerPlan, chip_group: str, regist
         raise KeyError(f"Unknown chip_group: {chip_group!r}")
     return sum(len(registry.get(layer).bands) for layer in g["layers"])
 
+def _stable_hash_dict(d: dict[str, Any]) -> str:
+    payload = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
-def _chip_is_current(path: Path, expected_bands: int) -> bool:
-    try:
-        import rasterio
 
-        with rasterio.open(path) as ds:
-            return int(ds.count) == int(expected_bands)
-    except Exception:
-        return False
+def _chips_meta_path(study_dir: Path, rasters_hash: str) -> Path:
+    return _rasters_root(study_dir, rasters_hash) / "chips_meta.json"
+
+
+def _expected_chip_group_meta(plan: LayerPlan, chip_group: str, registry: LayerRegistry) -> dict[str, Any]:
+    g = plan.chip_groups.get(chip_group)
+    if g is None:
+        raise KeyError(f"Unknown chip_group: {chip_group!r}")
+    layers = list(g["layers"])
+    band_ids_in_order: list[str] = []
+    for layer in layers:
+        spec = registry.get(layer)
+        band_ids_in_order.extend([f"{layer}.{b}" for b in spec.bands])
+    payload = {
+        "target_scale_m": float(g["target_scale_m"]),
+        "layers": layers,
+        "band_ids_in_order": band_ids_in_order,
+    }
+    return {
+        "signature": _stable_hash_dict(payload),
+        **payload,
+    }
 
 
 @dataclass(frozen=True)
@@ -432,6 +483,10 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     skip_existing = bool(ctx["skip_existing"])
     plan: LayerPlan = ctx["plan"]
     registry: LayerRegistry = ctx["registry"]
+    region_multiplier: dict[str, float] = ctx["region_multiplier"]
+    min_pixels = int(ctx["min_pixels"])
+    max_pixels = int(ctx["max_pixels"])
+    group_current: dict[str, bool] = ctx["group_current"]
 
     results: dict[str, Any] = {"point_id": int(req.point_id), "files": {}}
 
@@ -440,8 +495,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     if skip_existing:
         for group_name in plan.chip_groups.keys():
             out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
-            expected = _expected_band_count_for_chip_group(plan, group_name, registry)
-            if not (out_path.exists() and _chip_is_current(out_path, expected)):
+            if not (bool(group_current.get(group_name, False)) and out_path.exists()):
                 all_exist = False
                 break
     else:
@@ -455,18 +509,23 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
 
     ensure_ee_initialized()
 
-    region_mult = float(REGION_MULTIPLIER.get(req.split, 1.0))
+    region_mult = float(region_multiplier.get(req.split, 1.0))
     region = square_region_for_point(req.lon, req.lat, region_mult * buffer_km)
 
     for group_name, group in plan.chip_groups.items():
         out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
         expected = _expected_band_count_for_chip_group(plan, group_name, registry)
-        if skip_existing and out_path.exists() and _chip_is_current(out_path, expected):
+        if skip_existing and bool(group_current.get(group_name, False)) and out_path.exists():
             results["files"][group_name] = {"path": str(out_path), "status": "existing"}
             continue
 
         target_scale_m = float(group["target_scale_m"])
-        scale = compute_group_scale(region_mult * buffer_km, target_scale_m)
+        scale = compute_group_scale(
+            region_mult * buffer_km,
+            target_scale_m,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
 
         try:
             img = build_chip_group_image(
@@ -498,10 +557,22 @@ def download_chips(
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
     buffer_km: float,
+    region_multiplier: dict[str, float],
+    min_pixels: int,
+    max_pixels: int,
     splits: list[str] | None = None,
     n_workers: int = 16,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
+    study_dir = Path(study_dir)
+    region_multiplier = {str(k): float(v) for k, v in dict(region_multiplier).items()}
+    min_pixels = int(min_pixels)
+    max_pixels = int(max_pixels)
+    if min_pixels <= 0:
+        raise ValueError(f"min_pixels must be >= 1, got {min_pixels}")
+    if max_pixels < min_pixels:
+        raise ValueError(f"max_pixels must be >= min_pixels ({min_pixels}), got {max_pixels}")
+
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
 
@@ -513,6 +584,48 @@ def download_chips(
     sub = df[df[SET_COL].isin(splits)].copy()
     if len(sub) == 0:
         raise ValueError(f"No rows matched splits={splits}")
+
+    meta_path = _chips_meta_path(study_dir, plan.rasters_hash)
+    meta: dict[str, Any]
+    if meta_path.exists():
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        if not isinstance(meta, dict):
+            raise ValueError(f"Invalid chips_meta.json (expected mapping): {meta_path}")
+        if str(meta.get("schema_version", "")) != "1":
+            raise ValueError(
+                f"Unsupported chips_meta.json schema_version={meta.get('schema_version')!r} (expected '1'): {meta_path}"
+            )
+    else:
+        chips_root = _rasters_root(study_dir, plan.rasters_hash) / "chips"
+        has_existing = chips_root.exists() and any(chips_root.glob("*/*.tif"))
+        if skip_existing and has_existing:
+            raise FileNotFoundError(
+                "chips_meta.json not found for an existing chips directory. "
+                "Run one_time_scripts/migrate_rasters_hash.py once to create it (and migrate rasters_hash). "
+                f"Expected: {meta_path}"
+            )
+        meta = {"schema_version": "1", "chip_groups": {}}
+
+    existing_groups = meta.get("chip_groups", {})
+    expected_meta_by_group = {
+        group_name: _expected_chip_group_meta(plan, group_name, registry) for group_name in plan.chip_groups.keys()
+    }
+    group_current = {
+        group_name: bool(
+            isinstance(existing_groups.get(group_name), dict)
+            and existing_groups.get(group_name, {}).get("signature") == expected["signature"]
+        )
+        for group_name, expected in expected_meta_by_group.items()
+    }
+
+    for group_name, is_current in group_current.items():
+        if is_current:
+            continue
+        group_dir = _rasters_root(study_dir, plan.rasters_hash) / "chips" / group_name
+        group_dir.mkdir(parents=True, exist_ok=True)
+        for p in group_dir.glob("*.tif"):
+            p.unlink()
 
     reqs: list[ChipRequest] = []
     for _, row in sub.iterrows():
@@ -538,6 +651,10 @@ def download_chips(
         "skip_existing": bool(skip_existing),
         "plan": plan,
         "registry": registry,
+        "region_multiplier": region_multiplier,
+        "min_pixels": int(min_pixels),
+        "max_pixels": int(max_pixels),
+        "group_current": group_current,
     }
 
     from tqdm import tqdm
@@ -564,6 +681,14 @@ def download_chips(
                 stats["failures"].append(
                     {"point_id": r.get("point_id"), "group": group_name, "error": info.get("error", "unknown")}
                 )
+
+    meta["chip_groups"] = dict(existing_groups)
+    for group_name, expected in expected_meta_by_group.items():
+        meta["chip_groups"][group_name] = expected
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2, sort_keys=True)
+
     return stats
 
 
@@ -614,11 +739,19 @@ def download_tile_layer(
     registry: LayerRegistry,
     layer: str,
     buffer_km: float,
-    px_per_side: int = 500,
+    region_multiplier: dict[str, float],
+    min_pixels: int,
+    max_pixels: int,
+    px_per_side: int,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     if layer not in plan.layers_in_order:
         raise ValueError(f"Layer {layer!r} not present in plan.layers_in_order")
+
+    region_multiplier = {str(k): float(v) for k, v in dict(region_multiplier).items()}
+    min_pixels = int(min_pixels)
+    max_pixels = int(max_pixels)
+    px_per_side = int(px_per_side)
 
     spec = registry.get(layer)
     if spec.source != "gee_tile":
@@ -629,23 +762,119 @@ def download_tile_layer(
     tile_dir = _tile_dir(study_dir, plan.rasters_hash, layer)
     index_path = tile_dir / "index.json"
 
-    if skip_existing and index_path.exists():
+    is_annual = str(spec.temporal) == "annual"
+
+    required_cols = [LON_COL, LAT_COL, SET_COL]
+    if is_annual:
+        required_cols.append(TIME_COL)
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"trajectories df missing required columns: {missing}")
+
+    resolved_years: list[int] = []
+    requested_years: list[int] = []
+
+    if (not is_annual) and skip_existing and index_path.exists():
         with open(index_path, "r") as f:
             existing = json.load(f)
         tiles = existing.get("tiles", [])
         # If prior runs recorded errors, do not skip; allow reruns to retry failures.
         errors = existing.get("errors", [])
         if tiles and all((tile_dir / t["file"]).exists() for t in tiles) and not errors:
-            return {"total": len(tiles), "downloaded": 0, "existing": len(tiles), "failed": 0, "index_path": str(index_path)}
+            return {
+                "total": len(tiles),
+                "downloaded": 0,
+                "existing": len(tiles),
+                "failed": 0,
+                "index_path": str(index_path),
+            }
 
-    required_cols = [LON_COL, LAT_COL, SET_COL]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"trajectories df missing required columns: {missing}")
+    def _tile_index_is_complete(idx_path: Path) -> tuple[bool, int]:
+        if not idx_path.exists():
+            return (False, 0)
+        with open(idx_path, "r") as f:
+            existing = json.load(f)
+        tiles = existing.get("tiles", [])
+        errors = existing.get("errors", [])
+        if not tiles or errors or any(("error" in t) for t in tiles):
+            return (False, len(tiles))
+        if not all((tile_dir / t["file"]).exists() for t in tiles):
+            return (False, len(tiles))
+        return (True, len(tiles))
 
-    ee = ensure_ee_initialized()
+    if is_annual:
+        ts = pd.to_datetime(df[TIME_COL], errors="coerce")
+        yrs = ts.dropna().dt.year.astype("int64")
+        if len(yrs) == 0:
+            raise ValueError(f"trajectories df has no valid {TIME_COL!r} values for annual layer {layer!r}")
+        requested_years = sorted(set(int(y) for y in yrs.tolist()))
 
-    layer_scale = compute_group_scale(buffer_km, float(spec.native_scale_m))
+        ee = ensure_ee_initialized()
+
+        try:
+            ts_list = (
+                ee.ImageCollection(spec.gee_collection).aggregate_array("system:time_start").getInfo()
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to query available years for annual gee_tile layer {layer!r} from {spec.gee_collection!r}: {e}"
+            ) from e
+
+        available_years = sorted(
+            {
+                datetime.utcfromtimestamp(int(x) / 1000.0).year
+                for x in (ts_list or [])
+                if x is not None
+            }
+        )
+        if not available_years:
+            raise RuntimeError(
+                f"No available years found for annual gee_tile layer {layer!r} collection {spec.gee_collection!r}"
+            )
+
+        def _closest_year(y: int) -> int:
+            return min(available_years, key=lambda a: (abs(int(a) - int(y)), int(a)))
+
+        resolved_years = sorted({_closest_year(y) for y in requested_years})
+
+        if skip_existing and resolved_years:
+            years_out: dict[int, dict[str, Any]] = {}
+            all_complete = True
+            for y in resolved_years:
+                idx_path_y = tile_dir / f"index_{int(y)}.json"
+                ok, n = _tile_index_is_complete(idx_path_y)
+                if not ok:
+                    all_complete = False
+                    break
+                years_out[int(y)] = {
+                    "total": int(n),
+                    "downloaded": 0,
+                    "existing": int(n),
+                    "failed": 0,
+                    "index_path": str(idx_path_y),
+                }
+
+            if all_complete:
+                if not index_path.exists():
+                    src = tile_dir / f"index_{int(resolved_years[0])}.json"
+                    with open(src, "r") as f:
+                        payload = json.load(f)
+                    with open(index_path, "w") as f:
+                        json.dump(payload, f, indent=2)
+                return {
+                    "temporal": "annual",
+                    "years": years_out,
+                    "index_path": str(index_path),
+                }
+    else:
+        ee = ensure_ee_initialized()
+
+    layer_scale = compute_group_scale(
+        buffer_km,
+        float(spec.native_scale_m),
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+    )
 
     crs = "EPSG:4326"
     grid_size_m = float(layer_scale) * float(px_per_side)
@@ -721,7 +950,7 @@ def download_tile_layer(
 
     for _, r in grouped.iterrows():
         split = str(r["split"])
-        region_mult = float(REGION_MULTIPLIER.get(split, 1.0))
+        region_mult = float(region_multiplier.get(split, 1.0))
         buffer_m = float(buffer_km) * 1000.0 * region_mult
 
         buffer_deg_lat = buffer_m / 110540.0
@@ -780,17 +1009,13 @@ def download_tile_layer(
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
-    img = _tile_image(layer, registry=registry).unmask(GEE_NODATA_SENTINEL, sameFootprint=False)
-
-    tiles_out: list[dict[str, Any]] = []
-    errors_out: list[dict[str, Any]] = []
+    tile_regions: list[Any] = []
+    tile_bounds_latlon: list[tuple[float, float, float, float]] = []
+    tile_indices: list[int] = []
+    geometry_errors: list[dict[str, Any]] = []
     n_tiles_effective = int(n_tiles_reported)
 
-    stats = {"total": int(n_tiles_reported), "downloaded": 0, "existing": 0, "failed": 0}
-
     for i in range(int(n_tiles_reported)):
-        out_path = tile_dir / f"tile_{i:03d}.tif"
-
         try:
             region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
             info = region.getInfo()
@@ -805,11 +1030,9 @@ def download_tile_layer(
                 n_tiles_effective = int(i)
                 break
 
-            stats["failed"] += 1
-            errors_out.append(
+            geometry_errors.append(
                 {
                     "tile_index": int(i),
-                    "file": out_path.name,
                     "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
                 }
             )
@@ -820,10 +1043,141 @@ def download_tile_layer(
         min_lat = min(c[1] for c in coords)
         max_lat = max(c[1] for c in coords)
 
+        tile_regions.append(region)
+        tile_bounds_latlon.append((float(min_lon), float(min_lat), float(max_lon), float(max_lat)))
+        tile_indices.append(int(i))
+
+    if is_annual:
+        years_out: dict[int, dict[str, Any]] = {}
+        for year in resolved_years:
+            idx_path_y = tile_dir / f"index_{int(year)}.json"
+
+            if skip_existing and idx_path_y.exists():
+                with open(idx_path_y, "r") as f:
+                    existing = json.load(f)
+                tiles = existing.get("tiles", [])
+                errors = existing.get("errors", [])
+                if tiles and not errors and not any(("error" in t) for t in tiles) and all(
+                    (tile_dir / t["file"]).exists() for t in tiles
+                ):
+                    years_out[int(year)] = {
+                        "total": len(tiles),
+                        "downloaded": 0,
+                        "existing": len(tiles),
+                        "failed": 0,
+                        "index_path": str(idx_path_y),
+                    }
+                    continue
+
+            img = _tile_image(layer, registry=registry, year=int(year)).unmask(
+                GEE_NODATA_SENTINEL, sameFootprint=False
+            )
+
+            tiles_out: list[dict[str, Any]] = []
+            errors_out: list[dict[str, Any]] = [
+                {"tile_index": int(e["tile_index"]), "file": f"tile_{int(e['tile_index']):03d}_{int(year)}.tif", "error": str(e["error"])}
+                for e in geometry_errors
+            ]
+            stats = {
+                "total": int(n_tiles_reported),
+                "downloaded": 0,
+                "existing": 0,
+                "failed": int(len(errors_out)),
+            }
+
+            for tile_index, region, bounds_latlon in zip(tile_indices, tile_regions, tile_bounds_latlon):
+                out_path = tile_dir / f"tile_{int(tile_index):03d}_{int(year)}.tif"
+                tile_meta = {
+                    "file": out_path.name,
+                    "tile_index": int(tile_index),
+                    "bounds": {
+                        "min_lon": float(bounds_latlon[0]),
+                        "min_lat": float(bounds_latlon[1]),
+                        "max_lon": float(bounds_latlon[2]),
+                        "max_lat": float(bounds_latlon[3]),
+                    },
+                }
+
+                if skip_existing and out_path.exists():
+                    stats["existing"] += 1
+                    tiles_out.append(tile_meta)
+                    continue
+
+                try:
+                    download_tiled_image(
+                        img,
+                        region,
+                        scale=float(layer_scale),
+                        out_path=out_path,
+                        num_bands=len(spec.bands),
+                        crs=crs,
+                        bounds_latlon=bounds_latlon,
+                    )
+                    stats["downloaded"] += 1
+                    tiles_out.append(tile_meta)
+                except Exception as e:
+                    stats["failed"] += 1
+                    tile_meta["error"] = str(e)
+                    tiles_out.append(tile_meta)
+
+            with open(idx_path_y, "w") as f:
+                stats["total"] = int(n_tiles_effective)
+
+                payload: dict[str, Any] = {
+                    "layer": layer,
+                    "temporal": "annual",
+                    "year": int(year),
+                    "scale": float(layer_scale),
+                    "num_bands": int(len(spec.bands)),
+                    "tiles": tiles_out,
+                }
+                if errors_out:
+                    payload["errors"] = errors_out
+                    payload["n_tiles_reported"] = int(n_tiles_reported)
+                if int(n_tiles_effective) != int(n_tiles_reported):
+                    payload["n_tiles_reported"] = int(n_tiles_reported)
+                    payload["n_tiles_effective"] = int(n_tiles_effective)
+                json.dump(payload, f, indent=2)
+
+            stats["index_path"] = str(idx_path_y)
+            years_out[int(year)] = stats
+
+        # Compatibility index.json used for bounds-only lookups.
+        if resolved_years and (not index_path.exists()):
+            src = tile_dir / f"index_{int(resolved_years[0])}.json"
+            if src.exists():
+                with open(src, "r") as f:
+                    payload = json.load(f)
+                with open(index_path, "w") as f:
+                    json.dump(payload, f, indent=2)
+
+        return {
+            "temporal": "annual",
+            "years": years_out,
+            "index_path": str(index_path),
+        }
+
+    img = _tile_image(layer, registry=registry).unmask(GEE_NODATA_SENTINEL, sameFootprint=False)
+
+    tiles_out = []
+    errors_out: list[dict[str, Any]] = [
+        {"tile_index": int(e["tile_index"]), "file": f"tile_{int(e['tile_index']):03d}.tif", "error": str(e["error"])}
+        for e in geometry_errors
+    ]
+    stats = {"total": int(n_tiles_reported), "downloaded": 0, "existing": 0, "failed": int(len(errors_out))}
+
+    for tile_index, region, bounds_latlon in zip(tile_indices, tile_regions, tile_bounds_latlon):
+        out_path = tile_dir / f"tile_{int(tile_index):03d}.tif"
+
         tile_meta = {
             "file": out_path.name,
-            "tile_index": int(i),
-            "bounds": {"min_lon": min_lon, "max_lon": max_lon, "min_lat": min_lat, "max_lat": max_lat},
+            "tile_index": int(tile_index),
+            "bounds": {
+                "min_lon": float(bounds_latlon[0]),
+                "min_lat": float(bounds_latlon[1]),
+                "max_lon": float(bounds_latlon[2]),
+                "max_lat": float(bounds_latlon[3]),
+            },
         }
 
         if skip_existing and out_path.exists():
@@ -832,9 +1186,15 @@ def download_tile_layer(
             continue
 
         try:
-            params = {"scale": float(layer_scale), "region": region, "format": "GEO_TIFF", "crs": crs}
-            url = img.getDownloadURL(params)
-            download_tiff(url, out_path)
+            download_tiled_image(
+                img,
+                region,
+                scale=float(layer_scale),
+                out_path=out_path,
+                num_bands=len(spec.bands),
+                crs=crs,
+                bounds_latlon=bounds_latlon,
+            )
             stats["downloaded"] += 1
             tiles_out.append(tile_meta)
         except Exception as e:
@@ -845,7 +1205,12 @@ def download_tile_layer(
     with open(index_path, "w") as f:
         stats["total"] = int(n_tiles_effective)
 
-        payload: dict[str, Any] = {"layer": layer, "scale": float(layer_scale), "tiles": tiles_out}
+        payload = {
+            "layer": layer,
+            "scale": float(layer_scale),
+            "num_bands": int(len(spec.bands)),
+            "tiles": tiles_out,
+        }
         if errors_out:
             payload["errors"] = errors_out
             payload["n_tiles_reported"] = int(n_tiles_reported)
@@ -865,7 +1230,10 @@ def download_tiles(
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
     buffer_km: float,
-    px_per_side: int = 500,
+    region_multiplier: dict[str, float],
+    min_pixels: int,
+    max_pixels: int,
+    px_per_side: int,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     tile_layers = [l for l in plan.layers_in_order if registry.get(l).source == "gee_tile"]
@@ -878,6 +1246,9 @@ def download_tiles(
             registry=registry,
             layer=layer,
             buffer_km=buffer_km,
+            region_multiplier=region_multiplier,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
             px_per_side=px_per_side,
             skip_existing=skip_existing,
         )
