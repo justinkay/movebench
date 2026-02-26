@@ -128,6 +128,43 @@ def download_tiff(url: str, out_path: Path, *, tries: int = 5) -> None:
             delay_s *= 2.0
 
 
+def _fix_geotiff_colorinterp(path: Path, *, num_bands: int | None = None) -> None:
+    """Best-effort fix for GDAL/libtiff ExtraSamples warnings on multi-band GeoTIFFs.
+
+    Some writers (including some GEE GeoTIFF exports) can omit ExtraSamples
+    metadata for multi-band rasters. GDAL then emits warnings like:
+        TIFFReadDirectory: ... ExtraSamples doesn't match SamplesPerPixel
+    and heuristically treats remaining bands as extra samples.
+
+    We explicitly mark band 1 as grayscale and all remaining bands as
+    undefined, which prompts GDAL to write consistent ExtraSamples metadata.
+    """
+    try:
+        import rasterio
+        from rasterio.enums import ColorInterp
+    except Exception:
+        return
+
+    path = Path(path)
+    try:
+        # Route GDAL warnings to a temp log file (avoids noisy stderr spam).
+        with tempfile.NamedTemporaryFile(prefix="gdal_", suffix=".log") as tf:
+            with rasterio.Env(CPL_LOG=str(tf.name)):
+                with rasterio.open(path, "r+") as ds:
+                    count = int(ds.count)
+                    n = count if num_bands is None else int(num_bands)
+                    if n != count:
+                        n = count
+                    if n <= 0:
+                        return
+                    if n == 1:
+                        ds.colorinterp = (ColorInterp.gray,)
+                    else:
+                        ds.colorinterp = (ColorInterp.gray,) + (ColorInterp.undefined,) * (n - 1)
+    except Exception:
+        return
+
+
 def square_region_for_point(lon: float, lat: float, buffer_km: float):
     ee = ensure_ee_initialized()
     pt = ee.Geometry.Point([lon, lat])
@@ -314,6 +351,7 @@ def download_tiled_image(
         }
         url = img.getDownloadURL(params)
         download_tiff(url, out_path)
+        _fix_geotiff_colorinterp(out_path, num_bands=int(num_bands))
         return
 
     # Otherwise, split into tiles and merge.
@@ -362,22 +400,26 @@ def download_tiled_image(
         if not tile_paths:
             raise RuntimeError("No tiles were downloaded")
 
-        src_files = [rasterio.open(p) for p in tile_paths]
-        try:
-            mosaic, mosaic_transform = merge(src_files)
-            profile = src_files[0].profile.copy()
-            profile.update(
-                {
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
-                    "transform": mosaic_transform,
-                }
-            )
-            with rasterio.open(out_path, "w", **profile) as dst:
-                dst.write(mosaic)
-        finally:
-            for ds in src_files:
-                ds.close()
+        log_path = str(Path(tmp_dir) / "gdal.log")
+        with rasterio.Env(CPL_LOG=log_path):
+            src_files = [rasterio.open(p) for p in tile_paths]
+            try:
+                mosaic, mosaic_transform = merge(src_files)
+                profile = src_files[0].profile.copy()
+                profile.update(
+                    {
+                        "height": mosaic.shape[1],
+                        "width": mosaic.shape[2],
+                        "transform": mosaic_transform,
+                    }
+                )
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    dst.write(mosaic)
+            finally:
+                for ds in src_files:
+                    ds.close()
+
+        _fix_geotiff_colorinterp(out_path, num_bands=int(num_bands))
 
 
 def _tile_image(layer: str, *, registry: LayerRegistry, year: int | None = None):
