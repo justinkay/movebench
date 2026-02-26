@@ -1,3 +1,17 @@
+raster_params:
+  buffer:
+    step_multiplier: 2.0
+    step_q: 0.95
+    gap_q: 0.999
+  scale_clamp:
+    min_pixels: 3
+    max_pixels: 100
+  tiles:
+    px_per_side: 500
+  region_multiplier:
+    train: 1.0
+    test: 1.0
+
 layers:
   - modis_lst
   - modis_vi
@@ -21,6 +35,7 @@ layers:
   - bioclim
   - dynamic_world
   - landsat_ndwi
+  - alphaearth_embeddings
 
 chip_groups:
   era5:
@@ -41,4 +56,3 @@ chip_groups:
       - dynamic_world
       - landsat_ndwi
     target_scale_m: 30.0
-

@@ -285,6 +285,15 @@ LAYERS: dict[str, LayerSpec] = {
         gee_collection="LANDSAT/COMPOSITES/C02/T1_L2_32DAY_NDWI",
         temporal="32day",
     ),
+    "alphaearth_embeddings": LayerSpec(
+        name="alphaearth_embeddings",
+        source="gee_tile",
+        bands=[f"A{i:02d}" for i in range(64)],
+        native_scale_m=10.0,
+        gee_collection="GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL",
+        temporal="annual",
+        normalize=False,
+    ),
 }
 
 

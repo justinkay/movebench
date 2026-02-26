@@ -19,7 +19,7 @@ from movebench.rasters import Raster, merge_hdf_window, read_geotiff, read_geoti
 
 def _year_from_timestamp(ts: Any) -> int:
     if ts is None:
-        raise ValueError("timestamp is required to resolve a year-based local layer")
+        raise ValueError("timestamp is required to resolve a year-based layer")
     if hasattr(ts, "year"):
         return int(ts.year)
     raise TypeError(f"timestamp must have a .year attribute, got {type(ts)!r}")
@@ -101,7 +101,8 @@ class LayerIO:
         self.registry = registry
 
         self._chip_cache: dict[tuple[str, int], Raster] = {}
-        self._tile_index_cache: dict[str, dict[str, Any]] = {}
+        self._tile_index_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
+        self._tile_index_years_cache: dict[str, list[int]] = {}
         self._hdf_index_cache: dict[str, _ModisFileIndex] = {}
 
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
@@ -146,7 +147,7 @@ class LayerIO:
         if spec.source == "gee_tile":
             if bounds_latlon is None:
                 raise ValueError(f"bounds_latlon is required to load gee_tile layer {layer!r}")
-            return self._load_gee_tile_layer(layer, bounds_latlon)
+            return self._load_gee_tile_layer(layer, bounds_latlon, timestamp=timestamp)
 
         if spec.source == "local_tiff":
             if bounds_latlon is None:
@@ -281,20 +282,73 @@ class LayerIO:
             band_ids=group_r.band_ids[start:end],
         )
 
-    def _tile_index(self, layer: str) -> dict[str, Any]:
-        cached = self._tile_index_cache.get(layer)
+    def _tile_index_years_on_disk(self, layer: str) -> list[int]:
+        cached = self._tile_index_years_cache.get(layer)
         if cached is not None:
             return cached
+
+        tile_dir = self._tile_dir(layer)
+        years: list[int] = []
+        for p in tile_dir.glob("index_*.json"):
+            stem = p.stem  # index_<year>
+            parts = stem.split("_", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                years.append(int(parts[1]))
+            except ValueError:
+                continue
+        years = sorted(set(years))
+        # Avoid caching an empty result so newly-downloaded years can be seen
+        # without rebuilding the LayerIO instance.
+        if years:
+            self._tile_index_years_cache[layer] = years
+        return years
+
+    def _tile_index(self, layer: str, *, timestamp: Any | None = None) -> dict[str, Any]:
+        spec = self.registry.get(layer)
+        resolved_year: int | None = None
         index_path = self._tile_dir(layer) / "index.json"
+
+        if spec.temporal == "annual":
+            requested_year = _year_from_timestamp(timestamp)
+            available_years = self._tile_index_years_on_disk(layer)
+            if available_years:
+                resolved_year = min(
+                    available_years,
+                    key=lambda a: (abs(int(a) - int(requested_year)), int(a)),
+                )
+                index_path = self._tile_dir(layer) / f"index_{int(resolved_year)}.json"
+
+        cache_key = (layer, resolved_year)
+        cached = self._tile_index_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if not index_path.exists():
+            tile_dir = self._tile_dir(layer)
+            if spec.temporal == "annual":
+                raise FileNotFoundError(
+                    f"Tile index not found for annual gee_tile layer={layer!r}: {index_path}. "
+                    f"Expected {tile_dir}/index_<year>.json; run downloads for this study."
+                )
+            raise FileNotFoundError(f"Tile index.json not found for layer={layer!r}: {index_path}")
+
         with open(index_path, "r") as f:
             d = json.load(f)
         if not isinstance(d, dict) or "tiles" not in d:
             raise ValueError(f"Invalid tile index.json for layer {layer!r}: {index_path}")
-        self._tile_index_cache[layer] = d
+        self._tile_index_cache[cache_key] = d
         return d
 
-    def _load_gee_tile_layer(self, layer: str, bounds_latlon: tuple[float, float, float, float]) -> Raster:
-        idx = self._tile_index(layer)
+    def _load_gee_tile_layer(
+        self,
+        layer: str,
+        bounds_latlon: tuple[float, float, float, float],
+        *,
+        timestamp: Any | None,
+    ) -> Raster:
+        idx = self._tile_index(layer, timestamp=timestamp)
         tile_dir = self._tile_dir(layer)
         tiles = idx.get("tiles", [])
 

@@ -64,13 +64,13 @@ class Study:
         splits: list[str] | None = None,
         n_workers: int = 16,
         skip_existing: bool = True,
-        px_per_side: int = 500,
     ) -> dict:
         """Download all required GEE rasters for a layers config into this study directory.
 
         Writes rasters to `study_dir/rasters/<rasters_hash>/...` as expected by `LayerIO`.
         """
-        plan = self.layer_plan(config)
+        cfg = load_layers_config(config)
+        plan = REGISTRY.resolve(cfg)
 
         # Imported lazily: heavy deps (pandas, EE, rasterio, requests).
         from movebench.layers import download as mb2dl
@@ -84,16 +84,34 @@ class Study:
         train_df = df[df[mb2dl.SET_COL] == "train"]
         if len(train_df) == 0:
             raise ValueError("No training data found (set=='train'); cannot compute buffer")
-        buffer_km = mb2dl.get_buffer_m_for_study(train_df) / 1000.0
+        buf = cfg.raster_params["buffer"]
+        buffer_km = (
+            mb2dl.get_buffer_m_for_study(
+                train_df,
+                step_multiplier=float(buf["step_multiplier"]),
+                step_q=float(buf["step_q"]),
+                gap_q=float(buf["gap_q"]),
+            )
+            / 1000.0
+        )
 
         if splits is None:
             splits = sorted(df[mb2dl.SET_COL].dropna().unique().tolist())
+
+        rm = dict(cfg.raster_params["region_multiplier"])
+        clamp = cfg.raster_params["scale_clamp"]
+        min_pixels = int(clamp["min_pixels"])
+        max_pixels = int(clamp["max_pixels"])
+        px_per_side = int(cfg.raster_params["tiles"]["px_per_side"])
 
         chip_stats = mb2dl.download_chips(
             df,
             study_dir=self.study_dir,
             plan=plan,
             buffer_km=buffer_km,
+            region_multiplier=rm,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
             splits=splits,
             n_workers=n_workers,
             skip_existing=skip_existing,
@@ -104,6 +122,9 @@ class Study:
             study_dir=self.study_dir,
             plan=plan,
             buffer_km=buffer_km,
+            region_multiplier=rm,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
             px_per_side=px_per_side,
             skip_existing=skip_existing,
         )
