@@ -101,30 +101,6 @@ class LayerPlan:
             out.append(ch.layer)
         return out
 
-    def derived_eval_order(self) -> list[str]:
-        """Topologically-sorted order for computing derived layers."""
-        order: list[str] = []
-        visiting: set[str] = set()
-        visited: set[str] = set()
-
-        def dfs(node: str) -> None:
-            if node in visited:
-                return
-            if node in visiting:
-                raise ValueError(f"Cycle detected in derived_dependencies at {node!r}")
-            visiting.add(node)
-            for parent in self.derived_dependencies.get(node, []):
-                if parent in self.derived_dependencies:
-                    dfs(parent)
-            visiting.remove(node)
-            visited.add(node)
-            order.append(node)
-
-        for node in self.derived_dependencies.keys():
-            dfs(node)
-
-        return order
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "config_hash": self.config_hash,

@@ -517,6 +517,65 @@ class ChipRequest:
     split: str
 
 
+@dataclass(frozen=True)
+class TileRequest:
+    tile_index: int
+    bounds_latlon: tuple[float, float, float, float]
+
+
+def _download_tile_worker(args: tuple[int, TileRequest, dict[str, Any]]) -> dict[str, Any]:
+    _idx, req, ctx = args
+
+    study_dir = Path(ctx["study_dir"])
+    rasters_hash = str(ctx["rasters_hash"])
+    layer = str(ctx["layer"])
+    year = ctx.get("year")
+    scale = float(ctx["scale"])
+    num_bands = int(ctx["num_bands"])
+    crs = str(ctx["crs"])
+    skip_existing = bool(ctx["skip_existing"])
+    registry: LayerRegistry = ctx["registry"]
+
+    year_int = int(year) if year is not None else None
+    tile_dir = _tile_dir(study_dir, rasters_hash, layer)
+    tile_index = int(req.tile_index)
+
+    if year_int is None:
+        out_path = tile_dir / f"tile_{tile_index:03d}.tif"
+    else:
+        out_path = tile_dir / f"tile_{tile_index:03d}_{year_int}.tif"
+
+    if skip_existing and out_path.exists():
+        return {"tile_index": tile_index, "status": "existing", "file": out_path.name}
+
+    try:
+        ee = ensure_ee_initialized()
+        img = _tile_image(layer, registry=registry, year=year_int).unmask(
+            GEE_NODATA_SENTINEL, sameFootprint=False
+        )
+        min_lon, min_lat, max_lon, max_lat = (float(x) for x in req.bounds_latlon)
+        region = ee.Geometry.Rectangle(
+            [min_lon, min_lat, max_lon, max_lat], proj=crs, geodesic=False
+        )
+        download_tiled_image(
+            img,
+            region,
+            scale=scale,
+            out_path=out_path,
+            num_bands=num_bands,
+            crs=crs,
+            bounds_latlon=req.bounds_latlon,
+        )
+        return {"tile_index": tile_index, "status": "downloaded", "file": out_path.name}
+    except Exception as e:
+        return {
+            "tile_index": tile_index,
+            "status": "failed",
+            "file": out_path.name,
+            "error": str(e),
+        }
+
+
 def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict[str, Any]:
     idx, req, ctx = args
 
@@ -785,6 +844,7 @@ def download_tile_layer(
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
+    n_workers: int = 16,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     if layer not in plan.layers_in_order:
@@ -794,6 +854,9 @@ def download_tile_layer(
     min_pixels = int(min_pixels)
     max_pixels = int(max_pixels)
     px_per_side = int(px_per_side)
+    n_workers = int(n_workers)
+    if n_workers <= 0:
+        raise ValueError(f"n_workers must be >= 1, got {n_workers}")
 
     spec = registry.get(layer)
     if spec.source != "gee_tile":
@@ -1091,105 +1154,132 @@ def download_tile_layer(
 
     if is_annual:
         years_out: dict[int, dict[str, Any]] = {}
-        for year in resolved_years:
-            idx_path_y = tile_dir / f"index_{int(year)}.json"
+        reqs = [
+            TileRequest(tile_index=int(tile_index), bounds_latlon=bounds_latlon)
+            for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon)
+        ]
+        ctx_base = {
+            "study_dir": str(study_dir),
+            "rasters_hash": str(plan.rasters_hash),
+            "layer": str(layer),
+            "scale": float(layer_scale),
+            "num_bands": int(len(spec.bands)),
+            "crs": str(crs),
+            "skip_existing": bool(skip_existing),
+            "registry": registry,
+        }
 
-            if skip_existing and idx_path_y.exists():
-                with open(idx_path_y, "r") as f:
-                    existing = json.load(f)
-                tiles = existing.get("tiles", [])
-                errors = existing.get("errors", [])
-                if tiles and not errors and not any(("error" in t) for t in tiles) and all(
-                    (tile_dir / t["file"]).exists() for t in tiles
-                ):
-                    years_out[int(year)] = {
-                        "total": len(tiles),
-                        "downloaded": 0,
-                        "existing": len(tiles),
-                        "failed": 0,
-                        "index_path": str(idx_path_y),
+        from tqdm import tqdm
+
+        pool = None
+        try:
+            for year in resolved_years:
+                idx_path_y = tile_dir / f"index_{int(year)}.json"
+
+                if skip_existing and idx_path_y.exists():
+                    with open(idx_path_y, "r") as f:
+                        existing = json.load(f)
+                    tiles = existing.get("tiles", [])
+                    errors = existing.get("errors", [])
+                    if tiles and not errors and not any(("error" in t) for t in tiles) and all(
+                        (tile_dir / t["file"]).exists() for t in tiles
+                    ):
+                        years_out[int(year)] = {
+                            "total": len(tiles),
+                            "downloaded": 0,
+                            "existing": len(tiles),
+                            "failed": 0,
+                            "index_path": str(idx_path_y),
+                        }
+                        continue
+
+                tiles_out: list[dict[str, Any]] = []
+                errors_out: list[dict[str, Any]] = [
+                    {
+                        "tile_index": int(e["tile_index"]),
+                        "file": f"tile_{int(e['tile_index']):03d}_{int(year)}.tif",
+                        "error": str(e["error"]),
                     }
-                    continue
-
-            img = _tile_image(layer, registry=registry, year=int(year)).unmask(
-                GEE_NODATA_SENTINEL, sameFootprint=False
-            )
-
-            tiles_out: list[dict[str, Any]] = []
-            errors_out: list[dict[str, Any]] = [
-                {"tile_index": int(e["tile_index"]), "file": f"tile_{int(e['tile_index']):03d}_{int(year)}.tif", "error": str(e["error"])}
-                for e in geometry_errors
-            ]
-            stats = {
-                "total": int(n_tiles_reported),
-                "downloaded": 0,
-                "existing": 0,
-                "failed": int(len(errors_out)),
-            }
-
-            from tqdm import tqdm
-
-            for tile_index, region, bounds_latlon in tqdm(
-                zip(tile_indices, tile_regions, tile_bounds_latlon),
-                total=len(tile_indices),
-                desc=f"Downloading tiles ({layer} {int(year)})",
-                unit="tile",
-            ):
-                out_path = tile_dir / f"tile_{int(tile_index):03d}_{int(year)}.tif"
-                tile_meta = {
-                    "file": out_path.name,
-                    "tile_index": int(tile_index),
-                    "bounds": {
-                        "min_lon": float(bounds_latlon[0]),
-                        "min_lat": float(bounds_latlon[1]),
-                        "max_lon": float(bounds_latlon[2]),
-                        "max_lat": float(bounds_latlon[3]),
-                    },
+                    for e in geometry_errors
+                ]
+                stats = {
+                    "total": int(n_tiles_reported),
+                    "downloaded": 0,
+                    "existing": 0,
+                    "failed": int(len(errors_out)),
                 }
 
-                if skip_existing and out_path.exists():
-                    stats["existing"] += 1
-                    tiles_out.append(tile_meta)
-                    continue
-
-                try:
-                    download_tiled_image(
-                        img,
-                        region,
-                        scale=float(layer_scale),
-                        out_path=out_path,
-                        num_bands=len(spec.bands),
-                        crs=crs,
-                        bounds_latlon=bounds_latlon,
+                if reqs:
+                    if pool is None:
+                        pool = mp.Pool(int(n_workers))
+                    ctx_y = {**ctx_base, "year": int(year)}
+                    worker_args = [(i, r, ctx_y) for i, r in enumerate(reqs)]
+                    results = list(
+                        tqdm(
+                            pool.imap_unordered(_download_tile_worker, worker_args),
+                            total=len(reqs),
+                            desc=f"Downloading tiles ({layer} {int(year)})",
+                            unit="tile",
+                        )
                     )
-                    stats["downloaded"] += 1
+                    results_by_index = {int(r["tile_index"]): r for r in results}
+                else:
+                    results_by_index = {}
+
+                for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon):
+                    out_path = tile_dir / f"tile_{int(tile_index):03d}_{int(year)}.tif"
+                    tile_meta = {
+                        "file": out_path.name,
+                        "tile_index": int(tile_index),
+                        "bounds": {
+                            "min_lon": float(bounds_latlon[0]),
+                            "min_lat": float(bounds_latlon[1]),
+                            "max_lon": float(bounds_latlon[2]),
+                            "max_lat": float(bounds_latlon[3]),
+                        },
+                    }
+
+                    info = results_by_index.get(int(tile_index))
+                    if info is None:
+                        stats["failed"] += 1
+                        tile_meta["error"] = "tile_missing_result"
+                    else:
+                        status = str(info.get("status", "failed"))
+                        if status == "downloaded":
+                            stats["downloaded"] += 1
+                        elif status == "existing":
+                            stats["existing"] += 1
+                        else:
+                            stats["failed"] += 1
+                            tile_meta["error"] = str(info.get("error", "unknown"))
+
                     tiles_out.append(tile_meta)
-                except Exception as e:
-                    stats["failed"] += 1
-                    tile_meta["error"] = str(e)
-                    tiles_out.append(tile_meta)
 
-            with open(idx_path_y, "w") as f:
-                stats["total"] = int(n_tiles_effective)
+                with open(idx_path_y, "w") as f:
+                    stats["total"] = int(n_tiles_effective)
 
-                payload: dict[str, Any] = {
-                    "layer": layer,
-                    "temporal": "annual",
-                    "year": int(year),
-                    "scale": float(layer_scale),
-                    "num_bands": int(len(spec.bands)),
-                    "tiles": tiles_out,
-                }
-                if errors_out:
-                    payload["errors"] = errors_out
-                    payload["n_tiles_reported"] = int(n_tiles_reported)
-                if int(n_tiles_effective) != int(n_tiles_reported):
-                    payload["n_tiles_reported"] = int(n_tiles_reported)
-                    payload["n_tiles_effective"] = int(n_tiles_effective)
-                json.dump(payload, f, indent=2)
+                    payload: dict[str, Any] = {
+                        "layer": layer,
+                        "temporal": "annual",
+                        "year": int(year),
+                        "scale": float(layer_scale),
+                        "num_bands": int(len(spec.bands)),
+                        "tiles": tiles_out,
+                    }
+                    if errors_out:
+                        payload["errors"] = errors_out
+                        payload["n_tiles_reported"] = int(n_tiles_reported)
+                    if int(n_tiles_effective) != int(n_tiles_reported):
+                        payload["n_tiles_reported"] = int(n_tiles_reported)
+                        payload["n_tiles_effective"] = int(n_tiles_effective)
+                    json.dump(payload, f, indent=2)
 
-            stats["index_path"] = str(idx_path_y)
-            years_out[int(year)] = stats
+                stats["index_path"] = str(idx_path_y)
+                years_out[int(year)] = stats
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         # Compatibility index.json used for bounds-only lookups.
         if resolved_years and (not index_path.exists()):
@@ -1206,8 +1296,6 @@ def download_tile_layer(
             "index_path": str(index_path),
         }
 
-    img = _tile_image(layer, registry=registry).unmask(GEE_NODATA_SENTINEL, sameFootprint=False)
-
     tiles_out = []
     errors_out: list[dict[str, Any]] = [
         {"tile_index": int(e["tile_index"]), "file": f"tile_{int(e['tile_index']):03d}.tif", "error": str(e["error"])}
@@ -1215,14 +1303,40 @@ def download_tile_layer(
     ]
     stats = {"total": int(n_tiles_reported), "downloaded": 0, "existing": 0, "failed": int(len(errors_out))}
 
+    reqs = [
+        TileRequest(tile_index=int(tile_index), bounds_latlon=bounds_latlon)
+        for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon)
+    ]
+    ctx = {
+        "study_dir": str(study_dir),
+        "rasters_hash": str(plan.rasters_hash),
+        "layer": str(layer),
+        "year": None,
+        "scale": float(layer_scale),
+        "num_bands": int(len(spec.bands)),
+        "crs": str(crs),
+        "skip_existing": bool(skip_existing),
+        "registry": registry,
+    }
+
     from tqdm import tqdm
 
-    for tile_index, region, bounds_latlon in tqdm(
-        zip(tile_indices, tile_regions, tile_bounds_latlon),
-        total=len(tile_indices),
-        desc=f"Downloading tiles ({layer})",
-        unit="tile",
-    ):
+    if reqs:
+        worker_args = [(i, r, ctx) for i, r in enumerate(reqs)]
+        with mp.Pool(int(n_workers)) as pool:
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_download_tile_worker, worker_args),
+                    total=len(reqs),
+                    desc=f"Downloading tiles ({layer})",
+                    unit="tile",
+                )
+            )
+        results_by_index = {int(r["tile_index"]): r for r in results}
+    else:
+        results_by_index = {}
+
+    for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon):
         out_path = tile_dir / f"tile_{int(tile_index):03d}.tif"
 
         tile_meta = {
@@ -1236,27 +1350,21 @@ def download_tile_layer(
             },
         }
 
-        if skip_existing and out_path.exists():
-            stats["existing"] += 1
-            tiles_out.append(tile_meta)
-            continue
-
-        try:
-            download_tiled_image(
-                img,
-                region,
-                scale=float(layer_scale),
-                out_path=out_path,
-                num_bands=len(spec.bands),
-                crs=crs,
-                bounds_latlon=bounds_latlon,
-            )
-            stats["downloaded"] += 1
-            tiles_out.append(tile_meta)
-        except Exception as e:
+        info = results_by_index.get(int(tile_index))
+        if info is None:
             stats["failed"] += 1
-            tile_meta["error"] = str(e)
-            tiles_out.append(tile_meta)
+            tile_meta["error"] = "tile_missing_result"
+        else:
+            status = str(info.get("status", "failed"))
+            if status == "downloaded":
+                stats["downloaded"] += 1
+            elif status == "existing":
+                stats["existing"] += 1
+            else:
+                stats["failed"] += 1
+                tile_meta["error"] = str(info.get("error", "unknown"))
+
+        tiles_out.append(tile_meta)
 
     with open(index_path, "w") as f:
         stats["total"] = int(n_tiles_effective)
@@ -1290,6 +1398,7 @@ def download_tiles(
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
+    n_workers: int = 16,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     tile_layers = [l for l in plan.layers_in_order if registry.get(l).source == "gee_tile"]
@@ -1306,6 +1415,7 @@ def download_tiles(
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,
+            n_workers=n_workers,
             skip_existing=skip_existing,
         )
     return out

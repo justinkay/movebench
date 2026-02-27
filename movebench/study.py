@@ -126,6 +126,7 @@ class Study:
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,
+            n_workers=n_workers,
             skip_existing=skip_existing,
         )
 
