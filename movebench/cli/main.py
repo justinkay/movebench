@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from movebench.cli import download
+from movebench.cli import extract
 from movebench.cli import ingest
 
 
@@ -12,6 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     download.register(subparsers)
+    extract.register(subparsers)
     ingest.register(subparsers)
 
     return parser
