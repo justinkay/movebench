@@ -35,7 +35,6 @@ layers:
   - bioclim
   - dynamic_world
   - landsat_ndwi
-  - alphaearth_embeddings
 
 chip_groups:
   era5:

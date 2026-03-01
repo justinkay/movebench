@@ -24,8 +24,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--n-workers",
         type=int,
-        default=40,
-        help="Number of multiprocessing workers for chip/tile downloads (default: 40).",
+        default=32,
+        help="Number of multiprocessing workers for chip downloads (default: 32).",
     )
     parser.add_argument(
         "--studies",
