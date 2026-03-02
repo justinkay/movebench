@@ -144,7 +144,7 @@ def eval_step_select(
         "topk": {int(k): float(v) / float(total) for k, v in correct_topk.items()},
     }
 
-
+# deprecated
 def fit_step_select(
     model: torch.nn.Module,
     train_loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
@@ -216,6 +216,256 @@ def fit_step_select(
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
     final_train = eval_step_select(model, train_loader, device)
     final_val = eval_step_select(model, val_loader, device)
+
+    return {
+        "best_step": int(best_step),
+        "train": final_train,
+        "val": final_val,
+        "history": history,
+    }
+
+
+def _use_amp_for_x(x: torch.Tensor, device: torch.device) -> bool:
+    return device.type == "cuda" and x.dtype in (torch.float16, torch.bfloat16)
+
+
+@torch.no_grad()
+def eval_step_select_tensor(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    device: torch.device,
+    *,
+    topk: Sequence[int] = (1, 5, 10, 25, 50),
+    max_items: int | None = None,
+    batch_size: int = 1024,
+    idxs: torch.Tensor | None = None,
+) -> dict:
+    """Evaluate step-selection on a pre-materialized feature tensor.
+
+    Args:
+        x: (N,C,P) tensor on CPU or GPU. When on CPU and device is CUDA, it
+           should ideally be pinned for fast async copies.
+        idxs: optional (K,) indices into x, evaluated in the given order.
+        max_items: maximum number of samples to evaluate.
+    """
+    model.eval()
+
+    if x.ndim != 3:
+        raise ValueError(f"Expected x with shape (N,C,P); got {tuple(x.shape)}")
+    N, _C, P = x.shape
+    if P <= 0:
+        raise ValueError(f"P must be > 0; got {P}")
+    if int(batch_size) <= 0:
+        raise ValueError(f"batch_size must be > 0; got {batch_size}")
+
+    if idxs is None:
+        idxs = torch.arange(int(N), dtype=torch.long)
+    else:
+        if idxs.ndim != 1:
+            raise ValueError(f"idxs must be 1D; got {tuple(idxs.shape)}")
+        idxs = idxs.to(dtype=torch.long, device="cpu")
+
+    if max_items is not None:
+        k = min(int(max_items), int(idxs.shape[0]))
+        idxs = idxs[:k]
+
+    # Indices must live on the same device as x for index_select / advanced indexing.
+    if idxs.device != x.device:
+        idxs = idxs.to(device=x.device, non_blocking=False)
+
+    total_nll = 0.0
+    total = 0
+    correct_topk = {int(k): 0 for k in topk}
+
+    use_amp = _use_amp_for_x(x, device)
+    true_idx = int(P - 1)
+
+    for s in range(0, int(idxs.shape[0]), int(batch_size)):
+        e = min(int(idxs.shape[0]), s + int(batch_size))
+        idx_b = idxs[s:e]
+
+        xb = x.index_select(0, idx_b)
+        if xb.device != device:
+            xb = xb.to(device, non_blocking=True)
+
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=xb.dtype):
+                logits = model(xb)
+                loss = loss_step_select(logits)
+        else:
+            logits = model(xb)
+            loss = loss_step_select(logits)
+
+        if logits.ndim != 2:
+            raise ValueError(f"Model must return logits with shape (B,P); got {tuple(logits.shape)}")
+        B, P_logits = logits.shape
+        if int(P_logits) != int(P):
+            raise ValueError(f"Model returned P={P_logits}, expected P={P}")
+
+        total_nll += float(loss.item()) * int(B)
+        total += int(B)
+
+        if correct_topk:
+            for k in topk:
+                k = int(k)
+                k_eff = min(k, int(P))
+                topk_idx = torch.topk(logits, k=k_eff, dim=1).indices
+                correct_topk[k] += int((topk_idx == true_idx).any(dim=1).sum().item())
+
+    if total == 0:
+        raise ValueError("No items were evaluated (idxs was empty?)")
+
+    return {
+        "nll": float(total_nll / float(total)),
+        "topk": {int(k): float(v) / float(total) for k, v in correct_topk.items()},
+    }
+
+
+def fit_step_select_tensor(
+    model: torch.nn.Module,
+    x_train: torch.Tensor,
+    x_val: torch.Tensor,
+    device: torch.device,
+    *,
+    lr: float,
+    weight_decay: float,
+    max_steps: int,
+    eval_interval: int,
+    patience: int,
+    seed: int,
+    batch_size: int,
+    max_eval_items: int | None = None,
+    log_callback: LogCallback | None = None,
+) -> dict:
+    """Step-based training on cached iSSF features with early stopping.
+
+    This is the default iSSF training path: it avoids DataLoader overhead by
+    pre-materializing the (N,C,P) feature tensor once and iterating directly.
+    """
+    _seed_everything(seed)
+    model.to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+
+    if x_train.ndim != 3 or x_val.ndim != 3:
+        raise ValueError(f"Expected x_train/x_val with shape (N,C,P); got train={tuple(x_train.shape)} val={tuple(x_val.shape)}")
+    if tuple(x_train.shape[1:]) != tuple(x_val.shape[1:]):
+        raise ValueError(f"x_train/x_val feature shapes must match (C,P). Got train={tuple(x_train.shape[1:])} val={tuple(x_val.shape[1:])}")
+
+    N_train = int(x_train.shape[0])
+    N_val = int(x_val.shape[0])
+    if N_train <= 0 or N_val <= 0:
+        raise ValueError(f"Empty train/val tensors: N_train={N_train} N_val={N_val}")
+
+    if int(batch_size) <= 0:
+        raise ValueError(f"batch_size must be > 0; got {batch_size}")
+    if int(max_steps) <= 0:
+        raise ValueError(f"max_steps must be > 0; got {max_steps}")
+    if int(eval_interval) <= 0:
+        raise ValueError(f"eval_interval must be > 0; got {eval_interval}")
+    if int(patience) <= 0:
+        raise ValueError(f"patience must be > 0; got {patience}")
+
+    # Fixed eval subsets for stable early stopping.
+    def _eval_idxs(n: int, *, seed_off: int) -> torch.Tensor | None:
+        if max_eval_items is None:
+            return None
+        k = min(int(max_eval_items), int(n))
+        g = torch.Generator(device="cpu")
+        g.manual_seed(int(seed) + int(seed_off))
+        return torch.randperm(int(n), generator=g)[:k].to(dtype=torch.long, device="cpu")
+
+    eval_train_idxs = _eval_idxs(N_train, seed_off=0)
+    eval_val_idxs = _eval_idxs(N_val, seed_off=1)
+
+    best_state: dict[str, torch.Tensor] | None = None
+    best_val_nll = float("inf")
+    best_step = 0
+    patience_counter = 0
+    history: list[dict[str, float]] = []
+
+    use_amp = _use_amp_for_x(x_train, device)
+    use_scaler = use_amp and x_train.dtype == torch.float16
+    scaler = torch.cuda.amp.GradScaler() if use_scaler else None
+
+    perm = torch.randperm(N_train, device=x_train.device)
+    pos = 0
+
+    for step in range(int(max_steps)):
+        if pos >= N_train:
+            perm = torch.randperm(N_train, device=x_train.device)
+            pos = 0
+        end = min(N_train, pos + int(batch_size))
+        idx = perm[pos:end]
+        pos = end
+
+        xb = x_train.index_select(0, idx)
+        if xb.device != device:
+            xb = xb.to(device, non_blocking=True)
+
+        model.train()
+        opt.zero_grad(set_to_none=True)
+
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=xb.dtype):
+                logits = model(xb)
+                loss = loss_step_select(logits)
+            if use_scaler:
+                assert scaler is not None
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
+        else:
+            logits = model(xb)
+            loss = loss_step_select(logits)
+            loss.backward()
+            opt.step()
+
+        if (step + 1) % int(eval_interval) == 0:
+            train_metrics = eval_step_select_tensor(
+                model,
+                x_train,
+                device,
+                topk=(),
+                max_items=max_eval_items,
+                batch_size=int(batch_size),
+                idxs=eval_train_idxs,
+            )
+            val_metrics = eval_step_select_tensor(
+                model,
+                x_val,
+                device,
+                topk=(),
+                max_items=max_eval_items,
+                batch_size=int(batch_size),
+                idxs=eval_val_idxs,
+            )
+
+            tr = float(train_metrics["nll"])
+            va = float(val_metrics["nll"])
+            history.append({"step": float(step), "train_nll": tr, "val_nll": va})
+
+            if log_callback is not None:
+                log_callback({"loss/train": tr, "loss/test": va}, step=int(step))
+
+            if va < best_val_nll:
+                best_val_nll = va
+                best_step = step
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= int(patience):
+                    break
+
+    if best_state is None:
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+    model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+    final_train = eval_step_select_tensor(model, x_train, device, batch_size=int(batch_size))
+    final_val = eval_step_select_tensor(model, x_val, device, batch_size=int(batch_size))
 
     return {
         "best_step": int(best_step),

@@ -94,7 +94,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gpus-per-node",
         type=int,
-        default=1,
+        default=0,
         help="Slurm GPUs per node (--gpus-per-node). Only passed if > 0.",
     )
     p.add_argument("--dry-run", action="store_true", help="Print actions/commands but do not submit jobs.")

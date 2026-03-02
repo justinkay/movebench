@@ -34,6 +34,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 import webdataset as wds
+import movebench.paths as paths
 
 
 Compression = Literal["none", "gz"]
@@ -281,7 +282,8 @@ def build_deepssf_wds_cache(
     if progress:
         total = int(n - int(start_idx))
         prefix = "resume_" if int(start_idx) > 0 else ""
-        it = tqdm(loader, total=total, desc=f"{prefix}build_deepssf_wds_cache[{split}]", unit="samples")
+        study_id = str(out_dir).replace(str(paths.studies_root()), "").split("/")[1]
+        it = tqdm(loader, total=total, desc=f"{study_id} | {prefix}build_deepssf_wds_cache[{split}]", unit="samples")
 
     try:
         for j, (spatial, scalars, bearing, target) in enumerate(it):

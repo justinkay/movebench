@@ -368,7 +368,7 @@ def _run_issf(
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
     from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
-    from movebench.train import collate_step_select, eval_step_select, fit_step_select
+    from movebench.train import fit_step_select_tensor
 
     issf = cfg["datasets"]["issf"]
     sampler = issf["sampler"]
@@ -389,20 +389,21 @@ def _run_issf(
     train_ds = study.issf_dataset(split="train", **ds_kwargs)
     test_ds = study.issf_dataset(split="test", **ds_kwargs)
 
-    train_loader, test_loader = _make_loaders(
-        ds_train=train_ds,
-        ds_test=test_ds,
-        collate_fn=collate_step_select,
-        batch_size=issf.get("batch_size", None),
-        num_workers=issf.get("num_workers", None),
-    )
+    import torch
 
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+    batch_size = int(issf.get("batch_size", None) or 1)
+    steps_per_epoch = int(math.ceil(float(len(train_ds)) / float(batch_size)))
+    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch)
 
-    x0, _valid0 = next(iter(train_loader))
-    if x0.ndim != 3:
-        raise ValueError(f"iSSF dataset must produce x with shape (B,C,P); got {tuple(x0.shape)}")
-    _b, c, p = x0.shape
+    # Cache expanded features once. On CUDA we store bf16 on GPU when possible,
+    # otherwise fall back to pinned CPU and stream batches to the GPU.
+    feat_dtype = torch.bfloat16 if str(device.type) == "cuda" else torch.float32
+    x_train = train_ds.build_expanded_x(cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True)
+    x_test = test_ds.build_expanded_x(cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True)
+
+    if x_train.ndim != 3:
+        raise ValueError(f"iSSF dataset must produce x with shape (N,C,P); got {tuple(x_train.shape)}")
+    _n, c, p = x_train.shape
     random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
 
     if model_kind == "linear":
@@ -419,10 +420,10 @@ def _run_issf(
         raise ValueError(f"Unknown model_kind={model_kind!r}")
 
     max_eval_steps = _resolve_max_eval_steps(cfg)
-    fit = fit_step_select(
+    fit = fit_step_select_tensor(
         model,
-        train_loader,
-        test_loader,
+        x_train,
+        x_test,
         device,
         seed=int(cfg["runtime"]["seed"]),
         lr=float(method["hparams"]["lr"]),
@@ -430,13 +431,12 @@ def _run_issf(
         max_steps=int(schedule["max_steps"]),
         eval_interval=int(schedule["eval_interval"]),
         patience=int(schedule["patience"]),
-        max_eval_steps=max_eval_steps,
+        batch_size=int(batch_size),
+        max_eval_items=max_eval_steps,
         log_callback=log_callback,
     )
 
     # Save the best checkpoint (fit_step_select restores the best weights before returning).
-    import torch
-
     out_dir = Path(str(cfg["output_dir"]))
     ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -457,8 +457,8 @@ def _run_issf(
         },
         ckpt_path,
     )
-    train_metrics = eval_step_select(model, train_loader, device, topk=TOP_K_VALUES)
-    test_metrics = eval_step_select(model, test_loader, device, topk=TOP_K_VALUES)
+    train_metrics = dict(fit["train"])
+    test_metrics = dict(fit["val"])
 
     return {
         "P": int(p),
@@ -829,32 +829,32 @@ def run_method(
 
 # def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dict[str, Any]) -> None:
 #     import pandas as pd
-
+#
 #     out_dir.mkdir(parents=True, exist_ok=True)
 #     (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-
+#
 #     issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
 #     deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
-
+#
 #     def _write_nll_csv(*, split: str, methods: list[str], prefix: str, random_key: str, random_label: str) -> None:
 #         if not methods:
 #             return
 #         rows = []
 #         for study_id, sr in results.items():
 #             row: dict[str, Any] = {"study": study_id}
-
+#
 #             first = sr.get(methods[0], {})
 #             r = first.get(random_key, {})
 #             if isinstance(r, dict) and "nll" in r:
 #                 row[random_label] = float(r["nll"])
-
+#
 #             for m in methods:
 #                 if m in sr and split in sr[m]:
 #                     row[m] = float(sr[m][split]["nll"])
 #             rows.append(row)
 #         df = pd.DataFrame(rows).set_index("study")
 #         df.to_csv(out_dir / f"{prefix}nll_{split}.csv")
-
+#
 #     def _write_topk_csvs(
 #         *,
 #         split: str,
@@ -870,24 +870,24 @@ def run_method(
 #             rows = []
 #             for study_id, sr in results.items():
 #                 row: dict[str, Any] = {"study": study_id}
-
+#
 #                 first = sr.get(methods[0], {})
 #                 r = first.get(random_key, {})
 #                 if isinstance(r, dict) and "topk" in r and int(k) in r["topk"]:
 #                     row[random_label] = float(r["topk"][int(k)])
-
+#
 #                 for m in methods:
 #                     if m in sr and split in sr[m]:
 #                         row[m] = float(sr[m][split]["topk"][int(k)])
 #                 rows.append(row)
 #             df = pd.DataFrame(rows).set_index("study")
 #             df.to_csv(out_dir / f"{prefix}top{int(k)}_{split}.csv")
-
+#
 #     _write_nll_csv(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
 #     _write_nll_csv(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
 #     _write_topk_csvs(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
 #     _write_topk_csvs(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-
+#
 #     _write_nll_csv(split="train", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
 #     _write_nll_csv(split="test", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
 #     _write_topk_csvs(
@@ -904,6 +904,7 @@ def run_method(
 #         random_key="random_grid",
 #         random_label="RandomGrid",
 #     )
+#
 
 
 def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, resume: bool = False) -> None:

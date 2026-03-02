@@ -433,3 +433,187 @@ class iSSFDataset(SSFDataset):
         step_pixels = torch.cat(parts, dim=0)
         valid_pixels = torch.cat(valids, dim=0)
         return step_pixels, valid_pixels, {}, TARGET_CRS
+
+    def build_expanded_x(
+        self,
+        *,
+        cache_device: torch.device,
+        dtype: torch.dtype,
+        fallback_to_pinned_cpu: bool = True,
+        chunk_size: int = 2048,
+        validate: bool = False,
+    ) -> torch.Tensor:
+        """Materialize the full (N,C,P) iSSF feature tensor for fast training.
+
+        This is a vectorized equivalent of `__getitem__` that constructs the
+        entire expanded feature matrix once, instead of per-sample in Python.
+
+        Returns:
+            x: (N, C_total, P) tensor stored on `cache_device` when possible,
+               otherwise on pinned CPU memory if CUDA OOM and
+               `fallback_to_pinned_cpu=True`.
+
+        Notes:
+            - `valid` masks are not returned. Invalid env entries are zeroed
+              during normalization, and downstream iSSF training ignores valid.
+            - Output channel ordering matches `__getitem__`.
+        """
+
+        cache_device = torch.device(cache_device)
+        if int(chunk_size) <= 0:
+            raise ValueError(f"chunk_size must be > 0; got {chunk_size}")
+
+        N, C_env, P = self.env.shape
+        n_indiv = int(self._n_individuals) if self.include_individual_id else 0
+        c_time = 4 if self.include_time else 0
+        c_total = int(C_env) + 3 + int(c_time) + int(n_indiv) + (3 * int(C_env)) + (0 if c_time == 0 else (4 * int(C_env) + 12))
+
+        # Precompute time features on CPU once (small) to avoid repeated pandas work.
+        time4_cpu: torch.Tensor | None
+        if self.include_time:
+            ts_ns = self.timestamp_ns.detach().cpu().numpy()
+            ts = pd.to_datetime(ts_ns, unit="ns", utc=True)
+            doy = torch.from_numpy(ts.dayofyear.to_numpy()).to(dtype=torch.float32)  # (N,)
+            hour = torch.from_numpy(ts.hour.to_numpy()).to(dtype=torch.float32)
+            minute = torch.from_numpy(ts.minute.to_numpy()).to(dtype=torch.float32)
+            second = torch.from_numpy(ts.second.to_numpy()).to(dtype=torch.float32)
+            hour_frac = hour + (minute / 60.0) + (second / 3600.0)
+
+            two_pi = float(2.0 * math.pi)
+            sin_doy = torch.sin(two_pi * doy / 365.25)
+            cos_doy = torch.cos(two_pi * doy / 365.25)
+            sin_tod = torch.sin(two_pi * hour_frac / 24.0)
+            cos_tod = torch.cos(two_pi * hour_frac / 24.0)
+            time4_cpu = torch.stack([sin_doy, cos_doy, sin_tod, cos_tod], dim=1).contiguous()  # (N,4)
+        else:
+            time4_cpu = None
+
+        indiv_idx_cpu: torch.Tensor | None
+        if self.include_individual_id:
+            pids = self.point_id_start.detach().cpu().tolist()
+            idxs: list[int] = []
+            for pid in pids:
+                indiv = self._point_to_indiv.get(int(pid))
+                if indiv is None:
+                    raise KeyError(f"point_id_start={pid} not found in trajectories.csv individual mapping")
+                idxs.append(int(self._individual_to_idx[str(indiv)]))
+            indiv_idx_cpu = torch.tensor(idxs, dtype=torch.long)
+        else:
+            indiv_idx_cpu = None
+
+        def _build_into(*, out: torch.Tensor, op_device: torch.device) -> torch.Tensor:
+            non_blocking = op_device.type == "cuda"
+
+            mean = None
+            std = None
+            if self.normalize:
+                assert self._mean is not None
+                assert self._std is not None
+                mean = self._mean.to(device=op_device, dtype=torch.float32, non_blocking=non_blocking).view(1, -1, 1)
+                std = self._std.to(device=op_device, dtype=torch.float32, non_blocking=non_blocking).view(1, -1, 1)
+
+            for s in range(0, int(N), int(chunk_size)):
+                e = min(int(N), s + int(chunk_size))
+                b = int(e - s)
+
+                # --- env (normalized; invalid entries zeroed) ---
+                env = self.env[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)
+                valid = self.valid[s:e].to(device=op_device, non_blocking=non_blocking)
+                if self.normalize:
+                    assert mean is not None and std is not None
+                    env = torch.where(valid, (env - mean) / std, torch.zeros_like(env))
+                else:
+                    env = torch.where(valid, env, torch.zeros_like(env))
+
+                # --- movement (normalized using ds._movement_stats) ---
+                sl = self.step_length_m[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,P)
+                ta = self.turn_angle_rad[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,P)
+                log_sl = torch.log(sl + 1e-8)
+                cos_ta = torch.cos(ta)
+                move = torch.stack([sl, log_sl, cos_ta], dim=1)  # (B,3,P)
+                if self._movement_stats is not None:
+                    st = self._movement_stats
+                    move[:, 0, :] = (move[:, 0, :] - float(st["sl_mean"])) / float(st["sl_std"])
+                    move[:, 1, :] = (move[:, 1, :] - float(st["log_sl_mean"])) / float(st["log_sl_std"])
+                    move[:, 2, :] = (move[:, 2, :] - float(st["cos_ta_mean"])) / float(st["cos_ta_std"])
+
+                # --- optional time + id features ---
+                if time4_cpu is not None:
+                    t4 = time4_cpu[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,4)
+                    time_feats = t4.unsqueeze(-1).expand(b, 4, int(P))  # (B,4,P)
+                else:
+                    time_feats = None
+
+                if indiv_idx_cpu is not None:
+                    idx = indiv_idx_cpu[s:e].to(device=op_device, non_blocking=non_blocking)  # (B,)
+                    onehot = torch.zeros((b, int(n_indiv)), device=op_device, dtype=torch.float32)
+                    onehot[torch.arange(b, device=op_device), idx] = 1.0
+                    indiv_feats = onehot.unsqueeze(-1).expand(b, int(n_indiv), int(P))  # (B,n_indiv,P)
+                else:
+                    indiv_feats = None
+
+                # --- interactions ---
+                move_env = (move.unsqueeze(2) * env.unsqueeze(1)).reshape(b, 3 * int(C_env), int(P))
+                if time_feats is not None:
+                    time_env = (time_feats.unsqueeze(2) * env.unsqueeze(1)).reshape(b, 4 * int(C_env), int(P))
+                    time_move = (time_feats.unsqueeze(2) * move.unsqueeze(1)).reshape(b, 12, int(P))
+                else:
+                    time_env = None
+                    time_move = None
+
+                # --- pack in canonical order ---
+                o = 0
+                out[s:e, o : o + int(C_env), :] = env.to(dtype=dtype)
+                o += int(C_env)
+                out[s:e, o : o + 3, :] = move.to(dtype=dtype)
+                o += 3
+
+                if time_feats is not None:
+                    out[s:e, o : o + 4, :] = time_feats.to(dtype=dtype)
+                    o += 4
+                if indiv_feats is not None:
+                    out[s:e, o : o + int(n_indiv), :] = indiv_feats.to(dtype=dtype)
+                    o += int(n_indiv)
+
+                out[s:e, o : o + (3 * int(C_env)), :] = move_env.to(dtype=dtype)
+                o += 3 * int(C_env)
+
+                if time_env is not None and time_move is not None:
+                    out[s:e, o : o + (4 * int(C_env)), :] = time_env.to(dtype=dtype)
+                    o += 4 * int(C_env)
+                    out[s:e, o : o + 12, :] = time_move.to(dtype=dtype)
+                    o += 12
+
+                if o != int(c_total):
+                    raise RuntimeError(f"Internal error: packed {o} channels, expected {c_total}")
+
+            return out
+
+        # Attempt to build on the requested cache device; on CUDA OOM, fall back to pinned CPU.
+        if cache_device.type == "cuda":
+            try:
+                out = torch.empty((int(N), int(c_total), int(P)), device=cache_device, dtype=dtype)
+                out = _build_into(out=out, op_device=cache_device)
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if (not fallback_to_pinned_cpu) or ("out of memory" not in msg):
+                    raise
+                torch.cuda.empty_cache()
+                out = torch.empty((int(N), int(c_total), int(P)), dtype=dtype, pin_memory=True)
+                out = _build_into(out=out, op_device=torch.device("cpu"))
+        else:
+            out = torch.empty((int(N), int(c_total), int(P)), device=cache_device, dtype=dtype)
+            out = _build_into(out=out, op_device=cache_device)
+
+        if validate:
+            # Spot-check equivalence to __getitem__ on a few indices.
+            idxs = [0, int(N) // 2, int(N) - 1] if int(N) >= 3 else list(range(int(N)))
+            tol = 1e-4 if dtype == torch.float32 else 1e-1
+            for i in idxs:
+                slow_x, _slow_valid, _m, _crs = self[int(i)]
+                fast_x = out[int(i)].detach().cpu().float()
+                max_abs = (slow_x - fast_x).abs().max().item()
+                if max_abs > float(tol):
+                    raise AssertionError(f"build_expanded_x mismatch at idx={i}: max_abs_diff={max_abs} (tol={tol})")
+
+        return out
