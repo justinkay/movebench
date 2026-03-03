@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -36,7 +37,7 @@ def main(argv: list[str]) -> int:
         from tqdm.auto import tqdm
 
         from movebench.datasets.chips import ChipDataset
-        from movebench.layers.config import LayersConfig, load_layers_config
+        from movebench.layers.config import load_layers_config
         from movebench.layers.registry import REGISTRY
         from movebench.study import Study
     except ModuleNotFoundError as e:
@@ -60,7 +61,9 @@ def main(argv: list[str]) -> int:
     if not kept_layers:
         raise ValueError("No non-derived layers remain after filtering config.layers; nothing to diagnose.")
 
-    filtered_cfg = LayersConfig(layers=kept_layers, chip_groups=cfg.chip_groups)
+    # Different branches may add extra required fields (e.g. raster_params).
+    # Keep everything except the derived layers by dataclass replacement.
+    filtered_cfg = replace(cfg, layers=kept_layers)
     plan = REGISTRY.resolve(filtered_cfg)
 
     # Variables to report: continuous channels per band_id, categorical layers collapsed per layer.
@@ -185,4 +188,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
-
