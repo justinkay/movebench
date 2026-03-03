@@ -4,17 +4,21 @@ import argparse
 import sys
 
 from movebench.cli import download
+from movebench.cli import bench
 from movebench.cli import extract
 from movebench.cli import ingest
+from movebench.cli import wds_cache
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="movebench", description="MoveBench CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    bench.register(subparsers)
     download.register(subparsers)
     extract.register(subparsers)
     ingest.register(subparsers)
+    wds_cache.register(subparsers)
 
     return parser
 

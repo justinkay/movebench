@@ -5,7 +5,7 @@ single file with a small set of functions for:
 - config loading/validation,
 - per-study setup (rasters/feature stores/normalization),
 - per-method training/evaluation,
-- writing JSON + CSV summaries.
+- writing per-study JSON results.
 """
 
 from __future__ import annotations
@@ -26,6 +26,28 @@ from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
 TOP_K_VALUES = (1, 5, 10, 25, 50)
 
 
+def _issf_sampler_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
+    sampler = cfg["datasets"]["issf"]["sampler"]
+    return {
+        "num_candidates": int(sampler["num_candidates"]),
+        "random_seed": int(sampler["random_seed"]),
+        "step_multiplier": float(sampler["step_multiplier"]),
+        "step_q": float(sampler["step_q"]),
+        "gap_q": float(sampler["gap_q"]),
+        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
+    }
+
+
+def _save_checkpoint(*, out_dir: Path, study_id: str, method_name: str, model: Any, meta: dict[str, Any]) -> str:
+    import torch
+
+    ckpt_dir = Path(out_dir) / "checkpoints" / str(study_id)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / f"{str(method_name)}.pt"
+    torch.save({"state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()}, "meta": dict(meta)}, ckpt_path)
+    return str(ckpt_path)
+
+
 def _collate_deepssf_subset(batch, *, subset_idxs: Sequence[int]):
     from movebench.train import collate_deepssf
 
@@ -34,16 +56,6 @@ def _collate_deepssf_subset(batch, *, subset_idxs: Sequence[int]):
 
     idx = torch.as_tensor(list(subset_idxs), dtype=torch.long)
     return x1.index_select(1, idx), x2, x3, y
-
-
-def _deep_update(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
-    out = dict(base)
-    for k, v in update.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_update(out[k], v)  # type: ignore[arg-type]
-        else:
-            out[k] = v
-    return out
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -56,8 +68,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Benchmark config must be a mapping/dict at the top level; got {type(user).__name__}")
 
     cfg = user
-    if int(cfg.get("version", -1)) != 1:
-        raise ValueError(f"Unsupported benchmark config version={cfg.get('version')!r} (expected 1)")
+    if int(cfg.get("version", -1)) != 2:
+        raise ValueError(f"Unsupported benchmark config version={cfg.get('version')!r} (expected 2)")
 
     for key in ("layers_config", "output_dir", "runtime", "datasets", "methods"):
         if key not in cfg:
@@ -98,16 +110,17 @@ def load_config(path: str | Path) -> dict[str, Any]:
         for k, v in env.items():
             os.environ[str(k)] = str(v)
 
-    def _validate_schedule_hparams(*, method_name: str, hparams: dict[str, Any]) -> None:
-        use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
-        if use_epochs:
-            for key in ("max_epochs", "patience_epochs"):
-                if key not in hparams:
-                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (epoch schedule)")
-        else:
-            for key in ("max_steps", "eval_interval", "patience"):
-                if key not in hparams:
-                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (step schedule)")
+    def _validate_schedule(*, method_name: str, schedule: Any) -> dict[str, int]:
+        if not isinstance(schedule, dict):
+            raise ValueError(f"Method {method_name!r}: `schedule` must be a dict.")
+        for key in ("max_steps", "eval_interval", "patience"):
+            if key not in schedule:
+                raise ValueError(f"Method {method_name!r} missing required schedule key: {key!r}")
+        out = {k: int(schedule[k]) for k in ("max_steps", "eval_interval", "patience")}
+        for k, v in out.items():
+            if int(v) <= 0:
+                raise ValueError(f"Method {method_name!r} schedule.{k} must be > 0; got {v!r}")
+        return out
 
     # Validate methods (no default filling; rely on model/dataset defaults where applicable).
     allowed_kinds = {"issf_linear", "issf_mlp", "deepssf", "moveformer"}
@@ -130,6 +143,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
         model_cfg = m.get("model") or {}
         hparams = m.get("hparams") or {}
+        schedule = _validate_schedule(method_name=name, schedule=m.get("schedule"))
         if not isinstance(model_cfg, dict) or not isinstance(hparams, dict):
             raise ValueError(f"Method {name!r}: `model` and `hparams` must be dicts.")
 
@@ -137,14 +151,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
             for key in ("lr", "weight_decay"):
                 if key not in hparams:
                     raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
-            _validate_schedule_hparams(method_name=name, hparams=hparams)
         elif kind == "deepssf":
             if "deepssf" not in cfg["datasets"] or not isinstance(cfg["datasets"]["deepssf"], dict):
                 raise ValueError("Benchmark config missing required key: datasets.deepssf (required for kind='deepssf')")
             for key in ("lr_movement", "lr_habitat", "weight_decay"):
                 if key not in hparams:
                     raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
-            _validate_schedule_hparams(method_name=name, hparams=hparams)
         elif kind == "moveformer":
             if "moveformer" not in cfg["datasets"] or not isinstance(cfg["datasets"]["moveformer"], dict):
                 raise ValueError("Benchmark config missing required key: datasets.moveformer (required for kind='moveformer')")
@@ -153,20 +165,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
                 raise ValueError("datasets.moveformer.normalize_env must be a boolean if provided")
             if "require_normalization_stats" in dcfg and not isinstance(dcfg["require_normalization_stats"], bool):
                 raise ValueError("datasets.moveformer.require_normalization_stats must be a boolean if provided")
-            _validate_schedule_hparams(method_name=name, hparams=hparams)
         else:
             raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
 
-        methods_out.append({"name": name, "kind": kind, "model": model_cfg, "hparams": hparams})
+        methods_out.append({"name": name, "kind": kind, "model": model_cfg, "hparams": hparams, "schedule": schedule})
 
     wandb_cfg = cfg.get("wandb", None)
     if wandb_cfg is not None:
         if not isinstance(wandb_cfg, dict):
             raise ValueError("Benchmark config `wandb` must be a mapping/dict when provided.")
-        if "enabled" in wandb_cfg and not isinstance(wandb_cfg["enabled"], bool):
-            raise ValueError("wandb.enabled must be a boolean if provided.")
-        if "tags" in wandb_cfg and wandb_cfg["tags"] is not None and not isinstance(wandb_cfg["tags"], list):
-            raise ValueError("wandb.tags must be a list of strings if provided.")
 
     cfg["methods"] = methods_out
     return cfg
@@ -194,83 +201,59 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
     return out
 
 
-def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
+def ensure_study_ready(*, study, cfg: dict[str, Any], allow_setup: bool = True) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
     from movebench.features.points import select_point_store_dir
 
     layers_config = str(cfg["layers_config"])
-    setup_workers = int(cfg["runtime"]["setup_workers"])
-    sampler = dict(cfg["datasets"]["issf"]["sampler"])
+    sampler_kwargs = _issf_sampler_kwargs(cfg)
 
-    plan = study.layer_plan(layers_config)
-
-    try:
-        _train_dir, train_m = select_point_store_dir(
-            study_dir=study.study_dir,
-            split="train",
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-        )
-        sampler_hash = str(train_m.sampler_hash)
-
-        # Also require the test split point store (benchmark evaluates on test).
-        select_point_store_dir(
-            study_dir=study.study_dir,
-            split="test",
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-        )
-    except FileNotFoundError:
+    if not allow_setup:
+        plan = study.layer_plan(layers_config)
         try:
-            rep = study.extract_point_features(
-                config=layers_config,
-                splits=["train", "test"],
-                parametric=True,
-                num_candidates=int(sampler["num_candidates"]),
-                random_seed=int(sampler["random_seed"]),
-                n_workers=int(setup_workers),
-                skip_existing=True,
-                step_multiplier=float(sampler["step_multiplier"]),
-                step_q=float(sampler["step_q"]),
-                gap_q=float(sampler["gap_q"]),
-                bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+            _train_dir, train_m = select_point_store_dir(
+                study_dir=study.study_dir,
+                split="train",
+                config_hash=str(plan.config_hash),
+                expected_type="parametric",
+                **sampler_kwargs,
             )
-        except FileNotFoundError as e:
-            if "rasters" not in str(e):
-                raise
-            study.download_rasters(
-                config=layers_config,
-                splits=["train", "test"],
-                n_workers=int(setup_workers),
-                skip_existing=True,
+            sampler_hash = str(train_m.sampler_hash)
+            select_point_store_dir(
+                study_dir=study.study_dir,
+                split="test",
+                config_hash=str(plan.config_hash),
+                expected_type="parametric",
+                **sampler_kwargs,
             )
-            rep = study.extract_point_features(
-                config=layers_config,
-                splits=["train", "test"],
-                parametric=True,
-                num_candidates=int(sampler["num_candidates"]),
-                random_seed=int(sampler["random_seed"]),
-                n_workers=int(setup_workers),
-                skip_existing=True,
-                step_multiplier=float(sampler["step_multiplier"]),
-                step_q=float(sampler["step_q"]),
-                gap_q=float(sampler["gap_q"]),
-                bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                "Missing parametric point store(s). Run "
+                "`movebench extract --parametric --compute-normalization ...` first "
+                "or rerun without --no-setup."
             )
-        sampler_hash = str(rep["sampler_hash"])
 
+        from movebench.features.normalization import load_points_normalization_mean_std
+
+        load_points_normalization_mean_std(study_dir=study.study_dir, plan=plan, sampler_hash=sampler_hash)
+        return sampler_hash
+
+    setup_workers = int(cfg["runtime"]["setup_workers"])
+    study.download_rasters(
+        config=layers_config,
+        splits=["train", "test"],
+        n_workers=int(setup_workers),
+        skip_existing=True,
+    )
+    rep = study.extract_point_features(
+        config=layers_config,
+        splits=["train", "test"],
+        parametric=True,
+        n_workers=int(setup_workers),
+        skip_existing=True,
+        **sampler_kwargs,
+    )
+    sampler_hash = str(rep["sampler_hash"])
     study.compute_normalization_vals(
         from_="points",
         config=layers_config,
@@ -303,48 +286,6 @@ def _make_loaders(*, ds_train, ds_test, collate_fn, batch_size: int | None, num_
     return train_loader, test_loader
 
 
-def _resolve_fit_schedule(*, hparams: dict[str, Any], steps_per_epoch: int) -> dict[str, int]:
-    steps_per_epoch = int(steps_per_epoch)
-    if steps_per_epoch <= 0:
-        raise ValueError(f"steps_per_epoch must be > 0; got {steps_per_epoch}")
-
-    use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
-    if use_epochs:
-        if "max_epochs" not in hparams or "patience_epochs" not in hparams:
-            raise ValueError("Epoch-based schedule requires hparams.max_epochs and hparams.patience_epochs.")
-        max_epochs = int(hparams["max_epochs"])
-        eval_every_epochs = int(hparams.get("eval_every_epochs", 1))
-        patience_epochs = int(hparams["patience_epochs"])
-        if max_epochs <= 0:
-            raise ValueError(f"hparams.max_epochs must be > 0; got {max_epochs}")
-        if eval_every_epochs <= 0:
-            raise ValueError(f"hparams.eval_every_epochs must be > 0; got {eval_every_epochs}")
-        if patience_epochs <= 0:
-            raise ValueError(f"hparams.patience_epochs must be > 0; got {patience_epochs}")
-
-        max_steps = int(max_epochs) * int(steps_per_epoch)
-        eval_interval = int(eval_every_epochs) * int(steps_per_epoch)
-        patience = int(math.ceil(float(patience_epochs) / float(eval_every_epochs)))
-    else:
-        max_steps = int(hparams["max_steps"])
-        eval_interval = int(hparams["eval_interval"])
-        patience = int(hparams["patience"])
-
-    if max_steps <= 0:
-        raise ValueError(f"max_steps must be > 0; got {max_steps}")
-    if eval_interval <= 0:
-        raise ValueError(f"eval_interval must be > 0; got {eval_interval}")
-    if patience <= 0:
-        raise ValueError(f"patience must be > 0; got {patience}")
-
-    return {
-        "steps_per_epoch": int(steps_per_epoch),
-        "max_steps": int(max_steps),
-        "eval_interval": int(eval_interval),
-        "patience": int(patience),
-    }
-
-
 def _resolve_max_eval_steps(cfg: dict[str, Any]) -> int | None:
     runtime = cfg.get("runtime", {})
     if not isinstance(runtime, dict):
@@ -371,17 +312,7 @@ def _run_issf(
     from movebench.train import fit_step_select_tensor
 
     issf = cfg["datasets"]["issf"]
-    sampler = issf["sampler"]
-
-    ds_kwargs: dict[str, Any] = {
-        "config": str(cfg["layers_config"]),
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-        "step_multiplier": float(sampler["step_multiplier"]),
-        "step_q": float(sampler["step_q"]),
-        "gap_q": float(sampler["gap_q"]),
-        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
-    }
+    ds_kwargs: dict[str, Any] = {"config": str(cfg["layers_config"]), **_issf_sampler_kwargs(cfg)}
     for k in ("include_time", "normalize", "subset_env_layers", "subset_band_ids", "include_individual_id", "normalize_movement"):
         if k in issf:
             ds_kwargs[k] = issf[k]
@@ -392,8 +323,7 @@ def _run_issf(
     import torch
 
     batch_size = int(issf.get("batch_size", None) or 1)
-    steps_per_epoch = int(math.ceil(float(len(train_ds)) / float(batch_size)))
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch)
+    schedule = dict(method["schedule"])
 
     # Cache expanded features once. On CUDA we store bf16 on GPU when possible,
     # otherwise fall back to pinned CPU and stream batches to the GPU.
@@ -436,26 +366,20 @@ def _run_issf(
         log_callback=log_callback,
     )
 
-    # Save the best checkpoint (fit_step_select restores the best weights before returning).
-    out_dir = Path(str(cfg["output_dir"]))
-    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    method_name = str(method["name"])
-    ckpt_path = ckpt_dir / f"{method_name}.pt"
-    torch.save(
-        {
-            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-            "meta": {
-                "study_id": str(study.study_id),
-                "method_name": method_name,
-                "kind": str(method["kind"]),
-                "in_channels": int(c),
-                "num_candidates": int(p),
-                "best_step": int(fit["best_step"]),
-                "best_test_nll": float(fit["val"]["nll"]),
-            },
+    ckpt_path = _save_checkpoint(
+        out_dir=Path(str(cfg["output_dir"])),
+        study_id=str(study.study_id),
+        method_name=str(method["name"]),
+        model=model,
+        meta={
+            "study_id": str(study.study_id),
+            "method_name": str(method["name"]),
+            "kind": str(method["kind"]),
+            "in_channels": int(c),
+            "num_candidates": int(p),
+            "best_step": int(fit["best_step"]),
+            "best_test_nll": float(fit["val"]["nll"]),
         },
-        ckpt_path,
     )
     train_metrics = dict(fit["train"])
     test_metrics = dict(fit["val"])
@@ -467,7 +391,7 @@ def _run_issf(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
-        "checkpoint_path": str(ckpt_path),
+        "checkpoint_path": ckpt_path,
     }
 
 
@@ -507,9 +431,10 @@ def run_deepssf(
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
     from movebench.models.deepssf import DeepSSF
-    from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
+    from movebench.train import collate_deepssf, fit_deepssf, random_grid_baseline_metrics
 
     dcfg = cfg["datasets"]["deepssf"]
+    schedule = dict(method["schedule"])
     subset_idxs = None
     subset_band_ids = dcfg.get("subset_band_ids")
     if subset_band_ids:
@@ -555,7 +480,7 @@ def run_deepssf(
         bs = int(batch_size) if batch_size is not None else 1
         num_workers = int(dcfg.get("num_workers", 0) or 0)
 
-        train_loader, test_loader, m_train, m_test, steps_per_epoch = make_deepssf_wds_train_test_loaders(
+        train_loader, test_loader, m_train, m_test, _steps_per_epoch = make_deepssf_wds_train_test_loaders(
             study=study,
             layers_config=str(cfg["layers_config"]),
             ds_kwargs_train=ds_kwargs_train,
@@ -566,7 +491,6 @@ def run_deepssf(
             runtime_seed=int(cfg["runtime"]["seed"]),
         )
 
-        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=int(steps_per_epoch))
         pixel_size_test = float(m_test["pixel_size_m"])
         pixel_size_train = float(m_train["pixel_size_m"])
 
@@ -588,8 +512,6 @@ def run_deepssf(
             batch_size=dcfg.get("batch_size", None),
             num_workers=dcfg.get("num_workers", None),
         )
-
-        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
 
     x1, _x2, _x3, _y = next(iter(train_loader))
     b, c_env, h, w = x1.shape
@@ -636,32 +558,25 @@ def run_deepssf(
         log_callback=log_callback,
     )
 
-    # Save the best checkpoint (fit_deepssf restores the best weights before returning).
-    import torch
-
-    out_dir = Path(str(cfg["output_dir"]))
-    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    method_name = str(method["name"])
-    ckpt_path = ckpt_dir / f"{method_name}.pt"
-    torch.save(
-        {
-            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-            "meta": {
-                "study_id": str(study.study_id),
-                "method_name": method_name,
-                "env_channels": int(c_env),
-                "image_dim": int(image_dim),
-                "pixel_size_m": float(model.pixel_size_m),
-                "best_step": int(fit["best_step"]),
-                "best_test_nll": float(fit["val"]["nll"]),
-            },
+    ckpt_path = _save_checkpoint(
+        out_dir=Path(str(cfg["output_dir"])),
+        study_id=str(study.study_id),
+        method_name=str(method["name"]),
+        model=model,
+        meta={
+            "study_id": str(study.study_id),
+            "method_name": str(method["name"]),
+            "kind": str(method["kind"]),
+            "env_channels": int(c_env),
+            "image_dim": int(image_dim),
+            "pixel_size_m": float(model.pixel_size_m),
+            "best_step": int(fit["best_step"]),
+            "best_test_nll": float(fit["val"]["nll"]),
         },
-        ckpt_path,
     )
 
-    train_metrics = eval_deepssf(model, train_loader, device, topk=TOP_K_VALUES)
-    test_metrics = eval_deepssf(model, test_loader, device, topk=TOP_K_VALUES)
+    train_metrics = dict(fit["train"])
+    test_metrics = dict(fit["val"])
     random_grid = random_grid_baseline_metrics(int(h) * int(w), TOP_K_VALUES)
 
     return {
@@ -671,14 +586,13 @@ def run_deepssf(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
-        "checkpoint_path": str(ckpt_path),
+        "checkpoint_path": ckpt_path,
     }
 
 
 def run_moveformer(
     *,
     study,
-    sampler_hash: str,
     cfg: dict[str, Any],
     method: dict[str, Any],
     device,
@@ -686,21 +600,10 @@ def run_moveformer(
 ) -> dict[str, Any]:
     from movebench.models.moveformer import build_moveformer_selection_model
     from movebench.models.ssf import random_baseline_metrics
-    from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
+    from movebench.train import collate_moveformer, fit_moveformer
 
     dcfg = cfg["datasets"]["moveformer"]
-    issf = cfg["datasets"]["issf"]
-    sampler = issf["sampler"]
-
-    ds_kwargs: dict[str, Any] = {
-        "config": str(cfg["layers_config"]),
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-        "step_multiplier": float(sampler["step_multiplier"]),
-        "step_q": float(sampler["step_q"]),
-        "gap_q": float(sampler["gap_q"]),
-        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
-    }
+    ds_kwargs: dict[str, Any] = {"config": str(cfg["layers_config"]), **_issf_sampler_kwargs(cfg)}
     if "max_len" in dcfg:
         ds_kwargs["max_len"] = int(dcfg["max_len"])
     if "min_len" in dcfg:
@@ -723,7 +626,7 @@ def run_moveformer(
         num_workers=dcfg.get("num_workers", None),
     )
 
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+    schedule = dict(method["schedule"])
 
     P = int(getattr(train_ds, "num_candidates_total", 0))
     if P <= 0:
@@ -754,32 +657,24 @@ def run_moveformer(
         log_callback=log_callback,
     )
 
-    # Save the best checkpoint (fit_moveformer restores the best weights before returning).
-    import torch
-
-    out_dir = Path(str(cfg["output_dir"]))
-    ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    method_name = str(method["name"])
-    ckpt_path = ckpt_dir / f"{method_name}.pt"
-    torch.save(
-        {
-            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-            "meta": {
-                "study_id": str(study.study_id),
-                "method_name": method_name,
-                "kind": str(method["kind"]),
-                "num_candidates_total": int(P),
-                "max_len": int(ds_kwargs.get("max_len", 500)),
-                "best_step": int(fit["best_step"]),
-                "best_test_nll": float(fit["val"]["nll"]),
-            },
+    ckpt_path = _save_checkpoint(
+        out_dir=Path(str(cfg["output_dir"])),
+        study_id=str(study.study_id),
+        method_name=str(method["name"]),
+        model=model,
+        meta={
+            "study_id": str(study.study_id),
+            "method_name": str(method["name"]),
+            "kind": str(method["kind"]),
+            "num_candidates_total": int(P),
+            "max_len": int(ds_kwargs.get("max_len", 500)),
+            "best_step": int(fit["best_step"]),
+            "best_test_nll": float(fit["val"]["nll"]),
         },
-        ckpt_path,
     )
 
-    train_metrics = eval_moveformer(model, train_loader, device, topk=TOP_K_VALUES)
-    test_metrics = eval_moveformer(model, test_loader, device, topk=TOP_K_VALUES)
+    train_metrics = dict(fit["train"])
+    test_metrics = dict(fit["val"])
 
     return {
         "P": int(P),
@@ -788,7 +683,7 @@ def run_moveformer(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
-        "checkpoint_path": str(ckpt_path),
+        "checkpoint_path": ckpt_path,
     }
 
 
@@ -818,7 +713,6 @@ def run_method(
     if kind == "moveformer":
         return run_moveformer(
             study=study,
-            sampler_hash=sampler_hash,
             cfg=cfg,
             method=method,
             device=device,
@@ -827,187 +721,118 @@ def run_method(
     raise ValueError(f"Unknown kind={kind!r}")
 
 
-# def write_outputs(*, results: dict[str, dict[str, Any]], out_dir: Path, cfg: dict[str, Any]) -> None:
-#     import pandas as pd
-#
-#     out_dir.mkdir(parents=True, exist_ok=True)
-#     (out_dir / "raw_results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-#
-#     issf_methods = [m["name"] for m in cfg["methods"] if m["kind"] in {"issf_linear", "issf_mlp", "moveformer"}]
-#     deepssf_methods = [m["name"] for m in cfg["methods"] if m["kind"] == "deepssf"]
-#
-#     def _write_nll_csv(*, split: str, methods: list[str], prefix: str, random_key: str, random_label: str) -> None:
-#         if not methods:
-#             return
-#         rows = []
-#         for study_id, sr in results.items():
-#             row: dict[str, Any] = {"study": study_id}
-#
-#             first = sr.get(methods[0], {})
-#             r = first.get(random_key, {})
-#             if isinstance(r, dict) and "nll" in r:
-#                 row[random_label] = float(r["nll"])
-#
-#             for m in methods:
-#                 if m in sr and split in sr[m]:
-#                     row[m] = float(sr[m][split]["nll"])
-#             rows.append(row)
-#         df = pd.DataFrame(rows).set_index("study")
-#         df.to_csv(out_dir / f"{prefix}nll_{split}.csv")
-#
-#     def _write_topk_csvs(
-#         *,
-#         split: str,
-#         methods: list[str],
-#         prefix: str,
-#         random_key: str,
-#         random_label: str,
-#         topk: Sequence[int] = TOP_K_VALUES,
-#     ) -> None:
-#         if not methods:
-#             return
-#         for k in topk:
-#             rows = []
-#             for study_id, sr in results.items():
-#                 row: dict[str, Any] = {"study": study_id}
-#
-#                 first = sr.get(methods[0], {})
-#                 r = first.get(random_key, {})
-#                 if isinstance(r, dict) and "topk" in r and int(k) in r["topk"]:
-#                     row[random_label] = float(r["topk"][int(k)])
-#
-#                 for m in methods:
-#                     if m in sr and split in sr[m]:
-#                         row[m] = float(sr[m][split]["topk"][int(k)])
-#                 rows.append(row)
-#             df = pd.DataFrame(rows).set_index("study")
-#             df.to_csv(out_dir / f"{prefix}top{int(k)}_{split}.csv")
-#
-#     _write_nll_csv(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-#     _write_nll_csv(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-#     _write_topk_csvs(split="train", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-#     _write_topk_csvs(split="test", methods=issf_methods, prefix="", random_key="random", random_label="Random")
-#
-#     _write_nll_csv(split="train", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
-#     _write_nll_csv(split="test", methods=deepssf_methods, prefix="deepssf_", random_key="random_grid", random_label="RandomGrid")
-#     _write_topk_csvs(
-#         split="train",
-#         methods=deepssf_methods,
-#         prefix="deepssf_",
-#         random_key="random_grid",
-#         random_label="RandomGrid",
-#     )
-#     _write_topk_csvs(
-#         split="test",
-#         methods=deepssf_methods,
-#         prefix="deepssf_",
-#         random_key="random_grid",
-#         random_label="RandomGrid",
-#     )
-#
+def _study_results_dir(out_dir: Path) -> Path:
+    return Path(out_dir) / "studies"
 
 
-def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, resume: bool = False) -> None:
+def _study_results_path(out_dir: Path, study_id: str) -> Path:
+    safe = str(study_id).replace(os.sep, "_")
+    return _study_results_dir(out_dir) / f"{safe}.json"
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(Path(path).read_text())
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(path).with_suffix(Path(path).suffix + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    tmp.replace(path)
+
+
+def main(
+    *,
+    config_path: str | Path,
+    resume: bool = False,
+    allow_setup: bool = True,
+    studies: list[str] | None = None,
+) -> None:
     import torch
 
     from movebench import Study
 
     cfg = load_config(config_path)
-    if overrides:
-        if not isinstance(overrides, dict):
-            raise ValueError("overrides must be a dict when provided")
-        cfg = _deep_update(cfg, overrides)
+    if studies is None:
+        studies = resolve_studies(cfg)
+    else:
+        studies = [str(s).strip() for s in studies if str(s).strip()]
+        if not studies:
+            raise ValueError("No studies specified.")
 
-    studies = resolve_studies(cfg)
     out_dir = Path(str(cfg["output_dir"]))
     out_dir.mkdir(parents=True, exist_ok=True)
-    raw_results_path = out_dir / "raw_results.json"
+    _study_results_dir(out_dir).mkdir(parents=True, exist_ok=True)
 
     wandb_cfg = cfg.get("wandb", None)
     config_stem = str(Path(str(config_path)).stem)
-
     device = torch.device(str(cfg["runtime"]["device"]))
 
-    results: dict[str, dict[str, Any]] = {}
-    if resume and raw_results_path.exists():
-        loaded = json.loads(raw_results_path.read_text())
-        if not isinstance(loaded, dict):
-            raise ValueError(f"Expected raw_results.json to contain a dict; got {type(loaded).__name__}")
-        results = loaded  # type: ignore[assignment]
-
-    skipped_studies: list[tuple[str, str]] = []
+    def _is_complete(x: Any) -> bool:
+        return isinstance(x, dict) and "fit" in x and "test" in x
 
     for study_id in studies:
-        existing_study = results.get(study_id, {})
-        if not isinstance(existing_study, dict):
-            existing_study = {}
+        out_path = _study_results_path(out_dir, str(study_id))
 
-        def _is_complete(x: Any) -> bool:
-            return isinstance(x, dict) and "fit" in x and "test" in x
+        study_results: dict[str, Any] = {}
+        if resume and out_path.exists():
+            try:
+                loaded = _load_json(out_path)
+                if isinstance(loaded, dict):
+                    study_results = dict(loaded)
+            except Exception:
+                study_results = {}
 
-        if resume:
-            needs_any = any(not _is_complete(existing_study.get(str(m["name"]))) for m in cfg["methods"])
-            if not needs_any:
-                print(f"[{study_id}] all methods already present; skipping (--resume)")
-                continue
-
-        try:
-            study = Study(study_id)
-        except FileNotFoundError as e:
-            msg = f"missing study files: {e}"
-            skipped_studies.append((str(study_id), msg))
-            print(f"[{study_id}] WARNING: {msg} (skipping)", flush=True)
+        if resume and all(_is_complete(study_results.get(str(m["name"]))) for m in cfg["methods"]):
+            print(f"[{study_id}] all methods already present; skipping (--resume)")
             continue
 
-        try:
-            sampler_hash = ensure_study_ready(study=study, cfg=cfg)
-        except (FileNotFoundError, ValueError) as e:
-            msg = f"study setup failed: {type(e).__name__}: {e}"
-            skipped_studies.append((str(study_id), msg))
-            print(f"[{study_id}] WARNING: {msg} (skipping)", flush=True)
-            continue
+        study = Study(str(study_id))
+        sampler_hash = ensure_study_ready(study=study, cfg=cfg, allow_setup=allow_setup)
 
-        study_results: dict[str, Any] = dict(existing_study)
+        meta = study_results.get("__meta__")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.update(
+            {
+                "study_id": str(study.study_id),
+                "benchmark": str(config_stem),
+                "config_path": str(config_path),
+                "output_dir": str(out_dir),
+                "layers_config": str(cfg["layers_config"]),
+                "sampler_hash": str(sampler_hash),
+            }
+        )
+        study_results["__meta__"] = meta
+
         for method in cfg["methods"]:
             method_name = str(method["name"])
             if resume and _is_complete(study_results.get(method_name)):
                 print(f"[{study_id}] {method_name} exists; skipping (--resume)")
                 continue
+
             kind = str(method["kind"])
+            print(f"Running {study_id} {method_name}", flush=True)
 
-            print(f"Running {study_id} {method_name}")
+            with maybe_wandb_benchmark_log_callback(
+                wandb_cfg,
+                output_dir=out_dir,
+                study_id=str(study_id),
+                benchmark_name=str(config_stem),
+                method_name=str(method_name),
+                kind=str(kind),
+            ) as log_callback:
+                study_results[method_name] = run_method(
+                    kind=kind,
+                    study=study,
+                    sampler_hash=str(sampler_hash),
+                    cfg=cfg,
+                    method=method,
+                    device=device,
+                    log_callback=log_callback,
+                )
 
-            try:
-                with maybe_wandb_benchmark_log_callback(
-                    wandb_cfg,
-                    output_dir=out_dir,
-                    study_id=str(study_id),
-                    benchmark_name=str(config_stem),
-                    method_name=str(method_name),
-                    kind=str(kind),
-                    layers_config=str(cfg["layers_config"]),
-                    device=str(cfg["runtime"]["device"]),
-                    seed=int(cfg["runtime"]["seed"]),
-                ) as log_callback:
-                    study_results[method_name] = run_method(
-                        kind=kind,
-                        study=study,
-                        sampler_hash=str(sampler_hash),
-                        cfg=cfg,
-                        method=method,
-                        device=device,
-                        log_callback=log_callback,
-                    )
-            except (FileNotFoundError, ValueError) as e:
-                msg = f"{method_name} failed: {type(e).__name__}: {e}"
-                skipped_studies.append((str(study_id), msg))
-                print(f"[{study_id}] WARNING: {msg} (skipping method)", flush=True)
-                continue
-            results[study_id] = study_results
-            raw_results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
-            print(f"[{study_id}] {method_name} done")
+            _write_json_atomic(out_path, study_results)
+            print(f"[{study_id}] {method_name} done", flush=True)
 
-        results[study_id] = study_results
-        # write_outputs(results=results, out_dir=out_dir, cfg=cfg)
-
-    # write_outputs(results=results, out_dir=out_dir, cfg=cfg)
+        _write_json_atomic(out_path, study_results)

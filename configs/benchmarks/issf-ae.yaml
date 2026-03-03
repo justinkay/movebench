@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 layers_config: configs/layers_all_ae.yaml
 output_dir: results/benchmarks
@@ -36,9 +36,10 @@ methods:
     hparams:
       lr: 0.01
       weight_decay: 0.001
-      max_epochs: 50
-      eval_every_epochs: 1
-      patience_epochs: 5
+    schedule:
+      max_steps: 1000
+      eval_interval: 50
+      patience: 20
 
   - name: issf_mlp
     kind: issf_mlp
@@ -48,6 +49,7 @@ methods:
     hparams:
       lr: 0.001
       weight_decay: 0.0001
-      max_epochs: 50
-      eval_every_epochs: 1
-      patience_epochs: 5
+    schedule:
+      max_steps: 2000
+      eval_interval: 50
+      patience: 20

@@ -23,7 +23,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--resume",
         action="store_true",
-        help="Skip methods already present in output_dir/raw_results.json (and save progress after each method).",
+        help="Skip methods already present in output_dir/studies/<study_id>.json.",
     )
     return p.parse_args()
 
@@ -38,7 +38,7 @@ def main() -> None:
 
     from movebench import benchmark as mb_benchmark
 
-    mb_benchmark.main(config_path=str(args.config), overrides=None, resume=bool(args.resume))
+    mb_benchmark.main(config_path=str(args.config), resume=bool(args.resume))
 
 
 if __name__ == "__main__":

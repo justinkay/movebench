@@ -56,6 +56,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Do not skip existing point stores on disk.",
     )
     parser.add_argument(
+        "--compute-normalization",
+        action="store_true",
+        help="Compute env normalization stats from the extracted train point store.",
+    )
+    parser.add_argument(
         "--step-multiplier",
         type=float,
         default=2.0,
@@ -132,7 +137,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"[{i}/{len(names)}] Extracting {name}...")
         try:
             study = Study(name)
-            study.extract_point_features(
+            rep = study.extract_point_features(
                 config=args.config,
                 splits=args.splits,
                 parametric=bool(args.parametric),
@@ -145,6 +150,17 @@ def run(args: argparse.Namespace) -> int:
                 gap_q=float(args.gap_q),
                 bounds_buffer_deg=float(args.bounds_buffer_deg),
             )
+            if bool(args.compute_normalization):
+                sampler_hash = rep.get("sampler_hash")
+                if sampler_hash is None:
+                    raise ValueError("extract_point_features did not return sampler_hash; cannot compute normalization.")
+                study.compute_normalization_vals(
+                    from_="points",
+                    config=args.config,
+                    sampler_hash=str(sampler_hash),
+                    split="train",
+                    skip_existing=not bool(args.no_skip_existing),
+                )
         except Exception as e:
             any_failed = True
             print(f"  ERROR: {e}")

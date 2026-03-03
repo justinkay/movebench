@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 layers_config: configs/layers_all.yaml
 output_dir: results/benchmarks_lite
@@ -55,9 +55,10 @@ methods:
     hparams:
       lr: 0.01
       weight_decay: 0.001
-      max_epochs: 50
-      eval_every_epochs: 1
-      patience_epochs: 5
+    schedule:
+      max_steps: 1000
+      eval_interval: 50
+      patience: 20
 
   - name: issf_mlp_lite
     kind: issf_mlp
@@ -67,9 +68,10 @@ methods:
     hparams:
       lr: 0.001
       weight_decay: 0.0001
-      max_epochs: 50
-      eval_every_epochs: 1
-      patience_epochs: 5
+    schedule:
+      max_steps: 2000
+      eval_interval: 50
+      patience: 20
 
   - name: deepssf_lite
     kind: deepssf
@@ -79,9 +81,10 @@ methods:
       lr_movement: 0.00001
       lr_habitat: 0.0001
       weight_decay: 0.0
-      max_epochs: 100
-      eval_every_epochs: 1
-      patience_epochs: 5
+    schedule:
+      max_steps: 3000
+      eval_interval: 100
+      patience: 10
 
   - name: moveformer_lite
     kind: moveformer
@@ -90,6 +93,7 @@ methods:
       weight_decay: 0.0
       warmup_steps: 1000
       lr_gamma: 0.98
-      max_epochs: 180
-      eval_every_epochs: 1
-      patience_epochs: 10
+    schedule:
+      max_steps: 5000
+      eval_interval: 200
+      patience: 10

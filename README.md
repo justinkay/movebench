@@ -58,6 +58,48 @@ Download GEE rasters for all studies present under the studies root:
 movebench download --config configs/layers_all.yaml
 ```
 
+## Benchmarks
+
+Print the resolved study ids in deterministic order (useful for Slurm job arrays):
+
+```bash
+movebench bench --config configs/benchmarks/all.yaml --print-studies > studies.txt
+```
+
+Run a single study (recommended for job arrays):
+
+```bash
+movebench bench --config configs/benchmarks/all.yaml --study "<study_id>" --resume --no-setup
+```
+
+Outputs are written per study to:
+- `results/benchmarks/studies/<study_id>.json`
+
+### Slurm job arrays (replaces `--max-concurrent-jobs`)
+
+Use Slurm's built-in array throttling: `--array=START-END%MAX_RUNNING`.
+
+Example (32 concurrent studies):
+
+```bash
+sbatch --array=0-$(($(wc -l < studies.txt)-1))%32 bench_array.sbatch
+```
+
+Each array task should select its study id by index and run one study:
+
+```bash
+STUDY_ID=$(sed -n "$((SLURM_ARRAY_TASK_ID+1))p" studies.txt)
+movebench bench --config configs/benchmarks/all.yaml --study "$STUDY_ID" --resume --no-setup
+```
+
+## deepSSF WebDataset cache (optional)
+
+If your benchmark config enables `datasets.deepssf.cache`, you can prebuild caches per study:
+
+```bash
+movebench wds-cache --config configs/benchmarks/all.yaml --study "<study_id>" --splits train test
+```
+
 ## Example notebook
 
 See `notebooks/example.ipynb` to get started.

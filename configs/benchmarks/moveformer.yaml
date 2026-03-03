@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 # MoveFormer baseline configuration.
 #
@@ -53,6 +53,7 @@ methods:
       weight_decay: 0.0
       warmup_steps: 1000
       lr_gamma: 0.98
-      max_epochs: 180
-      eval_every_epochs: 1
-      patience_epochs: 10
+    schedule:
+      max_steps: 5000
+      eval_interval: 200
+      patience: 10
