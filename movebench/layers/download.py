@@ -267,6 +267,32 @@ def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
     else:
         raise ValueError(f"Unsupported temporal={temporal!r} for gee_chip layer {layer!r}")
 
+    if layer == "era5_land":
+        era5 = _nearest_from_window("ECMWF/ERA5/HOURLY", timestamp, bands=spec.bands, start=-1, end=1, unit="hour")
+        img = img.unmask(era5, sameFootprint=False)
+
+    if layer == "era5_land_daily":
+        fallback = _fully_masked_image(spec.bands)
+        src = [
+            "mean_2m_air_temperature",
+            "dewpoint_2m_temperature",
+            "total_precipitation",
+            "surface_pressure",
+            "u_component_of_wind_10m",
+            "v_component_of_wind_10m",
+        ]
+        dst = [
+            "temperature_2m",
+            "dewpoint_temperature_2m",
+            "total_precipitation_sum",
+            "surface_pressure",
+            "u_component_of_wind_10m",
+            "v_component_of_wind_10m",
+        ]
+        era5_daily = _nearest_from_window("ECMWF/ERA5/DAILY", timestamp, bands=src, start=-1, end=1, unit="day").rename(dst)
+        fallback = fallback.addBands(era5_daily, overwrite=True).select(spec.bands)
+        img = img.unmask(fallback, sameFootprint=False)
+
     if getattr(spec, "scale_factor", 1.0) not in (None, 1.0):
         img = img.multiply(float(spec.scale_factor))
 
