@@ -155,6 +155,7 @@ def select_step_starts(
                 "start_bearing": pd.Series(dtype="float64"),
                 "end_lon": pd.Series(dtype="float64"),
                 "end_lat": pd.Series(dtype="float64"),
+                "step_dt_s": pd.Series(dtype="float64"),
             }
         )
 
@@ -178,6 +179,7 @@ def select_step_starts(
             "start_bearing": starts["bearing"].astype(float),
             "end_lon": ends[LON_COL].astype(float),
             "end_lat": ends[LAT_COL].astype(float),
+            "step_dt_s": ends["time_since_last"].dt.total_seconds().astype(float),
         }
     )
 

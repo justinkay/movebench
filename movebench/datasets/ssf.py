@@ -12,6 +12,7 @@ They do not perform raster IO or candidate generation. They:
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,12 @@ from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectori
 TARGET_CRS = "EPSG:3857" # meters
 
 
-def _compute_movement_stats(step_length_m: torch.Tensor, turn_angle_rad: torch.Tensor) -> dict[str, float]:
-    """Compute mean/std for sl, log_sl, cos_ta from true endpoints only."""
+def _compute_movement_stats(
+    step_length_m: torch.Tensor,
+    turn_angle_rad: torch.Tensor,
+    step_dt_s: torch.Tensor | None = None,
+) -> dict[str, float]:
+    """Compute mean/std for sl, log_sl, cos_ta (and optionally speed) from true endpoints only."""
     sl = step_length_m[:, -1].to(dtype=torch.float64)
     ta = turn_angle_rad[:, -1].to(dtype=torch.float64)
 
@@ -47,7 +52,7 @@ def _compute_movement_stats(step_length_m: torch.Tensor, turn_angle_rad: torch.T
     log_sl_mean, log_sl_std = ms(log_sl)
     cos_ta_mean, cos_ta_std = ms(cos_ta)
 
-    return {
+    stats: dict[str, float] = {
         "sl_mean": sl_mean,
         "sl_std": sl_std,
         "log_sl_mean": log_sl_mean,
@@ -55,6 +60,15 @@ def _compute_movement_stats(step_length_m: torch.Tensor, turn_angle_rad: torch.T
         "cos_ta_mean": cos_ta_mean,
         "cos_ta_std": cos_ta_std,
     }
+
+    if step_dt_s is not None:
+        dt = step_dt_s.to(dtype=torch.float64)
+        speed = sl / dt
+        speed_mean, speed_std = ms(speed)
+        stats["speed_mean"] = speed_mean
+        stats["speed_std"] = speed_std
+
+    return stats
 
 
 def _subset_plan_env_channels(
@@ -221,6 +235,7 @@ class iSSFDataset(SSFDataset):
         normalize_movement: bool = True,
         include_time: bool = False,
         include_individual_id: bool = False,
+        include_speed: bool = False,
         movement_stats: dict[str, float] | None = None,
         num_candidates: int | None = None,
         random_seed: int | None = None,
@@ -260,9 +275,20 @@ class iSSFDataset(SSFDataset):
         self.turn_angle_rad = d.get("turn_angle_rad")
         self.point_id_start = d.get("point_id_start")
         self.timestamp_ns = d.get("timestamp_ns")
+        self.step_dt_s = d.get("step_dt_s")
 
         if self.step_length_m is None or self.turn_angle_rad is None or self.point_id_start is None or self.timestamp_ns is None:
             raise ValueError("features.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
+
+        self.include_speed = bool(include_speed)
+        if self.include_speed and self.step_dt_s is None:
+            warnings.warn(
+                "features.pt does not contain 'step_dt_s'; include_speed disabled. "
+                "Re-run extract_point_features to enable speed.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self.include_speed = False
 
         if self.env.ndim != 3 or self.valid.ndim != 3:
             raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
@@ -295,7 +321,10 @@ class iSSFDataset(SSFDataset):
             if movement_stats is not None:
                 self._movement_stats = dict(movement_stats)
             elif self.split == "train":
-                self._movement_stats = _compute_movement_stats(self.step_length_m, self.turn_angle_rad)
+                self._movement_stats = _compute_movement_stats(
+                    self.step_length_m, self.turn_angle_rad,
+                    self.step_dt_s if self.include_speed else None,
+                )
             else:
                 train_dir = (
                     self.study_dir
@@ -312,7 +341,10 @@ class iSSFDataset(SSFDataset):
                         f"Expected: {train_pt}"
                     )
                 td = torch.load(train_pt, map_location="cpu")
-                self._movement_stats = _compute_movement_stats(td["step_length_m"], td["turn_angle_rad"])
+                self._movement_stats = _compute_movement_stats(
+                    td["step_length_m"], td["turn_angle_rad"],
+                    td.get("step_dt_s") if self.include_speed else None,
+                )
         else:
             self._movement_stats = None
 
@@ -355,6 +387,14 @@ class iSSFDataset(SSFDataset):
             log_sl = (log_sl - float(s["log_sl_mean"])) / float(s["log_sl_std"])
             cos_ta = (cos_ta - float(s["cos_ta_mean"])) / float(s["cos_ta_std"])
 
+        if self.include_speed:
+            assert self.step_dt_s is not None
+            dt = float(self.step_dt_s[int(idx)].item())
+            speed = self.step_length_m[int(idx)].to(dtype=torch.float32) / dt
+            if self._movement_stats is not None:
+                speed = (speed - float(s["speed_mean"])) / float(s["speed_std"])
+            return torch.stack([sl, log_sl, cos_ta, speed], dim=0)
+
         return torch.stack([sl, log_sl, cos_ta], dim=0)
 
     def _time_features(self, idx: int, P: int) -> torch.Tensor:
@@ -394,8 +434,8 @@ class iSSFDataset(SSFDataset):
         P = int(env.shape[1])
         C_env = int(env.shape[0])
 
-        move = self._movement_features(idx)  # (3,P)
-        move_valid = torch.ones((3, P), dtype=torch.bool)
+        move = self._movement_features(idx)  # (3,P) or (4,P)
+        move_valid = torch.ones((move.shape[0], P), dtype=torch.bool)
 
         parts = [env, move]
         valids = [env_valid, move_valid]
@@ -414,8 +454,9 @@ class iSSFDataset(SSFDataset):
             parts.append(indiv)
             valids.append(indiv_valid)
 
+        c_move = int(move.shape[0])
         move_env = self._interactions(move, env)
-        move_env_valid = env_valid.unsqueeze(0).expand(3, -1, -1).reshape(3 * C_env, P)
+        move_env_valid = env_valid.unsqueeze(0).expand(c_move, -1, -1).reshape(c_move * C_env, P)
         parts.append(move_env)
         valids.append(move_env_valid)
 
@@ -426,7 +467,7 @@ class iSSFDataset(SSFDataset):
             valids.append(time_env_valid)
 
             time_move = self._interactions(time, move)
-            time_move_valid = torch.ones((4 * 3, P), dtype=torch.bool)
+            time_move_valid = torch.ones((4 * c_move, P), dtype=torch.bool)
             parts.append(time_move)
             valids.append(time_move_valid)
 
@@ -466,7 +507,8 @@ class iSSFDataset(SSFDataset):
         N, C_env, P = self.env.shape
         n_indiv = int(self._n_individuals) if self.include_individual_id else 0
         c_time = 4 if self.include_time else 0
-        c_total = int(C_env) + 3 + int(c_time) + int(n_indiv) + (3 * int(C_env)) + (0 if c_time == 0 else (4 * int(C_env) + 12))
+        c_move = 4 if self.include_speed else 3
+        c_total = int(C_env) + int(c_move) + int(c_time) + int(n_indiv) + (int(c_move) * int(C_env)) + (0 if c_time == 0 else (4 * int(C_env) + 4 * int(c_move)))
 
         # Precompute time features on CPU once (small) to avoid repeated pandas work.
         time4_cpu: torch.Tensor | None
@@ -530,12 +572,20 @@ class iSSFDataset(SSFDataset):
                 ta = self.turn_angle_rad[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,P)
                 log_sl = torch.log(sl + 1e-8)
                 cos_ta = torch.cos(ta)
-                move = torch.stack([sl, log_sl, cos_ta], dim=1)  # (B,3,P)
+                if self.include_speed:
+                    assert self.step_dt_s is not None
+                    dt = self.step_dt_s[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,)
+                    speed = sl / dt.unsqueeze(-1)  # (B,P)
+                    move = torch.stack([sl, log_sl, cos_ta, speed], dim=1)  # (B,4,P)
+                else:
+                    move = torch.stack([sl, log_sl, cos_ta], dim=1)  # (B,3,P)
                 if self._movement_stats is not None:
                     st = self._movement_stats
                     move[:, 0, :] = (move[:, 0, :] - float(st["sl_mean"])) / float(st["sl_std"])
                     move[:, 1, :] = (move[:, 1, :] - float(st["log_sl_mean"])) / float(st["log_sl_std"])
                     move[:, 2, :] = (move[:, 2, :] - float(st["cos_ta_mean"])) / float(st["cos_ta_std"])
+                    if self.include_speed:
+                        move[:, 3, :] = (move[:, 3, :] - float(st["speed_mean"])) / float(st["speed_std"])
 
                 # --- optional time + id features ---
                 if time4_cpu is not None:
@@ -553,10 +603,10 @@ class iSSFDataset(SSFDataset):
                     indiv_feats = None
 
                 # --- interactions ---
-                move_env = (move.unsqueeze(2) * env.unsqueeze(1)).reshape(b, 3 * int(C_env), int(P))
+                move_env = (move.unsqueeze(2) * env.unsqueeze(1)).reshape(b, int(c_move) * int(C_env), int(P))
                 if time_feats is not None:
                     time_env = (time_feats.unsqueeze(2) * env.unsqueeze(1)).reshape(b, 4 * int(C_env), int(P))
-                    time_move = (time_feats.unsqueeze(2) * move.unsqueeze(1)).reshape(b, 12, int(P))
+                    time_move = (time_feats.unsqueeze(2) * move.unsqueeze(1)).reshape(b, 4 * int(c_move), int(P))
                 else:
                     time_env = None
                     time_move = None
@@ -565,8 +615,8 @@ class iSSFDataset(SSFDataset):
                 o = 0
                 out[s:e, o : o + int(C_env), :] = env.to(dtype=dtype)
                 o += int(C_env)
-                out[s:e, o : o + 3, :] = move.to(dtype=dtype)
-                o += 3
+                out[s:e, o : o + int(c_move), :] = move.to(dtype=dtype)
+                o += int(c_move)
 
                 if time_feats is not None:
                     out[s:e, o : o + 4, :] = time_feats.to(dtype=dtype)
@@ -575,14 +625,14 @@ class iSSFDataset(SSFDataset):
                     out[s:e, o : o + int(n_indiv), :] = indiv_feats.to(dtype=dtype)
                     o += int(n_indiv)
 
-                out[s:e, o : o + (3 * int(C_env)), :] = move_env.to(dtype=dtype)
-                o += 3 * int(C_env)
+                out[s:e, o : o + (int(c_move) * int(C_env)), :] = move_env.to(dtype=dtype)
+                o += int(c_move) * int(C_env)
 
                 if time_env is not None and time_move is not None:
                     out[s:e, o : o + (4 * int(C_env)), :] = time_env.to(dtype=dtype)
                     o += 4 * int(C_env)
-                    out[s:e, o : o + 12, :] = time_move.to(dtype=dtype)
-                    o += 12
+                    out[s:e, o : o + (4 * int(c_move)), :] = time_move.to(dtype=dtype)
+                    o += 4 * int(c_move)
 
                 if o != int(c_total):
                     raise RuntimeError(f"Internal error: packed {o} channels, expected {c_total}")

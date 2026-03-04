@@ -710,6 +710,13 @@ def extract_split_feature_store(
     point_id_start = torch.zeros((n_steps,), dtype=torch.int64)
     timestamp_ns = torch.zeros((n_steps,), dtype=torch.int64)
 
+    dt_vals = steps["step_dt_s"].to_numpy(dtype=np.float32) if "step_dt_s" in steps.columns else None
+    if dt_vals is not None:
+        dt_vals = np.maximum(dt_vals, 1e-3)
+        step_dt_s: torch.Tensor | None = torch.from_numpy(dt_vals)
+    else:
+        step_dt_s = None
+
     if n_workers <= 1:
         from movebench.layers.io import LayerIO
 
@@ -753,17 +760,17 @@ def extract_split_feature_store(
                 timestamp_ns[idx] = int(tsn)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "env": env,
-            "valid": valid,
-            "step_length_m": step_length_m,
-            "turn_angle_rad": turn_angle_rad,
-            "point_id_start": point_id_start,
-            "timestamp_ns": timestamp_ns,
-        },
-        out_pt,
-    )
+    save_dict = {
+        "env": env,
+        "valid": valid,
+        "step_length_m": step_length_m,
+        "turn_angle_rad": turn_angle_rad,
+        "point_id_start": point_id_start,
+        "timestamp_ns": timestamp_ns,
+    }
+    if step_dt_s is not None:
+        save_dict["step_dt_s"] = step_dt_s
+    torch.save(save_dict, out_pt)
 
     extraction = {
         "points_per_step": int(P),
@@ -779,6 +786,8 @@ def extract_split_feature_store(
         "point_id_start": {"shape": list(point_id_start.shape), "dtype": str(point_id_start.dtype)},
         "timestamp_ns": {"shape": list(timestamp_ns.shape), "dtype": str(timestamp_ns.dtype)},
     }
+    if step_dt_s is not None:
+        tensors["step_dt_s"] = {"shape": list(step_dt_s.shape), "dtype": str(step_dt_s.dtype)}
 
     manifest = PointFeatureManifest(
         schema_version="1",
