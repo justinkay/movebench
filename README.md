@@ -5,8 +5,7 @@
 1. Make sure to **build GDAL with HDF4 drivers**. It's recommended to do this with **conda-forge**.
 
 ```bash
-conda create -n movebench -c conda-forge python=3.11 \
-  gdal hdf4 rasterio pyproj
+conda create -n movebench -c conda-forge python=3.11 gdal hdf4 rasterio pyproj libgdal-hdf4
 conda activate movebench
 ```
 
