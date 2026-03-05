@@ -55,13 +55,25 @@ def ensure_ee_initialized():
     """Lazily initialize the Earth Engine client.
 
     This keeps imports working on machines without Earth Engine installed.
+
+    Set ``MOVEBENCH_EE_PROJECT`` to your Google Cloud project ID to use the
+    high-volume endpoint (required for parallel / high-throughput downloads).
+    Without it, the standard endpoint is used as a fallback.
     """
     global _ee_initialized, _ee
     if not _ee_initialized:
+        import os
         import ee
 
         _ee = ee
-        ee.Initialize(opt_url="https://earthengine-highvolume.googleapis.com")
+        project = os.environ.get("MOVEBENCH_EE_PROJECT")
+        if project:
+            ee.Initialize(
+                project=project,
+                opt_url="https://earthengine-highvolume.googleapis.com",
+            )
+        else:
+            ee.Initialize()
         _ee_initialized = True
     return _ee
 

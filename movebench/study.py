@@ -138,6 +138,61 @@ class Study:
             "tiles": tile_stats,
         }
 
+    def download_point_values(
+        self,
+        *,
+        config: str | Path = "configs/layers_all.yaml",
+        splits: list[str] | None = None,
+        n_workers: int = 32,
+        batch_size: int = 500,
+        skip_existing: bool = True,
+    ) -> dict:
+        """Sample GEE gee_chip layers at exact GPS coordinates for all points.
+
+        Unlike ``download_rasters()``, this method:
+        - Does not compute a buffer — no outlier sensitivity.
+        - No step-length or time-gap filtering is applied to any GPS point.
+        - Returns scalar covariate values stored in a flat Parquet file.
+
+        Writes to:
+            ``study_dir/point_values/<config_hash>/values.parquet``
+            ``study_dir/point_values/<config_hash>/metadata.json``
+
+        Args:
+            config:        Path to a layers YAML config.
+            splits:        Optional list of splits to process (e.g.
+                           ``["train", "test"]``). If None, all points are processed.
+            n_workers:     Number of multiprocessing workers.
+            batch_size:    Max points per GEE sampleRegions call.
+            skip_existing: If True, skip already-downloaded points.
+
+        Returns:
+            dict with keys: config_hash, parquet_path, n_points,
+                            n_downloaded, n_existing, n_failed, failures.
+        """
+        cfg = load_layers_config(config)
+        plan = REGISTRY.resolve(cfg)
+
+        import pandas as pd
+        from movebench.layers.sample_points import (
+            TIME_COL,
+            sample_point_values,
+        )
+
+        df = pd.read_csv(self.trajectories_path)
+        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce", utc=True)
+
+        return sample_point_values(
+            df,
+            study_dir=self.study_dir,
+            plan=plan,
+            registry=REGISTRY,
+            splits=splits,
+            n_workers=n_workers,
+            batch_size=batch_size,
+            skip_existing=skip_existing,
+        )
+
     def extract_point_features(
         self,
         *,
@@ -370,6 +425,69 @@ class Study:
             step_q=step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
+        )
+
+    def anomaly_dataset(
+        self,
+        *,
+        split: str = "train",
+        config: str | Path = "configs/layers_all.yaml",
+        include_env: bool = True,
+        include_movement: bool = True,
+        include_outgoing_movement: bool = False,
+        normalize: bool = True,
+        normalization_stats: dict | None = None,
+        step_multiplier: float = 2.0,
+        step_q: float = 0.95,
+        gap_q: float = 0.999,
+    ):
+        """Create an AnomalyPointDataset backed by point_values parquet + trajectories.
+
+        Step selection uses ``select_step_starts()`` from ``trajectories.py`` —
+        identical to the iSSF pipeline — so ``step_multiplier``, ``step_q``, and
+        ``gap_q`` have the same meaning as in ``extract_point_features()``.
+        Each item corresponds to one valid step; the step-start GPS fix is
+        identified by ``point_id_start`` (same naming as ``features/points.py``).
+
+        No ``extract_point_features()`` step is needed; features are built
+        on-the-fly from:
+          - ``study_dir/point_values/<config_hash>/values.parquet`` (env covariates
+            at ``point_id_start``), and
+          - ``trajectories.csv`` (movement: step_length_m, step_dt_s, speed_m_s,
+            turn_angle_rad — forward-looking, start → end).
+
+        Requires ``Study.download_point_values()`` to have been run when
+        ``include_env=True``.
+
+        Args:
+            split:               "train", "test", or None for all splits.
+            config:              Path to a layers YAML config.
+            include_env:         Include GEE environmental covariates.
+            include_movement:    Include movement features.
+            normalize:           Z-score normalize using this split's non-NaN stats.
+            normalization_stats: Pre-computed stats dict (``train_ds.normalization_stats``)
+                                 to apply to another split without recomputing.
+            step_multiplier:     Same as in ``extract_point_features()``.
+            step_q:              Same as in ``extract_point_features()``.
+            gap_q:               Same as in ``extract_point_features()``.
+        """
+        plan = self.layer_plan(config)
+
+        from movebench.datasets.anomaly import AnomalyPointDataset
+
+        return AnomalyPointDataset(
+            study_dir=self.study_dir,
+            trajectories_path=self.trajectories_path,
+            plan=plan,
+            split=split,
+            include_env=include_env,
+            include_movement=include_movement,
+            include_outgoing_movement=include_outgoing_movement,
+            normalize=normalize,
+            normalization_stats=normalization_stats,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            gap_q=gap_q,
         )
 
     def compute_normalization_vals(
