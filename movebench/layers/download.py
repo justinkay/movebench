@@ -176,6 +176,119 @@ def union_regions(regions: list):
     return ee.Geometry.MultiPolygon(regions)
 
 
+def _clamp_tile_bounds_latlon(bounds_latlon: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Clamp tile bounds to a valid EPSG:4326 lon/lat range.
+
+    Earth Engine can snap coveringGrid cells slightly beyond [-180,180] near the dateline. Since all
+    downstream readers expect lon in [-180,180], clamp bounds here to avoid invalid requests.
+    """
+    min_lon, min_lat, max_lon, max_lat = (float(x) for x in bounds_latlon)
+    min_lon = max(min_lon, -180.0)
+    max_lon = min(max_lon, 180.0)
+    min_lat = max(min_lat, -89.9999)
+    max_lat = min(max_lat, 89.9999)
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
+def _bounds_from_ee_feature_info(feature_info: Any) -> tuple[float, float, float, float]:
+    """Extract (min_lon, min_lat, max_lon, max_lat) from an EE Feature `getInfo()` dict."""
+    if not isinstance(feature_info, dict):
+        raise TypeError(f"Expected feature_info dict, got {type(feature_info)!r}")
+
+    geom = feature_info.get("geometry")
+    if isinstance(geom, dict) and "coordinates" in geom:
+        coords = geom.get("coordinates")
+    elif "coordinates" in feature_info:
+        # Some callers may pass a geometry dict directly.
+        coords = feature_info.get("coordinates")
+    else:
+        raise KeyError("Feature info missing geometry coordinates")
+
+    if not isinstance(coords, list) or not coords:
+        raise ValueError("Invalid geometry coordinates (expected non-empty list)")
+
+    ring = coords[0]
+    if not isinstance(ring, list) or not ring:
+        raise ValueError("Invalid geometry coordinates (expected polygon ring)")
+
+    min_lon = min(float(c[0]) for c in ring)
+    max_lon = max(float(c[0]) for c in ring)
+    min_lat = min(float(c[1]) for c in ring)
+    max_lat = max(float(c[1]) for c in ring)
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
+def _enumerate_covering_grid_tile_bounds(
+    filtered_fc: Any,
+    *,
+    n_tiles_reported: int,
+    page_size: int = 250,
+) -> tuple[list[tuple[float, float, float, float]], list[int], list[dict[str, Any]], int]:
+    """Enumerate tile bounds from a coveringGrid FeatureCollection.
+
+    This intentionally avoids per-index `toList(1, i)` calls, which have proven unstable for some
+    computed FeatureCollections; instead it pages `toList(limit, offset)` and parses client-side.
+    """
+    n_tiles_reported_i = int(n_tiles_reported)
+    page_size_i = max(int(page_size), 1)
+
+    tile_bounds_latlon: list[tuple[float, float, float, float]] = []
+    tile_indices: list[int] = []
+    geometry_errors: list[dict[str, Any]] = []
+    n_tiles_effective = int(n_tiles_reported_i)
+
+    for offset in range(0, n_tiles_reported_i, page_size_i):
+        expected = min(int(page_size_i), int(n_tiles_reported_i) - int(offset))
+        if expected <= 0:
+            break
+
+        try:
+            page = filtered_fc.toList(int(expected), int(offset)).getInfo()
+        except Exception as e:
+            geometry_errors.append({"tile_index": int(offset), "error": f"tile_page_failed: {type(e).__name__}: {e}"})
+            n_tiles_effective = int(offset)
+            break
+
+        if not isinstance(page, list):
+            geometry_errors.append(
+                {
+                    "tile_index": int(offset),
+                    "error": f"tile_page_invalid: expected list, got {type(page).__name__}",
+                }
+            )
+            n_tiles_effective = int(offset)
+            break
+
+        if len(page) < int(expected):
+            n_tiles_effective = int(offset) + int(len(page))
+
+        if not page:
+            break
+
+        for j, feat in enumerate(page):
+            i = int(offset) + int(j)
+            try:
+                bounds = _bounds_from_ee_feature_info(feat)
+                bounds = _clamp_tile_bounds_latlon(bounds)
+                if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+                    raise ValueError(f"degenerate_bounds: {bounds}")
+            except Exception as e:
+                geometry_errors.append(
+                    {
+                        "tile_index": int(i),
+                        "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
+                    }
+                )
+                continue
+            tile_bounds_latlon.append(bounds)
+            tile_indices.append(int(i))
+
+        if len(page) < int(expected):
+            break
+
+    return tile_bounds_latlon, tile_indices, geometry_errors, int(n_tiles_effective)
+
+
 def _fully_masked_image(bands: list[str]):
     ee = ensure_ee_initialized()
     base = ee.Image.constant([0] * len(bands)).rename(bands).toFloat()
@@ -579,7 +692,10 @@ def _download_tile_worker(args: tuple[int, TileRequest, dict[str, Any]]) -> dict
         img = _tile_image(layer, registry=registry, year=year_int).unmask(
             GEE_NODATA_SENTINEL, sameFootprint=False
         )
-        min_lon, min_lat, max_lon, max_lat = (float(x) for x in req.bounds_latlon)
+        bounds_latlon = _clamp_tile_bounds_latlon(req.bounds_latlon)
+        min_lon, min_lat, max_lon, max_lat = bounds_latlon
+        if min_lon >= max_lon or min_lat >= max_lat:
+            raise ValueError(f"Invalid tile bounds: {bounds_latlon}")
         region = ee.Geometry.Rectangle(
             [min_lon, min_lat, max_lon, max_lat], proj=crs, geodesic=False
         )
@@ -590,7 +706,7 @@ def _download_tile_worker(args: tuple[int, TileRequest, dict[str, Any]]) -> dict
             out_path=out_path,
             num_bands=num_bands,
             crs=crs,
-            bounds_latlon=req.bounds_latlon,
+            bounds_latlon=bounds_latlon,
         )
         return {"tile_index": tile_index, "status": "downloaded", "file": out_path.name}
     except Exception as e:
@@ -1134,49 +1250,17 @@ def download_tile_layer(
     union_region = union_regions(rect_geoms)
 
     grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m)
-    filtered = grid.filter(ee.Filter.intersects(".geo", union_region))
+    filtered = grid.filter(ee.Filter.intersects(".geo", union_region)).sort("system:index")
 
     n_tiles_reported = int(filtered.size().getInfo())
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
-    tile_regions: list[Any] = []
-    tile_bounds_latlon: list[tuple[float, float, float, float]] = []
-    tile_indices: list[int] = []
-    geometry_errors: list[dict[str, Any]] = []
-    n_tiles_effective = int(n_tiles_reported)
-
-    for i in range(int(n_tiles_reported)):
-        try:
-            region = ee.Feature(filtered.toList(1, i).get(0)).geometry()
-            info = region.getInfo()
-        except Exception as e:
-            msg = str(e)
-            is_list_index_error = ("List index must be between" in msg) or ("List.get: List is empty" in msg)
-
-            # Earth Engine can occasionally report `size()` larger than the number
-            # of items returned by `toList(1, offset)`. If that happens near the tail,
-            # stop early and treat the effective tile count as the first missing index.
-            if is_list_index_error and i >= max(int(n_tiles_reported) - 5, 0):
-                n_tiles_effective = int(i)
-                break
-
-            geometry_errors.append(
-                {
-                    "tile_index": int(i),
-                    "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
-                }
-            )
-            continue
-        coords = info["coordinates"][0]
-        min_lon = min(c[0] for c in coords)
-        max_lon = max(c[0] for c in coords)
-        min_lat = min(c[1] for c in coords)
-        max_lat = max(c[1] for c in coords)
-
-        tile_regions.append(region)
-        tile_bounds_latlon.append((float(min_lon), float(min_lat), float(max_lon), float(max_lat)))
-        tile_indices.append(int(i))
+    tile_bounds_latlon, tile_indices, geometry_errors, n_tiles_effective = _enumerate_covering_grid_tile_bounds(
+        filtered,
+        n_tiles_reported=int(n_tiles_reported),
+        page_size=250,
+    )
 
     if is_annual:
         years_out: dict[int, dict[str, Any]] = {}
