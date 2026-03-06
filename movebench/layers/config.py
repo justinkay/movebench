@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import yaml
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ DEFAULT_RASTER_PARAMS: dict[str, Any] = {
         "step_multiplier": 2.0,
         "step_q": 0.95,
         "gap_q": 0.999,
+        "min_step_time_s": None,
+        "max_step_time_s": None,
     },
     "scale_clamp": {
         "min_pixels": 3,
@@ -22,10 +25,6 @@ DEFAULT_RASTER_PARAMS: dict[str, Any] = {
     },
     "tiles": {
         "px_per_side": 500,
-    },
-    "region_multiplier": {
-        "train": 1.0,
-        "test": 1.0,
     },
 }
 
@@ -53,15 +52,17 @@ def _canonical_dict(cfg: LayersConfig) -> dict[str, Any]:
 
 def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
     rp = cfg.raster_params
-    region_multiplier = {
-        str(k): float(v) for k, v in sorted(dict(rp["region_multiplier"]).items(), key=lambda kv: str(kv[0]))
+    buffer = {
+        "step_multiplier": float(rp["buffer"]["step_multiplier"]),
+        "step_q": float(rp["buffer"]["step_q"]),
+        "gap_q": float(rp["buffer"]["gap_q"]),
     }
+    if rp["buffer"].get("min_step_time_s") is not None:
+        buffer["min_step_time_s"] = int(rp["buffer"]["min_step_time_s"])
+    if rp["buffer"].get("max_step_time_s") is not None:
+        buffer["max_step_time_s"] = int(rp["buffer"]["max_step_time_s"])
     return {
-        "buffer": {
-            "step_multiplier": float(rp["buffer"]["step_multiplier"]),
-            "step_q": float(rp["buffer"]["step_q"]),
-            "gap_q": float(rp["buffer"]["gap_q"]),
-        },
+        "buffer": buffer,
         "scale_clamp": {
             "min_pixels": int(rp["scale_clamp"]["min_pixels"]),
             "max_pixels": int(rp["scale_clamp"]["max_pixels"]),
@@ -69,7 +70,10 @@ def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
         "tiles": {
             "px_per_side": int(rp["tiles"]["px_per_side"]),
         },
-        "region_multiplier": region_multiplier,
+        "region_multiplier": {
+            "train": 1.0,
+            "test": 1.0,
+        },
     }
 
 
@@ -88,6 +92,27 @@ def rasters_hash(cfg: LayersConfig) -> str:
     payload = json.dumps(_canonical_raster_params(cfg), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 
+
+_DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$")
+
+
+def _parse_duration_seconds(raw: Any, *, field_name: str) -> int | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"{field_name} must be a string duration like '1h' or null")
+    match = _DURATION_RE.fullmatch(raw.strip())
+    if match is None:
+        raise ValueError(f"{field_name} must match <int><unit> with unit in {{s,m,h,d}}, got {raw!r}")
+
+    value = int(match.group("value"))
+    if value <= 0:
+        raise ValueError(f"{field_name} must be > 0, got {raw!r}")
+
+    unit = match.group("unit")
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return value * multiplier
+
 def _parse_raster_params(raw: Any) -> dict[str, Any]:
     if raw is None:
         raw = {}
@@ -102,10 +127,21 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
             raise ValueError(f"raster_params.{name} must be a mapping")
         return v
 
-    buf = {**DEFAULT_RASTER_PARAMS["buffer"], **_get_section("buffer")}
+    buf_raw = _get_section("buffer")
+    buf = {**DEFAULT_RASTER_PARAMS["buffer"], **buf_raw}
     step_multiplier = float(buf["step_multiplier"])
     step_q = float(buf["step_q"])
     gap_q = float(buf["gap_q"])
+    min_step_time_s = _parse_duration_seconds(
+        buf_raw.get("min_step_time"),
+        field_name="raster_params.buffer.min_step_time",
+    )
+    max_step_time_s = _parse_duration_seconds(
+        buf_raw.get("max_step_time"),
+        field_name="raster_params.buffer.max_step_time",
+    )
+    if min_step_time_s is not None and max_step_time_s is not None and min_step_time_s > max_step_time_s:
+        raise ValueError("raster_params.buffer.min_step_time must be <= raster_params.buffer.max_step_time")
     if step_multiplier <= 0:
         raise ValueError(f"raster_params.buffer.step_multiplier must be > 0, got {step_multiplier}")
     if not (0.0 <= step_q <= 1.0):
@@ -128,22 +164,19 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     if px_per_side <= 0:
         raise ValueError(f"raster_params.tiles.px_per_side must be >= 1, got {px_per_side}")
 
-    rm_raw = raw.get("region_multiplier", DEFAULT_RASTER_PARAMS["region_multiplier"])
-    if rm_raw is None:
-        rm_raw = {}
-    if not isinstance(rm_raw, dict):
-        raise ValueError("raster_params.region_multiplier must be a mapping")
-    region_multiplier: dict[str, float] = {**DEFAULT_RASTER_PARAMS["region_multiplier"]}
-    for k, v in rm_raw.items():
-        if not isinstance(k, str):
-            raise ValueError("raster_params.region_multiplier keys must be strings")
-        region_multiplier[str(k)] = float(v)
+    if "region_multiplier" in raw:
+        raise ValueError("raster_params.region_multiplier has been removed; use max_step_time to control extent")
 
     return {
-        "buffer": {"step_multiplier": step_multiplier, "step_q": step_q, "gap_q": gap_q},
+        "buffer": {
+            "step_multiplier": step_multiplier,
+            "step_q": step_q,
+            "gap_q": gap_q,
+            "min_step_time_s": min_step_time_s,
+            "max_step_time_s": max_step_time_s,
+        },
         "scale_clamp": {"min_pixels": min_pixels, "max_pixels": max_pixels},
         "tiles": {"px_per_side": px_per_side},
-        "region_multiplier": region_multiplier,
     }
 
 

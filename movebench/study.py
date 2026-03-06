@@ -85,20 +85,33 @@ class Study:
         if len(train_df) == 0:
             raise ValueError("No training data found (set=='train'); cannot compute buffer")
         buf = cfg.raster_params["buffer"]
-        buffer_km = (
-            mb2dl.get_buffer_m_for_study(
+        min_step_time_s = buf.get("min_step_time_s")
+        max_step_time_s = buf.get("max_step_time_s")
+
+        resolution_buffer_m = mb2dl.get_buffer_m_for_study(
+            train_df,
+            step_time_s=min_step_time_s,
+            step_multiplier=float(buf["step_multiplier"]),
+            step_q=float(buf["step_q"]),
+            gap_q=float(buf["gap_q"]),
+        )
+        if max_step_time_s == min_step_time_s:
+            extent_buffer_m = float(resolution_buffer_m)
+        else:
+            extent_buffer_m = mb2dl.get_buffer_m_for_study(
                 train_df,
+                step_time_s=max_step_time_s,
                 step_multiplier=float(buf["step_multiplier"]),
                 step_q=float(buf["step_q"]),
                 gap_q=float(buf["gap_q"]),
             )
-            / 1000.0
-        )
+
+        resolution_buffer_km = float(resolution_buffer_m) / 1000.0
+        extent_buffer_km = float(extent_buffer_m) / 1000.0
 
         if splits is None:
             splits = sorted(df[mb2dl.SET_COL].dropna().unique().tolist())
 
-        rm = dict(cfg.raster_params["region_multiplier"])
         clamp = cfg.raster_params["scale_clamp"]
         min_pixels = int(clamp["min_pixels"])
         max_pixels = int(clamp["max_pixels"])
@@ -108,8 +121,8 @@ class Study:
             df,
             study_dir=self.study_dir,
             plan=plan,
-            buffer_km=buffer_km,
-            region_multiplier=rm,
+            resolution_buffer_km=resolution_buffer_km,
+            extent_buffer_km=extent_buffer_km,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             splits=splits,
@@ -121,8 +134,8 @@ class Study:
             df[df[mb2dl.SET_COL].isin(splits)].copy(),
             study_dir=self.study_dir,
             plan=plan,
-            buffer_km=buffer_km,
-            region_multiplier=rm,
+            resolution_buffer_km=resolution_buffer_km,
+            extent_buffer_km=extent_buffer_km,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,
@@ -133,7 +146,9 @@ class Study:
         return {
             "config_hash": plan.config_hash,
             "rasters_hash": plan.rasters_hash,
-            "buffer_km": buffer_km,
+            "buffer_km": extent_buffer_km,
+            "resolution_buffer_km": resolution_buffer_km,
+            "extent_buffer_km": extent_buffer_km,
             "chips": chip_stats,
             "tiles": tile_stats,
         }

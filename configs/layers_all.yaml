@@ -8,9 +8,6 @@ raster_params:
     max_pixels: 100
   tiles:
     px_per_side: 500
-  region_multiplier:
-    train: 1.0
-    test: 1.0
 
 layers:
   - modis_lst

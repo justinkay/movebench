@@ -29,6 +29,7 @@ import pandas as pd
 
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.trajectories import prepare_interval_step_starts
 
 
 # Movebank / trajectories.csv schema
@@ -38,10 +39,6 @@ TIME_COL = "timestamp"
 INDIVIDUAL_COL = "individual-local-identifier"
 SET_COL = "set"
 POINT_ID_COL = "point_id"
-
-
-# Train/test region multipliers used when constructing chip regions.
-# These values are configured via `raster_params.region_multiplier` in the layers YAML.
 
 
 GEE_NODATA_SENTINEL = -9999.0
@@ -722,11 +719,11 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
     idx, req, ctx = args
 
     study_dir = Path(ctx["study_dir"])
-    buffer_km = float(ctx["buffer_km"])
+    resolution_buffer_km = float(ctx["resolution_buffer_km"])
+    extent_buffer_km = float(ctx["extent_buffer_km"])
     skip_existing = bool(ctx["skip_existing"])
     plan: LayerPlan = ctx["plan"]
     registry: LayerRegistry = ctx["registry"]
-    region_multiplier: dict[str, float] = ctx["region_multiplier"]
     min_pixels = int(ctx["min_pixels"])
     max_pixels = int(ctx["max_pixels"])
     group_current: dict[str, bool] = ctx["group_current"]
@@ -752,8 +749,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
 
     ensure_ee_initialized()
 
-    region_mult = float(region_multiplier.get(req.split, 1.0))
-    region = square_region_for_point(req.lon, req.lat, region_mult * buffer_km)
+    region = square_region_for_point(req.lon, req.lat, extent_buffer_km)
 
     for group_name, group in plan.chip_groups.items():
         out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
@@ -764,7 +760,7 @@ def _download_chip_worker(args: tuple[int, ChipRequest, dict[str, Any]]) -> dict
 
         target_scale_m = float(group["target_scale_m"])
         scale = compute_group_scale(
-            region_mult * buffer_km,
+            resolution_buffer_km,
             target_scale_m,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
@@ -799,8 +795,9 @@ def download_chips(
     study_dir: Path,
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
-    buffer_km: float,
-    region_multiplier: dict[str, float],
+    buffer_km: float | None = None,
+    resolution_buffer_km: float | None = None,
+    extent_buffer_km: float | None = None,
     min_pixels: int,
     max_pixels: int,
     splits: list[str] | None = None,
@@ -808,7 +805,14 @@ def download_chips(
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     study_dir = Path(study_dir)
-    region_multiplier = {str(k): float(v) for k, v in dict(region_multiplier).items()}
+    if resolution_buffer_km is None:
+        if buffer_km is None:
+            raise ValueError("download_chips requires resolution_buffer_km or legacy buffer_km")
+        resolution_buffer_km = float(buffer_km)
+    if extent_buffer_km is None:
+        if buffer_km is None:
+            raise ValueError("download_chips requires extent_buffer_km or legacy buffer_km")
+        extent_buffer_km = float(buffer_km)
     min_pixels = int(min_pixels)
     max_pixels = int(max_pixels)
     if min_pixels <= 0:
@@ -890,11 +894,11 @@ def download_chips(
 
     ctx = {
         "study_dir": str(study_dir),
-        "buffer_km": float(buffer_km),
+        "resolution_buffer_km": float(resolution_buffer_km),
+        "extent_buffer_km": float(extent_buffer_km),
         "skip_existing": bool(skip_existing),
         "plan": plan,
         "registry": registry,
-        "region_multiplier": region_multiplier,
         "min_pixels": int(min_pixels),
         "max_pixels": int(max_pixels),
         "group_current": group_current,
@@ -935,12 +939,26 @@ def download_chips(
     return stats
 
 
-def get_buffer_m_for_study(df: pd.DataFrame, *, step_q: float = 0.95, step_multiplier: float = 2.0, gap_q: float = 0.999) -> float:
+def get_buffer_m_for_study(
+    df: pd.DataFrame,
+    *,
+    step_time_s: int | None = None,
+    step_q: float = 0.95,
+    step_multiplier: float = 2.0,
+    gap_q: float = 0.999,
+) -> float:
     """Compute buffer size (meters) from movement data (train split only)."""
     import numpy as np
 
     if TIME_COL not in df.columns:
         raise RuntimeError(f"Expected a '{TIME_COL}' column in the data.")
+
+    if step_time_s is not None:
+        d = prepare_interval_step_starts(df, step_time_s=int(step_time_s), gap_q=float(gap_q))
+        valid = d.loc[d["valid_step_start"], "step_length_m"].to_numpy(dtype=np.float64, copy=False)
+        if len(valid) == 0:
+            raise ValueError("No valid interval step lengths computed")
+        return float(step_multiplier) * float(np.nanquantile(valid, q=step_q))
 
     d = df.copy()
     d[TIME_COL] = pd.to_datetime(d[TIME_COL], errors="coerce")
@@ -981,8 +999,9 @@ def download_tile_layer(
     plan: LayerPlan,
     registry: LayerRegistry,
     layer: str,
-    buffer_km: float,
-    region_multiplier: dict[str, float],
+    buffer_km: float | None = None,
+    resolution_buffer_km: float | None = None,
+    extent_buffer_km: float | None = None,
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
@@ -992,7 +1011,14 @@ def download_tile_layer(
     if layer not in plan.layers_in_order:
         raise ValueError(f"Layer {layer!r} not present in plan.layers_in_order")
 
-    region_multiplier = {str(k): float(v) for k, v in dict(region_multiplier).items()}
+    if resolution_buffer_km is None:
+        if buffer_km is None:
+            raise ValueError("download_tile_layer requires resolution_buffer_km or legacy buffer_km")
+        resolution_buffer_km = float(buffer_km)
+    if extent_buffer_km is None:
+        if buffer_km is None:
+            raise ValueError("download_tile_layer requires extent_buffer_km or legacy buffer_km")
+        extent_buffer_km = float(buffer_km)
     min_pixels = int(min_pixels)
     max_pixels = int(max_pixels)
     px_per_side = int(px_per_side)
@@ -1117,7 +1143,7 @@ def download_tile_layer(
         ee = ensure_ee_initialized()
 
     layer_scale = compute_group_scale(
-        buffer_km,
+        resolution_buffer_km,
         float(spec.native_scale_m),
         min_pixels=min_pixels,
         max_pixels=max_pixels,
@@ -1196,9 +1222,7 @@ def download_tile_layer(
     rect_bounds: list[tuple[float, float, float, float]] = []
 
     for _, r in grouped.iterrows():
-        split = str(r["split"])
-        region_mult = float(region_multiplier.get(split, 1.0))
-        buffer_m = float(buffer_km) * 1000.0 * region_mult
+        buffer_m = float(extent_buffer_km) * 1000.0
 
         buffer_deg_lat = buffer_m / 110540.0
         lon_deg_to_m = 111320.0 * math.cos(math.radians(float(r["max_abs_lat"])))
@@ -1503,8 +1527,9 @@ def download_tiles(
     study_dir: Path,
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
-    buffer_km: float,
-    region_multiplier: dict[str, float],
+    buffer_km: float | None = None,
+    resolution_buffer_km: float | None = None,
+    extent_buffer_km: float | None = None,
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
@@ -1521,7 +1546,8 @@ def download_tiles(
             registry=registry,
             layer=layer,
             buffer_km=buffer_km,
-            region_multiplier=region_multiplier,
+            resolution_buffer_km=resolution_buffer_km,
+            extent_buffer_km=extent_buffer_km,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,

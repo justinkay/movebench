@@ -139,7 +139,7 @@ def main(argv: list[str]) -> int:
         print(f"\n=== {study.study_id} ===")
         if args.from_point_stores:
             print(f"config_hash: {plan.config_hash}")
-            from movebench.quality.validity_metrics import compute_candidate_missingness_counts
+            from one_time_scripts.triage_missing_layers._common import compute_candidate_missingness_counts
 
             for split in ("train", "test"):
                 base_dir = study.study_dir / "features" / "points" / split / str(plan.config_hash)
