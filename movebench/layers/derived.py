@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+from typing import TYPE_CHECKING
 
-from movebench.rasters import Raster
+if TYPE_CHECKING:
+    from movebench.rasters import Raster
 
 
 def _band_index(r: Raster, band_id: str) -> int:
@@ -10,6 +12,28 @@ def _band_index(r: Raster, band_id: str) -> int:
         return r.band_ids.index(band_id)
     except ValueError as e:
         raise KeyError(f"Raster missing required band_id {band_id!r}. Has: {r.band_ids}") from e
+
+
+def _band_array(r: Raster, band_id: str) -> np.ndarray:
+    idx = _band_index(r, band_id)
+    arr = r.array[idx].astype(np.float64)
+    return np.where(np.isfinite(arr), arr, np.nan)
+
+
+def _safe_divide(numer: np.ndarray, denom: np.ndarray) -> np.ndarray:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = numer / denom
+    return np.where(np.isfinite(out), out, np.nan).astype(np.float32)
+
+
+def _safe_reciprocal(x: np.ndarray) -> np.ndarray:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = 1.0 / x
+    return np.where(np.isfinite(out), out, np.nan).astype(np.float32)
+
+
+def _landsat_band(landsat: Raster, band: str) -> np.ndarray:
+    return _band_array(landsat, f"landsat.{band}")
 
 
 def _gradient_meters(elev: np.ndarray, transform) -> tuple[np.ndarray, np.ndarray]:
@@ -65,6 +89,44 @@ def compute_rugosity(*, dem: Raster) -> np.ndarray:
 
     tri = np.sqrt(sq_sum).astype(np.float32)
     return tri[np.newaxis]
+
+
+def compute_landsat_ndwi(*, landsat: Raster) -> np.ndarray:
+    green = _landsat_band(landsat, "green")
+    nir = _landsat_band(landsat, "nir")
+    ndwi = _safe_divide(green - nir, green + nir)
+    return ndwi[np.newaxis]
+
+
+def compute_landsat_ndvi(*, landsat: Raster) -> np.ndarray:
+    nir = _landsat_band(landsat, "nir")
+    red = _landsat_band(landsat, "red")
+    ndvi = _safe_divide(nir - red, nir + red)
+    return ndvi[np.newaxis]
+
+
+def compute_landsat_evi(*, landsat: Raster) -> np.ndarray:
+    blue = _landsat_band(landsat, "blue")
+    red = _landsat_band(landsat, "red")
+    nir = _landsat_band(landsat, "nir")
+    numer = nir - red
+    denom = nir + 6.0 * red - 7.5 * blue + 1.0
+    evi = 2.5 * _safe_divide(numer, denom)
+    return evi[np.newaxis]
+
+
+def compute_landsat_ndsi(*, landsat: Raster) -> np.ndarray:
+    green = _landsat_band(landsat, "green")
+    swir1 = _landsat_band(landsat, "swir1")
+    ndsi = _safe_divide(green - swir1, green + swir1)
+    return ndsi[np.newaxis]
+
+
+def compute_landsat_bai(*, landsat: Raster) -> np.ndarray:
+    red = _landsat_band(landsat, "red")
+    nir = _landsat_band(landsat, "nir")
+    bai = _safe_reciprocal((0.1 - red) ** 2 + (0.06 - nir) ** 2)
+    return bai[np.newaxis]
 
 
 def compute_orographic_uplift(*, slope: Raster, aspect: Raster, era5_land: Raster) -> np.ndarray:
@@ -131,4 +193,3 @@ def compute_thermal_uplift(*, era5_land: Raster, era5: Raster) -> np.ndarray:
 
     H, W = era5_land.array.shape[1:]
     return np.full((1, H, W), w_star, dtype=np.float32)
-

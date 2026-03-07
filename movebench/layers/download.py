@@ -310,20 +310,47 @@ def _nearest_from_window(collection_id: str, timestamp: str, *, bands: list[str]
     return ee.Image(ee.Algorithms.If(col.size().gt(0), ee.Image(col.first()), fallback))
 
 
+def _latest_from_past_days(
+    collection_id: str,
+    timestamp: str,
+    *,
+    bands: list[str],
+    days: int,
+    region,
+):
+    ee = ensure_ee_initialized()
+    ts = ee.Date(timestamp)
+    col = (
+        ee.ImageCollection(collection_id)
+        .filterDate(ts.advance(-int(days), "day"), ts.advance(1, "millisecond"))
+        .filterBounds(region)
+        .select(bands)
+        .sort("system:time_start", False)
+    )
+    fallback = _fully_masked_image(bands)
+    return ee.Image(ee.Algorithms.If(col.size().gt(0), ee.Image(col.first()), fallback))
+
+
 def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
     """Build an ee.Image for one gee_chip layer, with uniquely-named bands."""
     ee = ensure_ee_initialized()
 
-    if layer == "landsat_ndwi":
-        ts = ee.Date(timestamp)
-        col = (
-            ee.ImageCollection(spec.gee_collection)
-            .filterDate(ts.advance(-32, "day"), ts.advance(32, "day"))
-            .filterBounds(region)
-            .select(spec.bands)
+    if layer == "landsat":
+        img8 = _latest_from_past_days(
+            spec.gee_collection,
+            timestamp,
+            bands=spec.bands,
+            days=8,
+            region=region,
         )
-        fallback = _fully_masked_image(spec.bands)
-        img = ee.Image(ee.Algorithms.If(col.size().gt(0), col.median(), fallback))
+        img32 = _latest_from_past_days(
+            "LANDSAT/COMPOSITES/C02/T1_L2_32DAY",
+            timestamp,
+            bands=spec.bands,
+            days=32,
+            region=region,
+        )
+        img = img8.unmask(img32, sameFootprint=False)
         img = img.rename([f"{layer}__{b}" for b in spec.bands]).toFloat()
         return img
 

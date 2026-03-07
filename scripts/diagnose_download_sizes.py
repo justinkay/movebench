@@ -175,10 +175,156 @@ def _years_on_disk(tile_dir: Path) -> list[int]:
     return sorted(years)
 
 
+_DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$")
+
+
+def _parse_duration_seconds(raw: str, *, field_name: str) -> int:
+    if not isinstance(raw, str):
+        raise ValueError(f"{field_name} must be a string duration like '7d'")
+    match = _DURATION_RE.fullmatch(raw.strip())
+    if match is None:
+        raise ValueError(f"{field_name} must match <int><unit> with unit in {{s,m,h,d}}, got {raw!r}")
+
+    value = int(match.group("value"))
+    if value <= 0:
+        raise ValueError(f"{field_name} must be > 0, got {raw!r}")
+
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group("unit")]
+    return int(value) * int(multiplier)
+
+
+def _expanded_bounds_to_rects(
+    min_lon_exp: float,
+    min_lat_exp: float,
+    max_lon_exp: float,
+    max_lat_exp: float,
+) -> list[tuple[float, float, float, float]]:
+    min_lat_exp = max(float(min_lat_exp), -89.9999)
+    max_lat_exp = min(float(max_lat_exp), 89.9999)
+    if min_lat_exp >= max_lat_exp:
+        return []
+
+    span = float(max_lon_exp) - float(min_lon_exp)
+    if span <= 0.0:
+        return []
+    if span >= 360.0:
+        return [(-180.0, min_lat_exp, 180.0, max_lat_exp)]
+
+    start = ((float(min_lon_exp) + 180.0) % 360.0) - 180.0
+    end = start + span
+
+    rects: list[tuple[float, float, float, float]]
+    if end > 180.0:
+        rects = [
+            (start, min_lat_exp, 180.0, max_lat_exp),
+            (-180.0, min_lat_exp, end - 360.0, max_lat_exp),
+        ]
+    else:
+        rects = [(start, min_lat_exp, end, max_lat_exp)]
+
+    out: list[tuple[float, float, float, float]] = []
+    for a, b, c, d in rects:
+        a = max(float(a), -180.0)
+        c = min(float(c), 180.0)
+        b = float(b)
+        d = float(d)
+        if a >= c or b >= d:
+            continue
+        out.append((a, b, c, d))
+    return out
+
+
+def compute_dynamic_extent_buffers_km(
+    df,
+    *,
+    train_df,
+    min_extent_buffer_m: float,
+    max_extent_buffer_m: float,
+    max_step_time_s: int,
+    step_q: float,
+    step_multiplier: float,
+    gap_q: float,
+    time_col: str = "timestamp",
+    window_s: int = 30 * 86400,
+):
+    import numpy as np
+    import pandas as pd
+
+    _insert_repo_root_on_path()
+    from movebench.trajectories import prepare_interval_step_starts
+
+    min_extent_buffer_m = float(min_extent_buffer_m)
+    max_extent_buffer_m = float(max_extent_buffer_m)
+    if min_extent_buffer_m <= 0.0:
+        raise ValueError(f"min_extent_buffer_m must be > 0, got {min_extent_buffer_m}")
+    if max_extent_buffer_m < min_extent_buffer_m:
+        raise ValueError(
+            f"max_extent_buffer_m must be >= min_extent_buffer_m ({min_extent_buffer_m}), got {max_extent_buffer_m}"
+        )
+    window_s = int(window_s)
+    if window_s <= 0:
+        raise ValueError(f"window_s must be > 0, got {window_s}")
+
+    query_times = pd.to_datetime(df[time_col], errors="coerce")
+    query_mask = query_times.notna()
+    if not bool(query_mask.any()):
+        raise ValueError(f"No valid {time_col!r} values available for dynamic extent estimation")
+
+    out = pd.Series(np.nan, index=df.index, dtype=np.float64, name="extent_buffer_km")
+
+    train = train_df.copy()
+    train[time_col] = pd.to_datetime(train[time_col], errors="coerce")
+    train = train.dropna(subset=[time_col]).copy()
+
+    prepared = prepare_interval_step_starts(train, step_time_s=int(max_step_time_s), gap_q=float(gap_q))
+    valid = prepared.loc[prepared["valid_step_start"], [time_col, "step_length_m"]].copy()
+    valid = valid.dropna(subset=[time_col, "step_length_m"]).sort_values(time_col).reset_index(drop=True)
+
+    if len(valid) == 0:
+        out.loc[query_mask] = max_extent_buffer_m / 1000.0
+    else:
+        step_times = valid[time_col].astype("int64").to_numpy(dtype=np.int64, copy=False)
+        step_lengths_m = valid["step_length_m"].to_numpy(dtype=np.float64, copy=False)
+
+        half_window_ns = int(round(float(window_s) * 1_000_000_000.0 / 2.0))
+        query_ns = query_times.loc[query_mask].astype("int64").to_numpy(dtype=np.int64, copy=False)
+        unique_query_ns, inverse = np.unique(query_ns, return_inverse=True)
+        unique_buffers_m = np.empty(len(unique_query_ns), dtype=np.float64)
+
+        for idx, ts_ns in enumerate(unique_query_ns):
+            left = int(np.searchsorted(step_times, ts_ns - half_window_ns, side="left"))
+            right = int(np.searchsorted(step_times, ts_ns + half_window_ns, side="right"))
+            if right <= left:
+                buffer_m = max_extent_buffer_m
+            else:
+                buffer_m = float(step_multiplier) * float(np.nanquantile(step_lengths_m[left:right], q=float(step_q)))
+                if not np.isfinite(buffer_m):
+                    buffer_m = max_extent_buffer_m
+            unique_buffers_m[idx] = min(max(buffer_m, min_extent_buffer_m), max_extent_buffer_m)
+
+        out.loc[query_mask] = unique_buffers_m[inverse] / 1000.0
+
+    valid_out = out.dropna()
+    if len(valid_out) == 0:
+        raise ValueError("Dynamic extent estimation produced no valid extent buffers")
+
+    summary = {
+        "mode": "rolling_window",
+        "min_km": float(valid_out.min()),
+        "median_km": float(valid_out.median()),
+        "max_km": float(valid_out.max()),
+        "lower_bound_km": float(min_extent_buffer_m) / 1000.0,
+        "upper_bound_km": float(max_extent_buffer_m) / 1000.0,
+        "window_s": int(window_s),
+    }
+    return out, summary
+
+
 def estimate_tile_count(
     df,
     *,
-    extent_buffer_km: float,
+    extent_buffer_km: float | None = None,
+    extent_buffer_km_col: str | None = None,
     grid_size_m: float,
     set_col: str,
     lon_col: str,
@@ -208,14 +354,20 @@ def estimate_tile_count(
     bucket_deg_lon = max(float(bucket_deg_lon), 1e-6)
     bucket_deg_lat = max(float(bucket_deg_lat), 1e-6)
 
-    base = pd.DataFrame(
-        {
-            "split": df[set_col].astype(str),
-            "lon": lon,
-            "lat": lat,
-            "lat_abs": lat.abs(),
-        }
-    )
+    if extent_buffer_km_col is not None:
+        if extent_buffer_km_col not in df.columns:
+            raise ValueError(f"trajectories df missing extent buffer column: {extent_buffer_km_col!r}")
+        extent_values_km = df[extent_buffer_km_col].astype(float)
+        if extent_values_km.isna().any():
+            raise ValueError(f"trajectories df contains NaN values in {extent_buffer_km_col!r}")
+        if (extent_values_km <= 0).any():
+            raise ValueError(f"trajectories df contains non-positive values in {extent_buffer_km_col!r}")
+    elif extent_buffer_km is None:
+        raise ValueError("estimate_tile_count requires extent_buffer_km or extent_buffer_km_col")
+
+    base = pd.DataFrame({"split": df[set_col].astype(str), "lon": lon, "lat": lat, "lat_abs": lat.abs()})
+    if extent_buffer_km_col is not None:
+        base["extent_buffer_km"] = extent_values_km.to_numpy(dtype=float, copy=False)
 
     grouped = None
     b_lon = float(bucket_deg_lon)
@@ -241,6 +393,9 @@ def estimate_tile_count(
         b_lon *= 2.0
         b_lat *= 2.0
 
+    grouped_base = None
+    group_cols: list[str]
+
     if grouped is None:
         grouped = (
             base.groupby(["split"], sort=False)
@@ -253,6 +408,14 @@ def estimate_tile_count(
             )
             .reset_index()
         )
+        grouped_base = base
+        group_cols = ["split"]
+    else:
+        grouped_base = base.assign(
+            lon_bin=np.floor((base["lon"] + 180.0) / b_lon).astype("int64"),
+            lat_bin=np.floor((base["lat"] + 90.0) / b_lat).astype("int64"),
+        )
+        group_cols = ["split", "lon_bin", "lat_bin"]
 
     cell_deg = float(grid_size_m) / 111320.0
     if cell_deg <= 0:
@@ -260,44 +423,51 @@ def estimate_tile_count(
 
     cells: set[tuple[int, int]] = set()
 
-    for _, r in grouped.iterrows():
-        buffer_m = float(extent_buffer_km) * 1000.0
+    if extent_buffer_km_col is None:
+        for _, r in grouped.iterrows():
+            buffer_m = float(extent_buffer_km) * 1000.0
 
+            buffer_deg_lat = buffer_m / 110540.0
+            lon_deg_to_m = 111320.0 * math.cos(math.radians(float(r["max_abs_lat"])))
+            buffer_deg_lon = 180.0 if abs(lon_deg_to_m) < 1e-6 else buffer_m / lon_deg_to_m
+
+            min_lon_exp = float(r["min_lon"]) - buffer_deg_lon
+            max_lon_exp = float(r["max_lon"]) + buffer_deg_lon
+            min_lat_exp = float(r["min_lat"]) - buffer_deg_lat
+            max_lat_exp = float(r["max_lat"]) + buffer_deg_lat
+
+            rects = _expanded_bounds_to_rects(min_lon_exp, min_lat_exp, max_lon_exp, max_lat_exp)
+
+            for a, b, c, d in rects:
+                i_min = math.floor(a / cell_deg)
+                i_max = math.ceil(c / cell_deg) - 1
+                j_min = math.floor(b / cell_deg)
+                j_max = math.ceil(d / cell_deg) - 1
+
+                for i in range(int(i_min), int(i_max) + 1):
+                    for j in range(int(j_min), int(j_max) + 1):
+                        cells.add((i, j))
+        return int(len(cells))
+
+    for _, group_df in grouped_base.groupby(group_cols, sort=False):
+        lon_vals = group_df["lon"].to_numpy(dtype=float, copy=False)
+        lat_vals = group_df["lat"].to_numpy(dtype=float, copy=False)
+        buffer_m = group_df["extent_buffer_km"].to_numpy(dtype=float, copy=False) * 1000.0
         buffer_deg_lat = buffer_m / 110540.0
-        lon_deg_to_m = 111320.0 * math.cos(math.radians(float(r["max_abs_lat"])))
-        buffer_deg_lon = 180.0 if abs(lon_deg_to_m) < 1e-6 else buffer_m / lon_deg_to_m
+        lon_deg_to_m = 111320.0 * np.cos(np.deg2rad(lat_vals))
+        buffer_deg_lon = np.where(np.abs(lon_deg_to_m) < 1e-6, 180.0, buffer_m / lon_deg_to_m)
 
-        min_lon_exp = float(r["min_lon"]) - buffer_deg_lon
-        max_lon_exp = float(r["max_lon"]) + buffer_deg_lon
-        min_lat_exp = float(r["min_lat"]) - buffer_deg_lat
-        max_lat_exp = float(r["max_lat"]) + buffer_deg_lat
+        ref_lon = float(np.median(lon_vals))
+        lon_unwrapped = ref_lon + (((lon_vals - ref_lon) + 180.0) % 360.0) - 180.0
 
-        min_lat_exp = max(min_lat_exp, -89.9999)
-        max_lat_exp = min(max_lat_exp, 89.9999)
+        min_lon_exp = float(np.min(lon_unwrapped - buffer_deg_lon))
+        max_lon_exp = float(np.max(lon_unwrapped + buffer_deg_lon))
+        min_lat_exp = float(np.min(lat_vals - buffer_deg_lat))
+        max_lat_exp = float(np.max(lat_vals + buffer_deg_lat))
 
-        if (max_lon_exp - min_lon_exp) >= 360.0:
-            rects = [(-180.0, min_lat_exp, 180.0, max_lat_exp)]
-        elif max_lon_exp > 180.0:
-            rects = [
-                (min_lon_exp, min_lat_exp, 180.0, max_lat_exp),
-                (-180.0, min_lat_exp, max_lon_exp - 360.0, max_lat_exp),
-            ]
-        elif min_lon_exp < -180.0:
-            rects = [
-                (min_lon_exp + 360.0, min_lat_exp, 180.0, max_lat_exp),
-                (-180.0, min_lat_exp, max_lon_exp, max_lat_exp),
-            ]
-        else:
-            rects = [(min_lon_exp, min_lat_exp, max_lon_exp, max_lat_exp)]
+        rects = _expanded_bounds_to_rects(min_lon_exp, min_lat_exp, max_lon_exp, max_lat_exp)
 
         for a, b, c, d in rects:
-            a = max(float(a), -180.0)
-            c = min(float(c), 180.0)
-            b = float(b)
-            d = float(d)
-            if a >= c or b >= d:
-                continue
-
             i_min = math.floor(a / cell_deg)
             i_max = math.ceil(c / cell_deg) - 1
             j_min = math.floor(b / cell_deg)
@@ -355,6 +525,24 @@ def main(argv: list[str]) -> int:
         help="If set, compute actual on-disk bytes and print estimate vs actual.",
     )
     p.add_argument(
+        "--extent-mode",
+        choices=["study_wide", "rolling_window", "rolling_month"],
+        default="study_wide",
+        help=(
+            "How to estimate download extent. 'study_wide' uses one study-wide extent buffer for all points; "
+            "'rolling_window' estimates a per-point extent from a centered time window around each point. "
+            "'rolling_month' is kept as a compatibility alias for 'rolling_window'."
+        ),
+    )
+    p.add_argument(
+        "--extent-window",
+        default="30d",
+        help=(
+            "Duration string for rolling-window extent estimation, using the same syntax as config durations "
+            "(for example: 1h, 1d, 7d, 30d). Ignored unless --extent-mode rolling_window is used."
+        ),
+    )
+    p.add_argument(
         "--no-file-counts",
         action="store_true",
         help="With --compare-on-disk, skip counting .tif files (faster; disables file-count mismatch warnings).",
@@ -393,6 +581,16 @@ def main(argv: list[str]) -> int:
         print("Make sure movebench dependencies are installed (notably pandas and numpy).")
         return 1
 
+    extent_mode = "rolling_window" if str(args.extent_mode) == "rolling_month" else str(args.extent_mode)
+    extent_window = str(args.extent_window).strip()
+    extent_window_s: int | None = None
+    if extent_mode == "rolling_window":
+        try:
+            extent_window_s = _parse_duration_seconds(extent_window, field_name="--extent-window")
+        except ValueError as e:
+            print(f"Invalid --extent-window: {e}")
+            return 1
+
     cfg = load_layers_config(args.config)
     plan = REGISTRY.resolve(cfg)
     rasters_hash = str(args.rasters_hash) if args.rasters_hash else str(plan.rasters_hash)
@@ -428,6 +626,8 @@ def main(argv: list[str]) -> int:
         "config": str(args.config),
         "rasters_hash": str(rasters_hash),
         "compare_on_disk": bool(args.compare_on_disk),
+        "extent_mode": str(extent_mode),
+        "extent_window": str(extent_window) if extent_mode == "rolling_window" else None,
         "no_file_counts": bool(args.no_file_counts),
         "chip_groups": list(chip_groups),
         "tile_layers": list(tile_layers),
@@ -449,6 +649,10 @@ def main(argv: list[str]) -> int:
     failures = 0
     rel_errors: list[float] = []
     rel_errors_complete: list[float] = []
+    total_est_payload_bytes = 0
+    total_est_disk_bytes = 0
+    total_actual_bytes = 0
+    total_processed = 0
 
     for i, sid in enumerate(study_ids, 1):
         print(f"[{i}/{len(study_ids)}] {sid}")
@@ -519,6 +723,53 @@ def main(argv: list[str]) -> int:
 
         resolution_buffer_km = float(resolution_buffer_m) / 1000.0
         extent_buffer_km = float(extent_buffer_m) / 1000.0
+        dynamic_extent_col = "_extent_buffer_km_est"
+        extent_buffer_summary: dict[str, Any] = {
+            "mode": "study_wide",
+            "min_km": float(extent_buffer_km),
+            "median_km": float(extent_buffer_km),
+            "max_km": float(extent_buffer_km),
+            "lower_bound_km": float(extent_buffer_km),
+            "upper_bound_km": float(extent_buffer_km),
+        }
+
+        if extent_mode == "rolling_window":
+            if min_step_time_s is None or max_step_time_s is None:
+                failures += 1
+                report["studies"].append(
+                    {
+                        "study_id": study.study_id,
+                        "status": "skip",
+                        "error": "rolling_window extent mode requires both min_step_time and max_step_time",
+                    }
+                )
+                print("  SKIP: rolling_window extent mode requires both min_step_time and max_step_time")
+                continue
+
+            try:
+                extent_buffer_series_km, extent_buffer_summary = compute_dynamic_extent_buffers_km(
+                    df,
+                    train_df=train_df,
+                    min_extent_buffer_m=float(resolution_buffer_m),
+                    max_extent_buffer_m=float(extent_buffer_m),
+                    max_step_time_s=int(max_step_time_s),
+                    step_q=float(step_q),
+                    step_multiplier=float(step_multiplier),
+                    gap_q=float(gap_q),
+                    time_col=TIME_COL,
+                    window_s=int(extent_window_s),
+                )
+                extent_buffer_summary["window"] = str(extent_window)
+            except Exception as e:
+                failures += 1
+                report["studies"].append(
+                    {"study_id": study.study_id, "status": "skip", "error": f"dynamic_extent_failed: {e}"}
+                )
+                print(f"  SKIP: dynamic_extent_failed: {e}")
+                continue
+
+            df = df.copy()
+            df[dynamic_extent_col] = extent_buffer_series_km.reindex(df.index).to_numpy(dtype=float, copy=False)
 
         # Compute unique point set per split (chip files keyed by point_id).
         split_points: dict[str, pd.DataFrame] = {}
@@ -557,9 +808,14 @@ def main(argv: list[str]) -> int:
                 if len(sub) == 0:
                     continue
                 lats = sub[LAT_COL].astype(float).to_numpy()
-                sec_sum = float(np.sum(1.0 / np.maximum(np.cos(np.deg2rad(lats)), 1e-6)))
-
-                pixel_bands_total += float((base * base) * sec_sum * float(band_count))
+                sec_lat = 1.0 / np.maximum(np.cos(np.deg2rad(lats)), 1e-6)
+                if dynamic_extent_col in sub.columns:
+                    buffer_m = sub[dynamic_extent_col].astype(float).to_numpy(dtype=float, copy=False) * 1000.0
+                    side = (2.0 * buffer_m) / float(scale)
+                    pixel_bands_total += float(np.sum((side * side) * sec_lat * float(band_count)))
+                else:
+                    sec_sum = float(np.sum(sec_lat))
+                    pixel_bands_total += float((base * base) * sec_sum * float(band_count))
                 files_expected += int(len(sub))
 
             payload_bytes = float(pixel_bands_total) * 4.0
@@ -596,6 +852,7 @@ def main(argv: list[str]) -> int:
                 estimate_tile_count(
                     df,
                     extent_buffer_km=float(extent_buffer_km),
+                    extent_buffer_km_col=dynamic_extent_col if dynamic_extent_col in df.columns else None,
                     grid_size_m=float(grid_size_m),
                     set_col=SET_COL,
                     lon_col=LON_COL,
@@ -644,6 +901,8 @@ def main(argv: list[str]) -> int:
 
         est_payload_total = float(chips_payload) + float(tiles_payload)
         est_disk_total = float(chips_disk) + float(tiles_disk)
+        est_payload_total_i = int(round(est_payload_total))
+        est_disk_total_i = int(round(est_disk_total))
 
         # Optional on-disk comparison.
         actual_total: int | None = None
@@ -728,16 +987,25 @@ def main(argv: list[str]) -> int:
                 if not file_count_mismatches:
                     rel_errors_complete.append(abs(float(rel_err)))
 
+        total_processed += 1
+        total_est_payload_bytes += int(est_payload_total_i)
+        total_est_disk_bytes += int(est_disk_total_i)
+        if args.compare_on_disk and actual_total is not None:
+            total_actual_bytes += int(actual_total)
+
         study_out = {
             "study_id": study.study_id,
             "study_dir": str(study.study_dir),
             "n_points": int(n_points_total),
             "n_splits": int(len(used_splits)),
+            "extent_mode": str(extent_mode),
+            "extent_window": str(extent_window) if extent_mode == "rolling_window" else None,
             "buffer_km": float(extent_buffer_km),
             "resolution_buffer_km": float(resolution_buffer_km),
             "extent_buffer_km": float(extent_buffer_km),
-            "est_payload_bytes": int(round(est_payload_total)),
-            "est_disk_bytes": int(round(est_disk_total)),
+            "extent_buffer_summary": extent_buffer_summary,
+            "est_payload_bytes": int(est_payload_total_i),
+            "est_disk_bytes": int(est_disk_total_i),
             "chips": chips_out,
             "tiles": tiles_out,
             "actual_bytes": int(actual_total) if actual_total is not None else None,
@@ -752,6 +1020,14 @@ def main(argv: list[str]) -> int:
             f"  points: {n_points_total}  resolution_buffer_km: {resolution_buffer_km:.3f}"
             f"  extent_buffer_km: {extent_buffer_km:.3f}"
         )
+        if extent_mode == "rolling_window":
+            print(
+                "  extent_buffer_summary_km: "
+                f"window={extent_buffer_summary['window']} "
+                f"min={float(extent_buffer_summary['min_km']):.3f} "
+                f"median={float(extent_buffer_summary['median_km']):.3f} "
+                f"max={float(extent_buffer_summary['max_km']):.3f}"
+            )
         print(f"  est_payload: {_format_bytes(est_payload_total)}")
         print(f"  est_disk:    {_format_bytes(est_disk_total)}")
         if args.compare_on_disk:
@@ -775,6 +1051,14 @@ def main(argv: list[str]) -> int:
             print(f"abs(rel_error) disk_est (no mismatches): mean={mean_abs_c:.2%}  worst={worst_abs_c:.2%}")
     else:
         print(f"studies: {len(study_ids)}  skipped+failed: {failures}")
+
+    if total_processed:
+        print(f"total (processed studies): {total_processed}")
+        print(f"total_est_payload: {_format_bytes(total_est_payload_bytes)}")
+        print(f"total_est_disk:    {_format_bytes(total_est_disk_bytes)}")
+        if args.compare_on_disk:
+            print(f"total_actual:      {_format_bytes(total_actual_bytes)}")
+        print()
 
     if args.out_json:
         out_path = Path(args.out_json)
