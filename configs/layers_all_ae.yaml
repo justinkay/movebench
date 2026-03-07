@@ -13,12 +13,16 @@ layers:
   - era5_land
   - era5
   - era5_land_daily
-  - modis_lst
+  - modis_lc
+  - modis_cvf_tree
+  - modis_cvf_nontree
+  - modis_cvf_nonveg
   - landsat_ndvi
   - landsat_evi
   - landsat_ndwi
   - landsat_ndsi
   - landsat_bai
+  - landsat_lst
   - dem
   - slope
   - aspect
@@ -26,10 +30,6 @@ layers:
   - dist_water
   - orographic_uplift
   - thermal_uplift
-  - modis_lc
-  - modis_cvf_tree
-  - modis_cvf_nontree
-  - modis_cvf_nonveg
   - hii
   - bioclim
   - dynamic_world
@@ -42,10 +42,6 @@ chip_groups:
       - era5
       - era5_land_daily
     target_scale_m: 11132.0
-  modis:
-    layers:
-      - modis_lst
-    target_scale_m: 250.0
   high_res:
     layers:
       - dynamic_world

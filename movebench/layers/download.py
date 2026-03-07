@@ -606,6 +606,18 @@ def _tile_image(layer: str, *, registry: LayerRegistry, year: int | None = None)
         img = ee.Image(ee.Algorithms.If(col.size().gt(0), col.mosaic(), fallback))
         return img.toFloat()
 
+    if layer in {"modis_lc", "modis_cvf_tree", "modis_cvf_nontree", "modis_cvf_nonveg"}:
+        if year is None:
+            raise ValueError(f"{layer} requires a year for gee_tile export")
+        col = (
+            ee.ImageCollection(spec.gee_collection)
+            .filterDate(f"{int(year)}-01-01", f"{int(year) + 1}-01-01")
+            .select(spec.bands)
+        )
+        fallback = _fully_masked_image(spec.bands)
+        img = ee.Image(ee.Algorithms.If(col.size().gt(0), ee.Image(col.first()), fallback))
+        return img.toFloat()
+
     if layer == "dist_water":
         if spec.clip_max is None:
             raise ValueError("dist_water requires LayerSpec.clip_max (meters)")
