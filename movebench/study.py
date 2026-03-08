@@ -427,6 +427,53 @@ class Study:
             bounds_buffer_deg=bounds_buffer_deg,
         )
 
+    def thumbnail_dataset(
+        self,
+        *,
+        split: str | None = "train",
+        img_size: int = 64,
+        chunk_size: int = 50,
+        stride: int | None = None,
+        min_chunk_size: int = 10,
+        line_width: int = 1,
+        padding: int = 2,
+        transform=None,
+    ):
+        """Create a TrackThumbnailDataset for this study.
+
+        Renders GPS trajectory chunks as MNIST-style B&W thumbnail images.
+        Requires only ``trajectories.csv`` — no raster downloads needed.
+
+        Each thumbnail shows ``chunk_size`` consecutive fixes drawn as a
+        connected polyline, normalized per-chunk (equal aspect ratio,
+        north-up).  Labels are multi-column: one ``has_<type>`` flag per
+        outlier column found in trajectories.csv, plus ``any_outlier``.
+
+        Args:
+            split:          "train", "test", or None for all splits.
+            img_size:       Square image side in pixels (default 64).
+            chunk_size:     Fixes per thumbnail (default 50).
+            stride:         Step between chunk starts; None = non-overlapping.
+            min_chunk_size: Drop chunks shorter than this (default 10).
+            line_width:     Polyline stroke width (default 1).
+            padding:        Blank border in pixels on each side (default 2).
+            transform:      Optional torchvision-compatible transform applied
+                            to the (1, H, W) float32 tensor in __getitem__.
+        """
+        from movebench.datasets.thumbnails import TrackThumbnailDataset
+
+        return TrackThumbnailDataset(
+            trajectories_path=self.trajectories_path,
+            split=split,
+            img_size=img_size,
+            chunk_size=chunk_size,
+            stride=stride,
+            min_chunk_size=min_chunk_size,
+            line_width=line_width,
+            padding=padding,
+            transform=transform,
+        )
+
     def anomaly_dataset(
         self,
         *,
