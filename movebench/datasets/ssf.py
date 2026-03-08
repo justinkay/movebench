@@ -23,6 +23,7 @@ from torch.utils.data import Dataset
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import select_point_store_dir
 from movebench.layers.plan import Channel, LayerPlan
+from movebench.movement_math import safe_speed_m_s_torch
 from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
 
@@ -42,6 +43,9 @@ def _compute_movement_stats(
     cos_ta = torch.cos(ta)
 
     def ms(x: torch.Tensor) -> tuple[float, float]:
+        x = x[torch.isfinite(x)]
+        if x.numel() == 0:
+            return 0.0, 1.0
         m = float(x.mean().item())
         s = float(x.std(unbiased=False).item())
         if not math.isfinite(s) or s < 1e-8:
@@ -63,7 +67,7 @@ def _compute_movement_stats(
 
     if step_dt_s is not None:
         dt = step_dt_s.to(dtype=torch.float64)
-        speed = sl / dt
+        speed = safe_speed_m_s_torch(sl, dt)
         speed_mean, speed_std = ms(speed)
         stats["speed_mean"] = speed_mean
         stats["speed_std"] = speed_std
@@ -390,7 +394,10 @@ class iSSFDataset(SSFDataset):
         if self.include_speed:
             assert self.step_dt_s is not None
             dt = float(self.step_dt_s[int(idx)].item())
-            speed = self.step_length_m[int(idx)].to(dtype=torch.float32) / dt
+            speed = safe_speed_m_s_torch(
+                sl,
+                torch.tensor(float(dt), dtype=sl.dtype, device=sl.device),
+            )
             if self._movement_stats is not None:
                 speed = (speed - float(s["speed_mean"])) / float(s["speed_std"])
             return torch.stack([sl, log_sl, cos_ta, speed], dim=0)
@@ -575,7 +582,7 @@ class iSSFDataset(SSFDataset):
                 if self.include_speed:
                     assert self.step_dt_s is not None
                     dt = self.step_dt_s[s:e].to(device=op_device, dtype=torch.float32, non_blocking=non_blocking)  # (B,)
-                    speed = sl / dt.unsqueeze(-1)  # (B,P)
+                    speed = safe_speed_m_s_torch(sl, dt)
                     move = torch.stack([sl, log_sl, cos_ta, speed], dim=1)  # (B,4,P)
                 else:
                     move = torch.stack([sl, log_sl, cos_ta], dim=1)  # (B,3,P)

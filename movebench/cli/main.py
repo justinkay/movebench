@@ -6,6 +6,7 @@ import sys
 from movebench.cli import download
 from movebench.cli import extract
 from movebench.cli import ingest
+from movebench.cli import sample_points
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.register(subparsers)
     extract.register(subparsers)
     ingest.register(subparsers)
+    sample_points.register(subparsers)
 
     return parser
 

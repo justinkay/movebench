@@ -13,6 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from movebench.movement_math import haversine_m
+
 
 # Movebank / trajectories.csv schema
 LON_COL = "location-long"
@@ -61,15 +63,17 @@ def compute_movement_features(
     df["within_time"] = df["time_since_last"] <= per_indiv_cutoff
 
     # ---- step length per individual ----
-    R = 6371000.0  # Earth radius in meters
     df["lat_prev"] = g["lat_rad"].shift()
     df["lon_prev"] = g["lon_rad"].shift()
+    df["step_length_m"] = haversine_m(
+        np.rad2deg(df["lat_prev"].to_numpy(dtype=np.float64, copy=False)),
+        np.rad2deg(df["lon_prev"].to_numpy(dtype=np.float64, copy=False)),
+        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
+    )
+
     dlat = df["lat_rad"] - df["lat_prev"]
     dlon = df["lon_rad"] - df["lon_prev"]
-
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(df["lat_prev"]) * np.cos(df["lat_rad"]) * np.sin(dlon / 2.0) ** 2
-    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-    df["step_length_m"] = R * c
 
     # Initial valid step mask (time + positive distance).
     df["valid_step"] = df["within_time"] & df["step_length_m"].notna() & (df["step_length_m"] > 0)

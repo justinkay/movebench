@@ -27,6 +27,7 @@ from tqdm.auto import tqdm
 from movebench.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
+from movebench.movement_math import haversine_m
 from movebench.trajectories import (
     LAT_COL,
     LON_COL,
@@ -485,7 +486,15 @@ def _compute_candidates(
     ys = np.append(ys, y1)
 
     # Step lengths / turn angles for all candidates.
-    true_sl = float(np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2))
+    # Use geodesic meters for the true endpoint to match trajectory movement stats.
+    true_sl = float(
+        haversine_m(
+            float(req.start_lat),
+            float(req.start_lon),
+            float(req.end_lat),
+            float(req.end_lon),
+        )
+    )
     true_heading = float(np.arctan2(x1 - x0, y1 - y0))
     true_ta = true_heading - float(req.start_bearing)
     true_ta = float((true_ta + np.pi) % (2.0 * np.pi) - np.pi)
@@ -712,7 +721,6 @@ def extract_split_feature_store(
 
     dt_vals = steps["step_dt_s"].to_numpy(dtype=np.float32) if "step_dt_s" in steps.columns else None
     if dt_vals is not None:
-        dt_vals = np.maximum(dt_vals, 1e-3)
         step_dt_s: torch.Tensor | None = torch.from_numpy(dt_vals)
     else:
         step_dt_s = None
