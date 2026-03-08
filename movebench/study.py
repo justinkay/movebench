@@ -436,7 +436,10 @@ class Study:
         stride: int | None = None,
         min_chunk_size: int = 10,
         line_width: int = 1,
+        marker_radius: int = 1,
         padding: int = 2,
+        scale_mode: str = "individual",
+        scale_quantile: float = 0.5,
         transform=None,
     ):
         """Create a TrackThumbnailDataset for this study.
@@ -445,20 +448,28 @@ class Study:
         Requires only ``trajectories.csv`` — no raster downloads needed.
 
         Each thumbnail shows ``chunk_size`` consecutive fixes drawn as a
-        connected polyline, normalized per-chunk (equal aspect ratio,
-        north-up).  Labels are multi-column: one ``has_<type>`` flag per
-        outlier column found in trajectories.csv, plus ``any_outlier``.
+        connected polyline with a marker at each fix.  By default a fixed
+        per-individual spatial scale is used so that anomalously large chunks
+        visibly overflow the image.
 
         Args:
-            split:          "train", "test", or None for all splits.
-            img_size:       Square image side in pixels (default 64).
-            chunk_size:     Fixes per thumbnail (default 50).
-            stride:         Step between chunk starts; None = non-overlapping.
-            min_chunk_size: Drop chunks shorter than this (default 10).
-            line_width:     Polyline stroke width (default 1).
-            padding:        Blank border in pixels on each side (default 2).
-            transform:      Optional torchvision-compatible transform applied
-                            to the (1, H, W) float32 tensor in __getitem__.
+            split:           "train", "test", or None for all splits.
+            img_size:        Square image side in pixels (default 64).
+            chunk_size:      Fixes per thumbnail (default 50).
+            stride:          Step between chunk starts; None = non-overlapping.
+            min_chunk_size:  Drop chunks shorter than this (default 10).
+            line_width:      Polyline stroke width (default 1).
+            marker_radius:   Radius of the filled circle drawn at each fix
+                             (default 1). Set to 0 for polyline only.
+            padding:         Blank border in pixels on each side (default 2).
+            scale_mode:      ``"individual"`` (default) — fixed scale per
+                             individual derived from its median chunk extent,
+                             making large spatial anomalies visually obvious.
+                             ``"chunk"`` — legacy per-chunk bounding-box scale.
+            scale_quantile:  Quantile of per-chunk extents used when
+                             ``scale_mode="individual"`` (default 0.5 = median).
+            transform:       Optional torchvision-compatible transform applied
+                             to the (1, H, W) float32 tensor in __getitem__.
         """
         from movebench.datasets.thumbnails import TrackThumbnailDataset
 
@@ -470,7 +481,10 @@ class Study:
             stride=stride,
             min_chunk_size=min_chunk_size,
             line_width=line_width,
+            marker_radius=marker_radius,
             padding=padding,
+            scale_mode=scale_mode,
+            scale_quantile=scale_quantile,
             transform=transform,
         )
 
