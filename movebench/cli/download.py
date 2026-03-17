@@ -2,6 +2,40 @@ from __future__ import annotations
 
 import argparse
 import os
+from typing import Any
+
+
+def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
+    if not isinstance(tile_stats, dict):
+        return 0
+
+    total = 0
+    for layer_stats in tile_stats.values():
+        if not isinstance(layer_stats, dict):
+            continue
+        years = layer_stats.get("years")
+        if isinstance(years, dict):
+            for year_stats in years.values():
+                if isinstance(year_stats, dict):
+                    total += int(year_stats.get("downloaded", 0)) + int(year_stats.get("existing", 0))
+            continue
+        total += int(layer_stats.get("downloaded", 0)) + int(layer_stats.get("existing", 0))
+    return total
+
+
+def _format_study_download_summary(name: str, result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        chip_present = 0
+        tile_present = 0
+    else:
+        chip_stats = result.get("chips")
+        chip_present = (
+            int(chip_stats.get("downloaded", 0)) + int(chip_stats.get("existing", 0))
+            if isinstance(chip_stats, dict)
+            else 0
+        )
+        tile_present = _count_present_tiles(result.get("tiles"))
+    return f"OK {name}: {chip_present} chips, {tile_present} tiles present"
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -83,12 +117,13 @@ def run(args: argparse.Namespace) -> int:
         print(f"[{i}/{len(names)}] Downloading {name}...")
         try:
             study = Study(name)
-            study.download_rasters(
+            result = study.download_rasters(
                 config=args.config,
                 splits=args.splits,
                 n_workers=args.n_workers,
                 skip_existing=not args.no_skip_existing,
             )
+            print(f"[{i}/{len(names)}] {_format_study_download_summary(name, result)}")
         except Exception as e:
             print(f"  ERROR: {e}")
 

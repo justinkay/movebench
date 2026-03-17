@@ -173,6 +173,38 @@ def union_regions(regions: list):
     return ee.Geometry.MultiPolygon(regions)
 
 
+def _wrap_lon_to_wgs84(lon: float) -> float:
+    wrapped = ((float(lon) + 180.0) % 360.0) - 180.0
+    if wrapped == -180.0 and float(lon) > 0.0:
+        return 180.0
+    return wrapped
+
+
+def _chip_search_region_center_plus_corners(lon: float, lat: float, buffer_km: float):
+    """Build a small search geometry from chip center plus approximate corners."""
+    ensure_ee_initialized()
+
+    center_lon = _wrap_lon_to_wgs84(float(lon))
+    center_lat = min(max(float(lat), WGS84_MIN_LAT), WGS84_MAX_LAT)
+    buffer_m = float(buffer_km) * 1000.0
+
+    buffer_deg_lat = buffer_m / METERS_PER_DEG_LAT
+    lon_deg_to_m = METERS_PER_DEG_LON_EQUATOR * math.cos(math.radians(center_lat))
+    if abs(lon_deg_to_m) < 1e-6:
+        buffer_deg_lon = WGS84_MAX_LON
+    else:
+        buffer_deg_lon = buffer_m / lon_deg_to_m
+
+    points: list[list[float]] = [[center_lon, center_lat]]
+    for lon_sign in (-1.0, 1.0):
+        corner_lon = _wrap_lon_to_wgs84(center_lon + lon_sign * buffer_deg_lon)
+        for lat_sign in (-1.0, 1.0):
+            corner_lat = min(max(center_lat + lat_sign * buffer_deg_lat, WGS84_MIN_LAT), WGS84_MAX_LAT)
+            points.append([corner_lon, corner_lat])
+
+    return ee.Geometry.MultiPoint(points)
+
+
 def _clamp_tile_bounds_latlon(bounds_latlon: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     """Clamp tile bounds to a valid EPSG:4326 lon/lat range.
 
@@ -327,17 +359,14 @@ def _latest_from_past_days(
     *,
     bands: list[str],
     days: int,
-    region,
+    search_geometry=None,
 ):
     ensure_ee_initialized()
     ts = ee.Date(timestamp)
-    col = (
-        ee.ImageCollection(collection_id)
-        .filterDate(ts.advance(-int(days), "day"), ts.advance(1, "second"))
-        .filterBounds(region)
-        .select(bands)
-        .sort("system:time_start", False)
-    )
+    col = ee.ImageCollection(collection_id).filterDate(ts.advance(-int(days), "day"), ts.advance(1, "second"))
+    if search_geometry is not None:
+        col = col.filterBounds(search_geometry)
+    col = col.select(bands).sort("system:time_start", False)
     return _collection_image_or_masked(col, bands, reducer="first")
 
 
@@ -362,7 +391,7 @@ def _nearest_temporal_chip_image(*, spec, timestamp: str):
     return _nearest_from_window(spec.gee_collection, timestamp, bands=spec.bands, start=start, end=end, unit=unit)
 
 
-def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
+def _chip_layer_image(layer: str, *, spec, timestamp: str, region, search_region=None) -> Any:
     """Build an ee.Image for one gee_chip layer, with uniquely-named bands."""
     ensure_ee_initialized()
 
@@ -372,25 +401,24 @@ def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
             timestamp,
             bands=spec.bands,
             days=8,
-            region=region,
         )
         img32 = _latest_from_past_days(
             "LANDSAT/COMPOSITES/C02/T1_L2_32DAY",
             timestamp,
             bands=spec.bands,
             days=32,
-            region=region,
         )
         return _apply_chip_output_conventions(layer, spec, img8.unmask(img32, sameFootprint=False))
 
     if layer == "dynamic_world":
+        query_region = search_region if search_region is not None else region
         ts_dt = _parse_iso_timestamp(timestamp)
         dw_start_dt = datetime(2015, 6, 23, tzinfo=ts_dt.tzinfo)
         if ts_dt < dw_start_dt:
             col = (
                 ee.ImageCollection(spec.gee_collection)
                 .filterDate("2015-06-23", "2016-06-23")
-                .filterBounds(region)
+                .filterBounds(query_region)
                 .select(spec.bands)
             )
         else:
@@ -398,13 +426,13 @@ def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
             col30 = (
                 ee.ImageCollection(spec.gee_collection)
                 .filterDate(ts.advance(-15, "day"), ts.advance(15, "day"))
-                .filterBounds(region)
+                .filterBounds(query_region)
                 .select(spec.bands)
             )
             col60 = (
                 ee.ImageCollection(spec.gee_collection)
                 .filterDate(ts.advance(-30, "day"), ts.advance(30, "day"))
-                .filterBounds(region)
+                .filterBounds(query_region)
                 .select(spec.bands)
             )
             col = ee.ImageCollection(ee.Algorithms.If(col30.size().gt(0), col30, col60))
@@ -447,6 +475,7 @@ def build_chip_group_image(
     chip_group: str,
     timestamp: str,
     region,
+    search_region=None,
 ) -> Any:
     """Build an ee.Image stack for a chip group, in plan order."""
     ensure_ee_initialized()
@@ -460,7 +489,13 @@ def build_chip_group_image(
         spec = registry.get(layer)
         if spec.source != "gee_chip":
             raise ValueError(f"chip group {chip_group!r} includes non-gee_chip layer {layer!r}")
-        layer_img = _chip_layer_image(layer, spec=spec, timestamp=timestamp, region=region)
+        layer_img = _chip_layer_image(
+            layer,
+            spec=spec,
+            timestamp=timestamp,
+            region=region,
+            search_region=search_region,
+        )
         img = layer_img if img is None else img.addBands(layer_img)
 
     if img is None:
@@ -669,6 +704,14 @@ def _write_json_atomic(path: Path, payload: dict[str, Any], *, sort_keys: bool =
 
 def _chips_meta_path(study_dir: Path, rasters_hash: str) -> Path:
     return _rasters_root(study_dir, rasters_hash) / "chips_meta.json"
+
+
+def _clear_chip_group_dir(group_dir: Path) -> None:
+    group_dir = Path(group_dir)
+    group_dir.mkdir(parents=True, exist_ok=True)
+    for pattern in ("*.tif", "*.tif.*.tmp"):
+        for p in group_dir.glob(pattern):
+            p.unlink()
 
 
 def _resolve_buffer_km_args(
@@ -1034,6 +1077,7 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
     ensure_ee_initialized()
 
     region = square_region_for_point(req.lon, req.lat, extent_buffer_km)
+    search_region = _chip_search_region_center_plus_corners(req.lon, req.lat, extent_buffer_km)
 
     for group_name, group in plan.chip_groups.items():
         out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
@@ -1056,6 +1100,7 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
                 chip_group=group_name,
                 timestamp=req.timestamp,
                 region=region,
+                search_region=search_region,
             )
             download_tiled_image(
                 img,
@@ -1122,14 +1167,8 @@ def download_chips(
                 f"Unsupported chips_meta.json schema_version={meta.get('schema_version')!r} (expected '1'): {meta_path}"
             )
     else:
-        chips_root = _rasters_root(study_dir, plan.rasters_hash) / "chips"
-        has_existing = chips_root.exists() and any(chips_root.glob("*/*.tif"))
-        if skip_existing and has_existing:
-            raise FileNotFoundError(
-                "chips_meta.json not found for an existing chips directory. "
-                "Run one_time_scripts/migrate_rasters_hash.py once to create it (and migrate rasters_hash). "
-                f"Expected: {meta_path}"
-            )
+        # Without metadata we cannot trust existing chip files, so rebuild them
+        # instead of aborting the whole study download.
         meta = {"schema_version": "1", "chip_groups": {}}
 
     existing_groups = meta.get("chip_groups", {})
@@ -1151,9 +1190,7 @@ def download_chips(
         if is_current:
             continue
         group_dir = _rasters_root(study_dir, plan.rasters_hash) / "chips" / group_name
-        group_dir.mkdir(parents=True, exist_ok=True)
-        for p in group_dir.glob("*.tif"):
-            p.unlink()
+        _clear_chip_group_dir(group_dir)
         chip_group_completions.pop(group_name, None)
 
     reqs = [
