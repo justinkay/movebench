@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from movebench import paths
-from movebench.layers.download import GEE_NODATA_SENTINEL
+from movebench.layers.constants import GEE_NODATA_SENTINEL, WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
 from movebench.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
@@ -372,7 +372,7 @@ class LayerIO:
             return Raster(
                 array=arr,
                 transform=transform,
-                crs="EPSG:4326",
+                crs=WGS84_CRS,
                 nodata=float("nan"),
                 bounds=bounds_latlon,
                 band_ids=band_ids,
@@ -517,7 +517,7 @@ class LayerIO:
             return Raster(
                 array=arr,
                 transform=transform,
-                crs="EPSG:4326",
+                crs=WGS84_CRS,
                 nodata=float("nan"),
                 bounds=bounds_latlon,
                 band_ids=[f"{layer}.{b}" for b in spec.bands],

@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm
 
 from movebench.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
+from movebench.layers.constants import WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.trajectories import (
@@ -46,8 +47,8 @@ def _transformers():
     """Construct cached CRS transformers lazily (pyproj is an optional dependency for readers)."""
     from pyproj import Transformer  # imported lazily to avoid requiring pyproj for point-store readers
 
-    to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
-    to_4326 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+    to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
+    to_4326 = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
     return to_target, to_4326
 
 
@@ -341,7 +342,7 @@ def _sample_from_raster(
     C, H, W = arr.shape
     N = int(len(lons))
 
-    transformer = Transformer.from_crs("EPSG:4326", src_crs, always_xy=True)
+    transformer = Transformer.from_crs(WGS84_CRS, src_crs, always_xy=True)
     xs, ys = transformer.transform(lons, lats)
 
     inv_transform = ~transform

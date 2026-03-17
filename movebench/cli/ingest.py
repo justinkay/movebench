@@ -309,13 +309,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--max-individuals",
         type=_parse_int_with_underscores,
-        default=10,
+        default=1000,
         help="Maximum number of individuals to keep (default: 10).",
     )
     parser.add_argument(
         "--max-points",
         type=_parse_int_with_underscores,
-        default=100_000,
+        default=100_000_000,
         help="Stop after cumulative points exceeds this threshold (default: 100_000).",
     )
     parser.add_argument(

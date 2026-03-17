@@ -1,0 +1,15 @@
+"""Shared constants for layer download and IO code."""
+
+from __future__ import annotations
+
+
+GEE_NODATA_SENTINEL = -9999.0
+
+WGS84_CRS = "EPSG:4326"
+WGS84_MIN_LON = -180.0
+WGS84_MAX_LON = 180.0
+WGS84_MIN_LAT = -89.9999
+WGS84_MAX_LAT = 89.9999
+
+METERS_PER_DEG_LAT = 110540.0
+METERS_PER_DEG_LON_EQUATOR = 111320.0

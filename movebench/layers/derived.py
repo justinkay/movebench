@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 from typing import TYPE_CHECKING
 
+from movebench.layers.constants import METERS_PER_DEG_LAT, METERS_PER_DEG_LON_EQUATOR
+
 if TYPE_CHECKING:
     from movebench.rasters import Raster
 
@@ -48,8 +50,8 @@ def _gradient_meters(elev: np.ndarray, transform) -> tuple[np.ndarray, np.ndarra
     center_lat = transform.f + center_row * transform.e
     lat_rad = np.radians(center_lat)
 
-    dy_m = dy_deg * 110540.0
-    dx_m = dx_deg * 111320.0 * np.cos(lat_rad)
+    dy_m = dy_deg * METERS_PER_DEG_LAT
+    dx_m = dx_deg * METERS_PER_DEG_LON_EQUATOR * np.cos(lat_rad)
 
     gy, gx = np.gradient(elev, dy_m, dx_m)
     return gy, gx
@@ -127,6 +129,11 @@ def compute_landsat_bai(*, landsat: Raster) -> np.ndarray:
     nir = _landsat_band(landsat, "nir")
     bai = _safe_reciprocal((0.1 - red) ** 2 + (0.06 - nir) ** 2)
     return bai[np.newaxis]
+
+
+def compute_landsat_lst(*, landsat: Raster) -> np.ndarray:
+    thermal = _landsat_band(landsat, "thermal")
+    return thermal[np.newaxis]
 
 
 def compute_orographic_uplift(*, slope: Raster, aspect: Raster, era5_land: Raster) -> np.ndarray:

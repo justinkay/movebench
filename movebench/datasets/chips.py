@@ -20,6 +20,7 @@ from rasterio.transform import from_bounds, rowcol
 from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
+from movebench.layers.constants import WGS84_CRS
 from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
@@ -185,7 +186,7 @@ class ChipDataset(Dataset):
             ]
             from pyproj import Transformer
 
-            self._to_target = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+            self._to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
 
             df_train = df_all[df_all[SET_COL] == "train"].copy()
             if len(df_train) == 0:

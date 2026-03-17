@@ -280,6 +280,14 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="8day",
         derived_from=["landsat"],
     ),
+    "landsat_lst": LayerSpec(
+        name="landsat_lst",
+        source="derived",
+        bands=["thermal"],
+        native_scale_m=30.0,
+        temporal="8day",
+        derived_from=["landsat"],
+    ),
     # "landsat_ndwi": LayerSpec( # Compute ourselves from the bands instead
     #     name="landsat_ndwi",
     #     source="gee_chip",

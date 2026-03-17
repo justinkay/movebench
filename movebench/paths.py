@@ -17,7 +17,7 @@ def data_root() -> Path:
 
 
 def studies_root() -> Path:
-    return data_root() / "studies_10ind" # "studies"
+    return data_root() / "studies"
 
 
 def study_dir(study_id: str) -> Path:

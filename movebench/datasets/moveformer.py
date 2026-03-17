@@ -21,6 +21,7 @@ from torch.utils.data import Dataset
 from movebench.datasets.ssf import _subset_plan_env_channels
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import select_point_store_dir
+from movebench.layers.constants import WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     INDIVIDUAL_COL,
@@ -38,8 +39,8 @@ from movebench.trajectories import (
 def _crs_transformers():
     from pyproj import Transformer
 
-    to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    to_4326 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    to_3857 = Transformer.from_crs(WGS84_CRS, "EPSG:3857", always_xy=True)
+    to_4326 = Transformer.from_crs("EPSG:3857", WGS84_CRS, always_xy=True)
     return to_3857, to_4326
 
 

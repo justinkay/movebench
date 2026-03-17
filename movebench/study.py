@@ -7,6 +7,7 @@ from movebench import paths
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
 from movebench.layers.plan import LayerPlan
+from movebench.trajectories import SET_COL, TIME_COL
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,10 @@ class Study:
         import pandas as pd
 
         df = pd.read_csv(self.trajectories_path)
-        df[mb2dl.TIME_COL] = pd.to_datetime(df[mb2dl.TIME_COL], errors="coerce")
-        df = df.dropna(subset=[mb2dl.TIME_COL])
+        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
+        df = df.dropna(subset=[TIME_COL])
 
-        train_df = df[df[mb2dl.SET_COL] == "train"]
+        train_df = df[df[SET_COL] == "train"]
         if len(train_df) == 0:
             raise ValueError("No training data found (set=='train'); cannot compute buffer")
         buf = cfg.raster_params["buffer"]
@@ -110,7 +111,7 @@ class Study:
         extent_buffer_km = float(extent_buffer_m) / 1000.0
 
         if splits is None:
-            splits = sorted(df[mb2dl.SET_COL].dropna().unique().tolist())
+            splits = sorted(df[SET_COL].dropna().unique().tolist())
 
         clamp = cfg.raster_params["scale_clamp"]
         min_pixels = int(clamp["min_pixels"])
@@ -131,7 +132,7 @@ class Study:
         )
 
         tile_stats = mb2dl.download_tiles(
-            df[df[mb2dl.SET_COL].isin(splits)].copy(),
+            df[df[SET_COL].isin(splits)].copy(),
             study_dir=self.study_dir,
             plan=plan,
             resolution_buffer_km=resolution_buffer_km,

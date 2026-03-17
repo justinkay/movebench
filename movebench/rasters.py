@@ -11,6 +11,8 @@ from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, transform_bounds
 from rasterio.windows import Window, bounds as window_bounds, from_bounds
 
+from movebench.layers.constants import WGS84_CRS
+
 
 @dataclass(frozen=True)
 class Raster:
@@ -53,8 +55,8 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
     min_lon, min_lat, max_lon, max_lat = bounds_latlon
 
     with rasterio.open(Path(path)) as ds:
-        if ds.crs is not None and str(ds.crs) != "EPSG:4326":
-            left, bottom, right, top = transform_bounds("EPSG:4326", ds.crs, min_lon, min_lat, max_lon, max_lat)
+        if ds.crs is not None and str(ds.crs) != WGS84_CRS:
+            left, bottom, right, top = transform_bounds(WGS84_CRS, ds.crs, min_lon, min_lat, max_lon, max_lat)
             bounds_in_ds = (left, bottom, right, top)
         else:
             bounds_in_ds = (min_lon, min_lat, max_lon, max_lat)
@@ -105,7 +107,7 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
             nodata_val = 255
 
         min_lon, min_lat, max_lon, max_lat = bounds_latlon
-        left, bottom, right, top = transform_bounds("EPSG:4326", crs, min_lon, min_lat, max_lon, max_lat)
+        left, bottom, right, top = transform_bounds(WGS84_CRS, crs, min_lon, min_lat, max_lon, max_lat)
         # Snap to >=1-pixel integer bounds in the dataset CRS (avoids 0x0 merges).
         win = from_bounds(float(left), float(bottom), float(right), float(top), transform=datasets[0].transform)
         col0 = int(math.floor(win.col_off))

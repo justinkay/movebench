@@ -24,7 +24,7 @@ POINT_ID_COL = "point_id"
 OUTLIER_COL = "manually-marked-outlier"
 
 
-def _haversine_distance_m(
+def haversine_distance_m(
     start_lat_deg: np.ndarray,
     start_lon_deg: np.ndarray,
     end_lat_deg: np.ndarray,
@@ -41,6 +41,9 @@ def _haversine_distance_m(
     a = np.sin(dlat / 2.0) ** 2 + np.cos(start_lat) * np.cos(end_lat) * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return 6371000.0 * c
+
+
+_haversine_distance_m = haversine_distance_m
 
 def load_trajectories_csv(path: str) -> pd.DataFrame:
     """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
@@ -99,7 +102,9 @@ def prepare_interval_step_starts(
 
     n_rows = len(d)
     source_index = d["_source_index"].to_numpy(dtype=np.int64, copy=False)
-    time_values = d[TIME_COL].astype("int64").to_numpy(dtype=np.int64, copy=False)
+    # Pandas may preserve lower-resolution datetime64 units (for example `us`)
+    # after parsing; normalize to nanoseconds before raw integer arithmetic.
+    time_values = d[TIME_COL].to_numpy(dtype="datetime64[ns]", copy=False).astype(np.int64, copy=False)
     end_index = np.full(n_rows, -1, dtype=np.int64)
     actual_step_time_s = np.full(n_rows, np.nan, dtype=np.float64)
     step_time_error_s = np.full(n_rows, np.nan, dtype=np.float64)
@@ -151,7 +156,7 @@ def prepare_interval_step_starts(
         end_times = burst_times[chosen_rel[selected]]
         actual_s = (end_times - start_times) / 1_000_000_000.0
         error_s = actual_s - float(step_time_s)
-        lengths = _haversine_distance_m(
+        lengths = haversine_distance_m(
             burst_lat[selected],
             burst_lon[selected],
             burst_lat[chosen_rel[selected]],
@@ -213,7 +218,7 @@ def compute_movement_features(
     # ---- step length per individual ----
     lat_prev_deg = g[LAT_COL].shift()
     lon_prev_deg = g[LON_COL].shift()
-    df["step_length_m"] = _haversine_distance_m(
+    df["step_length_m"] = haversine_distance_m(
         lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
         lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
         df[LAT_COL].to_numpy(dtype=np.float64, copy=False),

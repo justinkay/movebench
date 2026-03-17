@@ -119,6 +119,16 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("'raster_params' must be a mapping")
 
+    if "region_multiplier" in raw:
+        raise ValueError("raster_params.region_multiplier has been removed; use max_step_time to control extent")
+
+    allowed_keys = {"buffer", "scale_clamp", "tiles"}
+    unexpected_keys = sorted(str(k) for k in raw.keys() if k not in allowed_keys)
+    if unexpected_keys:
+        raise ValueError(
+            f"raster_params has unexpected key(s): {unexpected_keys}; expected only {sorted(allowed_keys)}"
+        )
+
     def _get_section(name: str) -> dict[str, Any]:
         v = raw.get(name, {})
         if v is None:
@@ -163,9 +173,6 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     px_per_side = int(tiles["px_per_side"])
     if px_per_side <= 0:
         raise ValueError(f"raster_params.tiles.px_per_side must be >= 1, got {px_per_side}")
-
-    if "region_multiplier" in raw:
-        raise ValueError("raster_params.region_multiplier has been removed; use max_step_time to control extent")
 
     return {
         "buffer": {
