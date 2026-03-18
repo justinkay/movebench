@@ -926,7 +926,7 @@ def _download_tile_worker(args: tuple[TileRequest, dict[str, Any]]) -> dict[str,
     out_path = tile_dir / _tile_filename(tile_index, year=year_int)
 
     if skip_existing and out_path.exists():
-        return {"tile_index": tile_index, "status": "existing", "file": out_path.name}
+        return {"tile_index": tile_index, "year": year_int, "status": "existing", "file": out_path.name}
 
     try:
         ensure_ee_initialized()
@@ -949,10 +949,11 @@ def _download_tile_worker(args: tuple[TileRequest, dict[str, Any]]) -> dict[str,
             crs=crs,
             bounds_latlon=bounds_latlon,
         )
-        return {"tile_index": tile_index, "status": "downloaded", "file": out_path.name}
+        return {"tile_index": tile_index, "year": year_int, "status": "downloaded", "file": out_path.name}
     except Exception as e:
         return {
             "tile_index": tile_index,
+            "year": year_int,
             "status": "failed",
             "file": out_path.name,
             "error": str(e),
@@ -1630,45 +1631,55 @@ def download_tile_layer(
             "registry": registry,
         }
 
-        pool = None
-        try:
-            for year in resolved_years:
-                idx_path_y = tile_dir / f"index_{int(year)}.json"
+        pending_years: list[int] = []
+        worker_args: list[tuple[TileRequest, dict[str, Any]]] = []
+        for year in resolved_years:
+            idx_path_y = tile_dir / f"index_{int(year)}.json"
+            if skip_existing and idx_path_y.exists():
+                ok, n_existing = _tile_index_is_complete(tile_dir, idx_path_y)
+                if ok:
+                    years_out[int(year)] = _empty_tile_stats(total=n_existing, index_path=idx_path_y)
+                    years_out[int(year)]["existing"] = int(n_existing)
+                    continue
 
-                if skip_existing and idx_path_y.exists():
-                    ok, n_existing = _tile_index_is_complete(tile_dir, idx_path_y)
-                    if ok:
-                        years_out[int(year)] = _empty_tile_stats(total=n_existing, index_path=idx_path_y)
-                        years_out[int(year)]["existing"] = int(n_existing)
-                        continue
+            pending_years.append(int(year))
+            ctx_y = {**ctx_base, "year": int(year)}
+            worker_args.extend((req, ctx_y) for req in reqs)
 
-                if pool is None:
-                    pool = mp.Pool(int(n_workers))
-                ctx_y = {**ctx_base, "year": int(year)}
-                results_by_index, pool = _run_tile_workers(
-                    reqs,
-                    ctx_y,
-                    desc=f"Downloading tiles ({layer} {int(year)}) ({os.path.basename(study_dir)})",
-                    n_workers=n_workers,
-                    pool=pool,
+        results_by_year: dict[int, dict[int, dict[str, Any]]] = {}
+        if worker_args:
+            with mp.Pool(int(n_workers)) as pool:
+                results = list(
+                    tqdm(
+                        pool.imap_unordered(_download_tile_worker, worker_args),
+                        total=len(worker_args),
+                        desc=f"Downloading tiles ({layer}) ({os.path.basename(study_dir)})",
+                        unit="tile",
+                        dynamic_ncols=True,
+                    )
                 )
-                years_out[int(year)] = _build_tile_index_result(
-                    tile_indices=tile_indices,
-                    tile_bounds_latlon=tile_bounds_latlon,
-                    results_by_index=results_by_index,
-                    geometry_errors=geometry_errors,
-                    layer=layer,
-                    layer_scale=float(layer_scale),
-                    num_bands=len(spec.bands),
-                    n_tiles_reported=n_tiles_reported,
-                    n_tiles_effective=n_tiles_effective,
-                    index_path=idx_path_y,
-                    year=int(year),
-                )
-        finally:
-            if pool is not None:
-                pool.close()
-                pool.join()
+            for result in results:
+                year = result.get("year")
+                if year is None:
+                    continue
+                year_results = results_by_year.setdefault(int(year), {})
+                year_results[int(result["tile_index"])] = result
+
+        for year in pending_years:
+            idx_path_y = tile_dir / f"index_{int(year)}.json"
+            years_out[int(year)] = _build_tile_index_result(
+                tile_indices=tile_indices,
+                tile_bounds_latlon=tile_bounds_latlon,
+                results_by_index=results_by_year.get(int(year), {}),
+                geometry_errors=geometry_errors,
+                layer=layer,
+                layer_scale=float(layer_scale),
+                num_bands=len(spec.bands),
+                n_tiles_reported=n_tiles_reported,
+                n_tiles_effective=n_tiles_effective,
+                index_path=idx_path_y,
+                year=int(year),
+            )
 
         # Compatibility index.json used for bounds-only lookups.
         if resolved_years:
