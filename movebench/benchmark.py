@@ -196,80 +196,61 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
 
 def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
-    from movebench.features.points import select_point_store_dir
+    from movebench.features.points import resolve_sampler_hash
 
     layers_config = str(cfg["layers_config"])
     setup_workers = int(cfg["runtime"]["setup_workers"])
     sampler = dict(cfg["datasets"]["issf"]["sampler"])
 
-    plan = study.layer_plan(layers_config)
+    sampler_hash = resolve_sampler_hash(
+        sampler_type="parametric",
+        num_candidates=int(sampler["num_candidates"]),
+        random_seed=int(sampler["random_seed"]),
+        step_multiplier=float(sampler["step_multiplier"]),
+        step_q=float(sampler["step_q"]),
+        max_step_q=float(sampler.get("max_step_q", 0.99)),
+        gap_q=float(sampler["gap_q"]),
+        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
+    )
 
     try:
-        _train_dir, train_m = select_point_store_dir(
-            study_dir=study.study_dir,
-            split="train",
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+        study.extract_point_features(
+            config=layers_config,
+            splits=["train", "test"],
+            parametric=True,
             num_candidates=int(sampler["num_candidates"]),
             random_seed=int(sampler["random_seed"]),
+            n_workers=int(setup_workers),
+            skip_existing=True,
             step_multiplier=float(sampler["step_multiplier"]),
             step_q=float(sampler["step_q"]),
+            max_step_q=float(sampler.get("max_step_q", 0.99)),
             gap_q=float(sampler["gap_q"]),
             bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
         )
-        sampler_hash = str(train_m.sampler_hash)
-
-        # Also require the test split point store (benchmark evaluates on test).
-        select_point_store_dir(
-            study_dir=study.study_dir,
-            split="test",
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+    except FileNotFoundError as e:
+        if "rasters" not in str(e):
+            raise
+        study.download_rasters(
+            config=layers_config,
+            splits=["train", "test"],
+            n_workers=int(setup_workers),
+            skip_existing=True,
+        )
+        study.extract_point_features(
+            config=layers_config,
+            splits=["train", "test"],
+            parametric=True,
             num_candidates=int(sampler["num_candidates"]),
             random_seed=int(sampler["random_seed"]),
+            n_workers=int(setup_workers),
+            skip_existing=True,
             step_multiplier=float(sampler["step_multiplier"]),
             step_q=float(sampler["step_q"]),
+            max_step_q=float(sampler.get("max_step_q", 0.99)),
             gap_q=float(sampler["gap_q"]),
             bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
         )
-    except FileNotFoundError:
-        try:
-            rep = study.extract_point_features(
-                config=layers_config,
-                splits=["train", "test"],
-                parametric=True,
-                num_candidates=int(sampler["num_candidates"]),
-                random_seed=int(sampler["random_seed"]),
-                n_workers=int(setup_workers),
-                skip_existing=True,
-                step_multiplier=float(sampler["step_multiplier"]),
-                step_q=float(sampler["step_q"]),
-                gap_q=float(sampler["gap_q"]),
-                bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-            )
-        except FileNotFoundError as e:
-            if "rasters" not in str(e):
-                raise
-            study.download_rasters(
-                config=layers_config,
-                splits=["train", "test"],
-                n_workers=int(setup_workers),
-                skip_existing=True,
-            )
-            rep = study.extract_point_features(
-                config=layers_config,
-                splits=["train", "test"],
-                parametric=True,
-                num_candidates=int(sampler["num_candidates"]),
-                random_seed=int(sampler["random_seed"]),
-                n_workers=int(setup_workers),
-                skip_existing=True,
-                step_multiplier=float(sampler["step_multiplier"]),
-                step_q=float(sampler["step_q"]),
-                gap_q=float(sampler["gap_q"]),
-                bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-            )
-        sampler_hash = str(rep["sampler_hash"])
 
     study.compute_normalization_vals(
         from_="points",
@@ -379,6 +360,7 @@ def _run_issf(
         "random_seed": int(sampler["random_seed"]),
         "step_multiplier": float(sampler["step_multiplier"]),
         "step_q": float(sampler["step_q"]),
+        "max_step_q": float(sampler.get("max_step_q", 0.99)),
         "gap_q": float(sampler["gap_q"]),
         "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
     }
@@ -698,6 +680,7 @@ def run_moveformer(
         "random_seed": int(sampler["random_seed"]),
         "step_multiplier": float(sampler["step_multiplier"]),
         "step_q": float(sampler["step_q"]),
+        "max_step_q": float(sampler.get("max_step_q", 0.99)),
         "gap_q": float(sampler["gap_q"]),
         "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
     }

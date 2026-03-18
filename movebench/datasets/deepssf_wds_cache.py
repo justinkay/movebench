@@ -49,8 +49,8 @@ def _stable_hash_dict(d: dict[str, Any]) -> str:
 
 def deepssf_wds_cache_hash(
     *,
-    config_hash: str,
     rasters_hash: str,
+    band_ids: list[str],
     split: str,
     output_hw: tuple[int, int],
     normalize: bool,
@@ -68,8 +68,8 @@ def deepssf_wds_cache_hash(
             "kind": "deepssf_wds_cache",
             "schema_version": "2",
             "payload_format": "pth",
-            "config_hash": str(config_hash),
             "rasters_hash": str(rasters_hash),
+            "band_ids": list(band_ids),
             "split": str(split),
             "output_hw": [int(output_hw[0]), int(output_hw[1])],
             "normalize": bool(normalize),
@@ -385,10 +385,9 @@ def cache_dir_for_study(
     *,
     study_dir: str | Path,
     split: str,
-    config_hash: str,
     cache_hash: str,
 ) -> Path:
-    return Path(study_dir) / "cache" / "deepssf_wds" / str(split) / str(config_hash) / str(cache_hash)
+    return Path(study_dir) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
 
 
 def steps_per_epoch_from_manifest(manifest: dict[str, Any], *, batch_size: int) -> int:
@@ -437,8 +436,8 @@ def ensure_deepssf_wds_cache_split(
     gap_q = float(ds_kwargs.get("gap_q", 0.999))
 
     cache_hash = deepssf_wds_cache_hash(
-        config_hash=str(plan.config_hash),
         rasters_hash=str(plan.rasters_hash),
+        band_ids=plan.band_ids_in_order(),
         split=split,
         output_hw=output_hw,
         normalize=normalize,
@@ -455,7 +454,6 @@ def ensure_deepssf_wds_cache_split(
     cache_dir = cache_dir_for_study(
         study_dir=study.study_dir,
         split=split,
-        config_hash=str(plan.config_hash),
         cache_hash=str(cache_hash),
     )
     manifest_path = cache_dir / "manifest.json"

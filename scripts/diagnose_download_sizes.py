@@ -243,6 +243,7 @@ def compute_dynamic_extent_buffers_km(
     max_step_time_s: int,
     step_q: float,
     step_multiplier: float,
+    max_step_q: float = 0.99,
     gap_q: float,
     time_col: str = "timestamp",
     window_s: int = 30 * 86400,
@@ -251,7 +252,7 @@ def compute_dynamic_extent_buffers_km(
     import pandas as pd
 
     _insert_repo_root_on_path()
-    from movebench.trajectories import prepare_interval_step_starts
+    from movebench.trajectories import compute_step_length_extent_m, prepare_interval_step_starts
 
     min_extent_buffer_m = float(min_extent_buffer_m)
     max_extent_buffer_m = float(max_extent_buffer_m)
@@ -297,7 +298,12 @@ def compute_dynamic_extent_buffers_km(
             if right <= left:
                 buffer_m = max_extent_buffer_m
             else:
-                buffer_m = float(step_multiplier) * float(np.nanquantile(step_lengths_m[left:right], q=float(step_q)))
+                buffer_m = compute_step_length_extent_m(
+                    step_lengths_m[left:right],
+                    step_q=step_q,
+                    max_step_q=max_step_q,
+                    step_multiplier=step_multiplier,
+                )
                 if not np.isfinite(buffer_m):
                     buffer_m = max_extent_buffer_m
             unique_buffers_m[idx] = min(max(buffer_m, min_extent_buffer_m), max_extent_buffer_m)
@@ -605,6 +611,7 @@ def main(argv: list[str]) -> int:
     buf_cfg = cfg.raster_params["buffer"]
     step_multiplier = float(buf_cfg["step_multiplier"])
     step_q = float(buf_cfg["step_q"])
+    max_step_q = float(buf_cfg.get("max_step_q", 0.99))
     gap_q = float(buf_cfg["gap_q"])
     min_step_time_s = buf_cfg.get("min_step_time_s")
     max_step_time_s = buf_cfg.get("max_step_time_s")
@@ -700,6 +707,7 @@ def main(argv: list[str]) -> int:
                     step_time_s=min_step_time_s,
                     step_multiplier=float(step_multiplier),
                     step_q=float(step_q),
+                    max_step_q=float(max_step_q),
                     gap_q=float(gap_q),
                 )
             )
@@ -712,6 +720,7 @@ def main(argv: list[str]) -> int:
                         step_time_s=max_step_time_s,
                         step_multiplier=float(step_multiplier),
                         step_q=float(step_q),
+                        max_step_q=float(max_step_q),
                         gap_q=float(gap_q),
                     )
                 )
@@ -754,6 +763,7 @@ def main(argv: list[str]) -> int:
                     max_extent_buffer_m=float(extent_buffer_m),
                     max_step_time_s=int(max_step_time_s),
                     step_q=float(step_q),
+                    max_step_q=float(max_step_q),
                     step_multiplier=float(step_multiplier),
                     gap_q=float(gap_q),
                     time_col=TIME_COL,

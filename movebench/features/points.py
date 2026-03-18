@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing as mp
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +27,7 @@ from tqdm.auto import tqdm
 
 from movebench.features.manifest import PointFeatureManifest, read_manifest, utc_now_iso, write_manifest
 from movebench.layers.constants import WGS84_CRS
+from movebench.layers.config import _format_slug_number, _truncate_key
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.trajectories import (
@@ -40,6 +42,13 @@ from movebench.trajectories import (
 
 TARGET_CRS = "EPSG:3857"  # meters
 SamplerType = Literal["empirical", "parametric"]
+DEFAULT_NUM_CANDIDATES = 100
+DEFAULT_RANDOM_SEED = 0
+DEFAULT_STEP_MULTIPLIER = 2.0
+DEFAULT_STEP_Q = 0.95
+DEFAULT_MAX_STEP_Q = 0.99
+DEFAULT_GAP_Q = 0.999
+DEFAULT_BOUNDS_BUFFER_DEG = 0.01
 
 
 @lru_cache(maxsize=1)
@@ -52,9 +61,8 @@ def _transformers():
     return to_target, to_4326
 
 
-def _stable_hash_dict(d: dict[str, Any]) -> str:
-    payload = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
+def _stable_payload(d: dict[str, Any]) -> bytes:
+    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
 def _step_seed(random_seed: int, point_id_start: int) -> int:
@@ -62,162 +70,146 @@ def _step_seed(random_seed: int, point_id_start: int) -> int:
     return int(hashlib.sha256(s).hexdigest()[:8], 16)
 
 
-def point_stores_dir(*, study_dir: Path, split: str, config_hash: str) -> Path:
-    return Path(study_dir) / "features" / "points" / str(split) / str(config_hash)
-
-
-def point_store_dir(*, study_dir: Path, split: str, config_hash: str, sampler_hash: str) -> Path:
-    return point_stores_dir(study_dir=study_dir, split=split, config_hash=config_hash) / str(sampler_hash)
-
-
-def _iter_point_store_manifests(base_dir: Path) -> list[tuple[str, PointFeatureManifest]]:
-    if not base_dir.exists():
-        return []
-    out: list[tuple[str, PointFeatureManifest]] = []
-    for p in sorted(base_dir.iterdir()):
-        if not p.is_dir():
-            continue
-        mpth = p / "manifest.json"
-        if not mpth.exists():
-            continue
-        out.append((p.name, read_manifest(mpth)))
-    return out
-
-
-def _manifest_matches(
-    m: PointFeatureManifest,
+def sampler_hash(
     *,
-    expected_type: SamplerType,
-    config_hash: str,
-    num_candidates: int | None,
-    random_seed: int | None,
-    step_multiplier: float | None,
-    step_q: float | None,
-    gap_q: float | None,
-    bounds_buffer_deg: float | None,
-) -> bool:
-    if str(m.config_hash) != str(config_hash):
-        return False
-    if str(m.sampler.get("type")) != str(expected_type):
-        return False
-    if num_candidates is not None and int(m.sampler.get("num_candidates")) != int(num_candidates):
-        return False
-    if random_seed is not None and int(m.sampler.get("random_seed")) != int(random_seed):
-        return False
-    if step_multiplier is not None and float(m.sampler.get("step_multiplier")) != float(step_multiplier):
-        return False
-    if step_q is not None and float(m.sampler.get("step_q")) != float(step_q):
-        return False
-    if gap_q is not None and float(m.sampler.get("gap_q")) != float(gap_q):
-        return False
-    if bounds_buffer_deg is not None and float(m.extraction.get("bounds_buffer_deg")) != float(bounds_buffer_deg):
-        return False
-    return True
+    parametric: bool,
+    num_candidates: int,
+    random_seed: int,
+    step_multiplier: float,
+    step_q: float,
+    max_step_q: float,
+    gap_q: float,
+    bounds_buffer_deg: float,
+) -> str:
+    payload_dict = {
+        "type": "parametric" if parametric else "empirical",
+        "num_candidates": int(num_candidates),
+        "random_seed": int(random_seed),
+        "step_multiplier": float(step_multiplier),
+        "step_q": float(step_q),
+        "max_step_q": float(max_step_q),
+        "gap_q": float(gap_q),
+        "bounds_buffer_deg": float(bounds_buffer_deg),
+    }
+    payload = _stable_payload(payload_dict)
+    parts = [
+        f"tp{'par' if parametric else 'emp'}",
+        f"nc{int(num_candidates)}",
+        f"rs{int(random_seed)}",
+        f"sm{_format_slug_number(float(step_multiplier))}",
+        f"sq{_format_slug_number(float(step_q))}",
+        f"msq{_format_slug_number(float(max_step_q))}",
+        f"gq{_format_slug_number(float(gap_q))}",
+        f"bb{_format_slug_number(float(bounds_buffer_deg))}",
+    ]
+    return _truncate_key("-".join(parts), payload=payload)
 
 
-def select_point_store_dir(
+def resolve_sampler_hash(
     *,
-    study_dir: Path,
-    split: str,
-    config_hash: str,
-    expected_type: SamplerType,
+    sampler_type: SamplerType,
     num_candidates: int | None = None,
     random_seed: int | None = None,
     step_multiplier: float | None = None,
     step_q: float | None = None,
+    max_step_q: float | None = None,
     gap_q: float | None = None,
     bounds_buffer_deg: float | None = None,
+) -> str:
+    return sampler_hash(
+        parametric=str(sampler_type) == "parametric",
+        num_candidates=DEFAULT_NUM_CANDIDATES if num_candidates is None else int(num_candidates),
+        random_seed=DEFAULT_RANDOM_SEED if random_seed is None else int(random_seed),
+        step_multiplier=DEFAULT_STEP_MULTIPLIER if step_multiplier is None else float(step_multiplier),
+        step_q=DEFAULT_STEP_Q if step_q is None else float(step_q),
+        max_step_q=DEFAULT_MAX_STEP_Q if max_step_q is None else float(max_step_q),
+        gap_q=DEFAULT_GAP_Q if gap_q is None else float(gap_q),
+        bounds_buffer_deg=DEFAULT_BOUNDS_BUFFER_DEG if bounds_buffer_deg is None else float(bounds_buffer_deg),
+    )
+
+def point_stores_dir(*, study_dir: Path, split: str, rasters_hash: str) -> Path:
+    return Path(study_dir) / "features" / "points" / str(split) / str(rasters_hash)
+
+
+def point_store_dir(*, study_dir: Path, split: str, rasters_hash: str, sampler_hash: str) -> Path:
+    return point_stores_dir(study_dir=study_dir, split=split, rasters_hash=rasters_hash) / str(sampler_hash)
+
+
+def point_store_manifest_path(*, study_dir: Path, split: str, rasters_hash: str, sampler_hash: str) -> Path:
+    return point_store_dir(
+        study_dir=study_dir,
+        split=split,
+        rasters_hash=rasters_hash,
+        sampler_hash=sampler_hash,
+    ) / "manifest.json"
+
+
+def point_store_train_stats_path(*, study_dir: Path, rasters_hash: str, sampler_hash: str) -> Path:
+    return point_store_dir(
+        study_dir=study_dir,
+        split="train",
+        rasters_hash=rasters_hash,
+        sampler_hash=sampler_hash,
+    ) / "train_stats.json"
+
+
+def load_point_store_manifest(
+    *,
+    study_dir: Path,
+    split: str,
+    rasters_hash: str,
+    sampler_hash: str,
 ) -> tuple[Path, PointFeatureManifest]:
-    """Select a point feature store directory by sampler semantics.
-
-    Returns (store_dir, manifest). Raises if missing or ambiguous.
-    """
-    base_dir = point_stores_dir(study_dir=study_dir, split=split, config_hash=config_hash)
-    candidates = _iter_point_store_manifests(base_dir)
-    matches = [
-        (sampler_hash, m)
-        for sampler_hash, m in candidates
-        if _manifest_matches(
-            m,
-            expected_type=expected_type,
-            config_hash=config_hash,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        )
-    ]
-
-    if not matches:
+    store_dir = point_store_dir(
+        study_dir=study_dir,
+        split=split,
+        rasters_hash=rasters_hash,
+        sampler_hash=sampler_hash,
+    )
+    manifest_path = store_dir / "manifest.json"
+    if not manifest_path.exists():
         raise FileNotFoundError(
             "No extracted point feature store found for "
-            f"split={split!r}, config_hash={config_hash!r}, sampler_type={expected_type!r}. "
+            f"split={split!r}, rasters_hash={rasters_hash!r}, sampler_hash={sampler_hash!r}. "
             "Run Study.extract_point_features(...) first."
+    )
+    return store_dir, read_manifest(manifest_path)
+
+
+def load_point_store_shared(store_dir: Path) -> dict[str, torch.Tensor]:
+    shared_path = Path(store_dir) / "shared.pt"
+    if not shared_path.exists():
+        raise FileNotFoundError(f"shared.pt not found under: {store_dir}")
+    return torch.load(shared_path, map_location="cpu")
+
+
+def load_point_store_bands(
+    *,
+    store_dir: Path,
+    manifest: PointFeatureManifest,
+    band_ids: list[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not band_ids:
+        shared_shape = list(manifest.shared["shared.pt"]["shape"])
+        return (
+            torch.zeros((shared_shape[0], 0, shared_shape[1]), dtype=torch.float32),
+            torch.zeros((shared_shape[0], 0, shared_shape[1]), dtype=torch.bool),
         )
 
-    if len(matches) != 1:
-        # When the caller provided a full sampler specification but multiple stores still match
-        # (e.g., extracted multiple times with slightly different internal sampler fits),
-        # prefer the most recently created store.
-        fully_specified = all(
-            v is not None
-            for v in (
-                num_candidates,
-                random_seed,
-                step_multiplier,
-                step_q,
-                gap_q,
-                bounds_buffer_deg,
-            )
-        )
-        if fully_specified:
-            import warnings
-            from datetime import datetime
-
-            def _created_at_key(m: PointFeatureManifest):
-                try:
-                    return datetime.fromisoformat(str(m.created_at).replace("Z", "+00:00"))
-                except Exception:
-                    # Fallback: ISO timestamps are lexicographically sortable.
-                    return str(m.created_at)
-
-            sampler_hash, m = max(matches, key=lambda x: _created_at_key(x[1]))
-            store_dir = base_dir / sampler_hash
-            if not (store_dir / "features.pt").exists():
-                raise FileNotFoundError(f"features.pt not found under: {store_dir}")
-
-            warnings.warn(
-                "Multiple matching point feature stores found even though the sampler was fully specified; "
-                f"choosing the most recently created store: {store_dir}. "
-                "To avoid this warning, delete older matching stores under the same config_hash directory.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return store_dir, m
-
-        lines = [
-            "Multiple matching point feature stores found. Disambiguate by passing one or more of:",
-            "num_candidates, random_seed, step_multiplier, step_q, gap_q, bounds_buffer_deg.",
-            "Found:",
-        ]
-        for sampler_hash, m in matches:
-            s = m.sampler
-            e = m.extraction
-            lines.append(
-                f"- store_dir={sampler_hash!r} created_at={m.created_at!r} "
-                f"num_candidates={s.get('num_candidates')!r} random_seed={s.get('random_seed')!r} "
-                f"step_multiplier={s.get('step_multiplier')!r} step_q={s.get('step_q')!r} gap_q={s.get('gap_q')!r} "
-                f"bounds_buffer_deg={e.get('bounds_buffer_deg')!r}"
-            )
-        raise ValueError("\n".join(lines))
-
-    sampler_hash, m = matches[0]
-    store_dir = base_dir / sampler_hash
-    if not (store_dir / "features.pt").exists():
-        raise FileNotFoundError(f"features.pt not found under: {store_dir}")
-    return store_dir, m
+    env_parts: list[torch.Tensor] = []
+    valid_parts: list[torch.Tensor] = []
+    for band_id in band_ids:
+        meta = manifest.bands.get(band_id)
+        if meta is None:
+            raise ValueError(f"Requested band_id {band_id!r} not present in point store")
+        d = torch.load(Path(store_dir) / str(meta["path"]), map_location="cpu")
+        env = d["env"]
+        valid = d["valid"]
+        if env.ndim != 2 or valid.ndim != 2:
+            raise ValueError(f"Band {band_id!r} must have rank-2 env/valid tensors")
+        env_parts.append(env.unsqueeze(1))
+        valid_parts.append(valid.unsqueeze(1))
+    return torch.cat(env_parts, dim=1), torch.cat(valid_parts, dim=1)
 
 
 @dataclass(frozen=True)
@@ -239,7 +231,9 @@ def build_train_sampler(
     random_seed: int,
     step_multiplier: float,
     step_q: float,
+    max_step_q: float,
     gap_q: float,
+    bounds_buffer_deg: float,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     """Fit/train-only movement sampler for candidate generation."""
     valid_lengths = train_df.loc[train_df["valid_step"], "step_length_m"].to_numpy(dtype=np.float64)
@@ -259,7 +253,9 @@ def build_train_sampler(
         "random_seed": int(random_seed),
         "step_multiplier": float(step_multiplier),
         "step_q": float(step_q),
+        "max_step_q": float(max_step_q),
         "gap_q": float(gap_q),
+        "bounds_buffer_deg": float(bounds_buffer_deg),
         "n_valid_lengths_train": int(len(valid_lengths)),
         "n_valid_turns_train": int(len(valid_turns)),
         "max_step_len_m_train": float(max_step_len),
@@ -319,8 +315,20 @@ def build_train_sampler(
         state["vonmises_used"] = bool(vonmises_used)
         state["vonmises_params"] = vonmises_params
 
-    sampler_hash = _stable_hash_dict(sampler)
-    return sampler, state, sampler_hash
+    return (
+        sampler,
+        state,
+        sampler_hash(
+            parametric=parametric,
+            num_candidates=num_candidates,
+            random_seed=random_seed,
+            step_multiplier=step_multiplier,
+            step_q=step_q,
+            max_step_q=max_step_q,
+            gap_q=gap_q,
+            bounds_buffer_deg=bounds_buffer_deg,
+        ),
+    )
 
 
 @torch.no_grad()
@@ -531,7 +539,7 @@ def _extract_one_step(
     layer_slices: dict[str, tuple[int, int]],
     sampler_state: dict[str, Any],
     bounds_buffer_deg: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     cand = _compute_candidates(req, sampler_state=sampler_state, bounds_buffer_deg=bounds_buffer_deg)
     P = int(len(cand.lons))
     C = int(plan.num_channels())
@@ -607,6 +615,8 @@ def _extract_one_step(
     return (
         env.numpy(),
         valid.numpy(),
+        cand.lons.astype(np.float32, copy=False),
+        cand.lats.astype(np.float32, copy=False),
         cand.step_lengths_m,
         cand.turn_angles_rad,
         int(req.point_id_start),
@@ -635,7 +645,9 @@ def _worker_init(ctx: dict[str, Any]) -> None:
     _W_IO = LayerIO(study_dir=Path(ctx["study_dir"]), plan=_W_PLAN)
 
 
-def _worker_run(args: tuple[int, _StepRequest]) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+def _worker_run(
+    args: tuple[int, _StepRequest]
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     idx, req = args
     out = _extract_one_step(
         req,
@@ -648,47 +660,33 @@ def _worker_run(args: tuple[int, _StepRequest]) -> tuple[int, np.ndarray, np.nda
     return (idx,) + out
 
 
-def extract_split_feature_store(
-    *,
-    study_id: str,
-    study_dir: Path,
-    split: str,
-    df_split: pd.DataFrame,
-    plan: LayerPlan,
-    config_path: str | None,
-    sampler: dict[str, Any],
-    sampler_state: dict[str, Any],
-    sampler_hash: str,
-    num_candidates: int,
-    bounds_buffer_deg: float,
-    n_workers: int,
-    skip_existing: bool,
-) -> dict[str, Any]:
-    """Extract one split into a point feature store on disk."""
-    out_dir = point_store_dir(
-        study_dir=Path(study_dir),
-        split=str(split),
-        config_hash=str(plan.config_hash),
-        sampler_hash=str(sampler_hash),
+def _subset_plan_for_band_ids(plan: LayerPlan, band_ids: list[str]) -> LayerPlan:
+    wanted = set(band_ids)
+    channels = [ch for ch in plan.channels if ch.band_id in wanted]
+    layers_in_order: list[str] = []
+    seen: set[str] = set()
+    for ch in channels:
+        if ch.layer in seen:
+            continue
+        seen.add(ch.layer)
+        layers_in_order.append(ch.layer)
+    return LayerPlan(
+        rasters_hash=str(plan.rasters_hash),
+        layers_in_order=layers_in_order,
+        channels=channels,
+        chip_groups={k: dict(v) for k, v in plan.chip_groups.items()},
+        derived_dependencies={k: list(v) for k, v in plan.derived_dependencies.items()},
     )
-    out_pt = out_dir / "features.pt"
-    out_manifest = out_dir / "manifest.json"
 
-    if skip_existing and out_pt.exists() and out_manifest.exists():
-        return {"split": split, "status": "existing", "out_dir": str(out_dir)}
 
-    steps = select_step_starts(
-        df_split,
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-    )
-    n_steps = int(len(steps))
-    P = int(num_candidates) + 1
-    C = int(plan.num_channels())
+def _torch_atomic_save(obj: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
-    layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
+def _build_step_requests(steps: pd.DataFrame) -> list[_StepRequest]:
     reqs: list[_StepRequest] = []
     for row in steps.itertuples(index=False):
         reqs.append(
@@ -702,20 +700,40 @@ def extract_split_feature_store(
                 end_lat=float(row.end_lat),
             )
         )
+    return reqs
 
-    env = torch.zeros((n_steps, C, P), dtype=torch.float32)
-    valid = torch.zeros((n_steps, C, P), dtype=torch.bool)
-    step_length_m = torch.zeros((n_steps, P), dtype=torch.float32)
-    turn_angle_rad = torch.zeros((n_steps, P), dtype=torch.float32)
-    point_id_start = torch.zeros((n_steps,), dtype=torch.int64)
-    timestamp_ns = torch.zeros((n_steps,), dtype=torch.int64)
+
+def _extract_env_block(
+    *,
+    study_id: str,
+    study_dir: Path,
+    plan: LayerPlan,
+    reqs: list[_StepRequest],
+    sampler_state: dict[str, Any],
+    bounds_buffer_deg: float,
+    n_workers: int,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    n_steps = int(len(reqs))
+    points_per_step = int(sampler_state["num_candidates"]) + 1
+    n_channels = int(plan.num_channels())
+    env = torch.zeros((n_steps, n_channels, points_per_step), dtype=torch.float32)
+    valid = torch.zeros((n_steps, n_channels, points_per_step), dtype=torch.bool)
+    shared = {
+        "candidate_lon": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "candidate_lat": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "step_length_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "turn_angle_rad": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "point_id_start": torch.zeros((n_steps,), dtype=torch.int64),
+        "timestamp_ns": torch.zeros((n_steps,), dtype=torch.int64),
+    }
+    layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
     if n_workers <= 1:
         from movebench.layers.io import LayerIO
 
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
-        for i, req in enumerate(tqdm(reqs, total=n_steps, desc=f"{study_id}:{split} steps")):
-            e, v, sl, ta, pid, tsn = _extract_one_step(
+        for i, req in enumerate(tqdm(reqs, total=n_steps, desc=f"{study_id}:{plan.rasters_hash} steps")):
+            e, v, lons, lats, sl, ta, pid, tsn = _extract_one_step(
                 req,
                 io=io,
                 plan=plan,
@@ -725,10 +743,12 @@ def extract_split_feature_store(
             )
             env[i] = torch.from_numpy(e)
             valid[i] = torch.from_numpy(v)
-            step_length_m[i] = torch.from_numpy(sl)
-            turn_angle_rad[i] = torch.from_numpy(ta)
-            point_id_start[i] = int(pid)
-            timestamp_ns[i] = int(tsn)
+            shared["candidate_lon"][i] = torch.from_numpy(lons)
+            shared["candidate_lat"][i] = torch.from_numpy(lats)
+            shared["step_length_m"][i] = torch.from_numpy(sl)
+            shared["turn_angle_rad"][i] = torch.from_numpy(ta)
+            shared["point_id_start"][i] = int(pid)
+            shared["timestamp_ns"][i] = int(tsn)
     else:
         ctx = mp.get_context("spawn")
         init_ctx = {
@@ -738,64 +758,171 @@ def extract_split_feature_store(
             "sampler_state": sampler_state,
             "bounds_buffer_deg": float(bounds_buffer_deg),
         }
-
         with ctx.Pool(processes=int(n_workers), initializer=_worker_init, initargs=(init_ctx,), maxtasksperchild=200) as pool:
-            for idx, e, v, sl, ta, pid, tsn in tqdm(
+            for idx, e, v, lons, lats, sl, ta, pid, tsn in tqdm(
                 pool.imap_unordered(_worker_run, list(enumerate(reqs)), chunksize=10),
                 total=n_steps,
-                desc=f"{study_id}:{split} steps",
+                desc=f"{study_id}:{plan.rasters_hash} steps",
             ):
                 env[idx] = torch.from_numpy(e)
                 valid[idx] = torch.from_numpy(v)
-                step_length_m[idx] = torch.from_numpy(sl)
-                turn_angle_rad[idx] = torch.from_numpy(ta)
-                point_id_start[idx] = int(pid)
-                timestamp_ns[idx] = int(tsn)
+                shared["candidate_lon"][idx] = torch.from_numpy(lons)
+                shared["candidate_lat"][idx] = torch.from_numpy(lats)
+                shared["step_length_m"][idx] = torch.from_numpy(sl)
+                shared["turn_angle_rad"][idx] = torch.from_numpy(ta)
+                shared["point_id_start"][idx] = int(pid)
+                shared["timestamp_ns"][idx] = int(tsn)
+
+    return env, valid, shared
+
+
+def _shared_meta(shared: dict[str, torch.Tensor], *, points_per_step: int) -> dict[str, dict[str, Any]]:
+    n_steps = int(shared["point_id_start"].shape[0])
+    return {"shared.pt": {"shape": [n_steps, int(points_per_step)], "dtype": "mixed"}}
+
+
+def _band_meta(*, band_id: str, channel, n_steps: int, points_per_step: int) -> dict[str, Any]:
+    return {
+        "path": f"bands/{band_id}.pt",
+        "shape": [int(n_steps), int(points_per_step)],
+        "dtype": "float32/bool",
+        "layer": str(channel.layer),
+        "categorical": bool(channel.categorical),
+        "normalize": bool(channel.normalize),
+    }
+
+
+def extract_split_feature_store(
+    *,
+    study_id: str,
+    study_dir: Path,
+    split: str,
+    df_split: pd.DataFrame,
+    plan: LayerPlan,
+    sampler: dict[str, Any],
+    sampler_state: dict[str, Any],
+    sampler_hash: str,
+    num_candidates: int,
+    bounds_buffer_deg: float,
+    n_workers: int,
+    skip_existing: bool,
+) -> dict[str, Any]:
+    """Extract one split into a point feature store on disk."""
+    out_dir = point_store_dir(
+        study_dir=Path(study_dir),
+        split=str(split),
+        rasters_hash=str(plan.rasters_hash),
+        sampler_hash=str(sampler_hash),
+    )
+    manifest_path = out_dir / "manifest.json"
+    shared_path = out_dir / "shared.pt"
+
+    existing_manifest: PointFeatureManifest | None = None
+    if manifest_path.exists():
+        existing_manifest = read_manifest(manifest_path)
+        if existing_manifest.rasters_hash != str(plan.rasters_hash):
+            raise ValueError("Existing manifest rasters_hash does not match requested plan")
+        if existing_manifest.sampler_hash != str(sampler_hash):
+            raise ValueError("Existing manifest sampler_hash does not match requested sampler_hash")
+
+    existing_band_ids = set(existing_manifest.bands.keys()) if existing_manifest is not None else set()
+    requested_band_ids = plan.band_ids_in_order()
+    missing_band_ids = [band_id for band_id in requested_band_ids if band_id not in existing_band_ids]
+
+    if skip_existing and existing_manifest is not None and not missing_band_ids and shared_path.exists():
+        return {"split": split, "status": "existing", "out_dir": str(out_dir), "n_steps": int(existing_manifest.shared["shared.pt"]["shape"][0])}
+
+    steps = select_step_starts(
+        df_split,
+        step_multiplier=float(sampler["step_multiplier"]),
+        step_q=float(sampler["step_q"]),
+        max_step_q=float(sampler["max_step_q"]),
+        gap_q=float(sampler["gap_q"]),
+    )
+    reqs = _build_step_requests(steps)
+    n_steps = int(len(reqs))
+    points_per_step = int(num_candidates) + 1
+
+    if existing_manifest is None:
+        write_band_ids = requested_band_ids
+        write_plan = plan
+        missing_band_ids = requested_band_ids
+    else:
+        write_band_ids = missing_band_ids
+        write_plan = _subset_plan_for_band_ids(plan, write_band_ids) if write_band_ids else plan
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "env": env,
-            "valid": valid,
-            "step_length_m": step_length_m,
-            "turn_angle_rad": turn_angle_rad,
-            "point_id_start": point_id_start,
-            "timestamp_ns": timestamp_ns,
-        },
-        out_pt,
-    )
 
-    extraction = {
-        "points_per_step": int(P),
-        "bounds_buffer_deg": float(bounds_buffer_deg),
-        "choice_policy": "last_is_true",
-        "target_crs": TARGET_CRS,
-    }
-    tensors = {
-        "env": {"shape": list(env.shape), "dtype": str(env.dtype)},
-        "valid": {"shape": list(valid.shape), "dtype": str(valid.dtype)},
-        "step_length_m": {"shape": list(step_length_m.shape), "dtype": str(step_length_m.dtype)},
-        "turn_angle_rad": {"shape": list(turn_angle_rad.shape), "dtype": str(turn_angle_rad.dtype)},
-        "point_id_start": {"shape": list(point_id_start.shape), "dtype": str(point_id_start.dtype)},
-        "timestamp_ns": {"shape": list(timestamp_ns.shape), "dtype": str(timestamp_ns.dtype)},
-    }
+    shared_data: dict[str, torch.Tensor]
+    if existing_manifest is None:
+        env, valid, shared_data = _extract_env_block(
+            study_id=study_id,
+            study_dir=study_dir,
+            plan=write_plan,
+            reqs=reqs,
+            sampler_state=sampler_state,
+            bounds_buffer_deg=bounds_buffer_deg,
+            n_workers=n_workers,
+        )
+        _torch_atomic_save(shared_data, shared_path)
+    else:
+        shared_data = torch.load(shared_path, map_location="cpu")
+        shape = list(existing_manifest.shared["shared.pt"]["shape"])
+        if shape != [n_steps, points_per_step]:
+            raise ValueError(f"Existing shared.pt shape {shape} does not match requested [{n_steps}, {points_per_step}]")
+        if write_band_ids:
+            env, valid, _unused_shared = _extract_env_block(
+                study_id=study_id,
+                study_dir=study_dir,
+                plan=write_plan,
+                reqs=reqs,
+                sampler_state=sampler_state,
+                bounds_buffer_deg=bounds_buffer_deg,
+                n_workers=n_workers,
+            )
+
+    bands_meta = {} if existing_manifest is None else {k: dict(v) for k, v in existing_manifest.bands.items()}
+    if write_band_ids:
+        n_write_channels = int(write_plan.num_channels())
+        for i, channel in enumerate(write_plan.channels):
+            band_id = channel.band_id
+            band_path = out_dir / "bands" / f"{band_id}.pt"
+            if band_path.exists() and band_id not in existing_band_ids:
+                raise ValueError(f"Band file already exists but is not tracked in manifest: {band_path}")
+            _torch_atomic_save({"env": env[:, i, :], "valid": valid[:, i, :]}, band_path)
+            bands_meta[band_id] = _band_meta(
+                band_id=band_id,
+                channel=channel,
+                n_steps=n_steps,
+                points_per_step=points_per_step,
+            )
+        assert n_write_channels == len(write_band_ids)
 
     manifest = PointFeatureManifest(
-        schema_version="1",
+        schema_version="2",
         study_id=str(study_id),
         split=str(split),
         created_at=utc_now_iso(),
-        config_path=str(config_path) if config_path is not None else None,
-        config_hash=str(plan.config_hash),
+        rasters_hash=str(plan.rasters_hash),
         sampler_hash=str(sampler_hash),
-        layer_plan=plan,
-        sampler=sampler,
-        extraction=extraction,
-        tensors=tensors,
+        sampler=dict(sampler),
+        extraction={
+            "points_per_step": int(points_per_step),
+            "bounds_buffer_deg": float(bounds_buffer_deg),
+            "choice_policy": "last_is_true",
+            "target_crs": TARGET_CRS,
+        },
+        shared=_shared_meta(shared_data, points_per_step=points_per_step),
+        bands=bands_meta,
     )
-    write_manifest(out_manifest, manifest)
-
-    return {"split": split, "status": "written", "out_dir": str(out_dir), "n_steps": n_steps}
+    write_manifest(manifest_path, manifest)
+    return {
+        "split": split,
+        "status": "written" if write_band_ids or existing_manifest is None else "existing",
+        "out_dir": str(out_dir),
+        "n_steps": n_steps,
+        "n_bands_written": int(len(write_band_ids)),
+    }
 
 
 def extract_point_feature_stores(
@@ -804,7 +931,6 @@ def extract_point_feature_stores(
     study_dir: Path,
     trajectories_path: Path,
     plan: LayerPlan,
-    config_path: str | None,
     splits: list[str] | None,
     parametric: bool,
     num_candidates: int,
@@ -813,6 +939,7 @@ def extract_point_feature_stores(
     skip_existing: bool,
     step_multiplier: float,
     step_q: float,
+    max_step_q: float,
     gap_q: float,
     bounds_buffer_deg: float,
 ) -> dict[str, Any]:
@@ -825,7 +952,13 @@ def extract_point_feature_stores(
     train_df = df[df[SET_COL] == "train"].copy()
     if len(train_df) == 0:
         raise ValueError("No training data found (set=='train'); cannot fit sampler")
-    train_df = compute_movement_features(train_df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
+    train_df = compute_movement_features(
+        train_df,
+        step_multiplier=step_multiplier,
+        step_q=step_q,
+        max_step_q=max_step_q,
+        gap_q=gap_q,
+    )
 
     sampler, sampler_state, sampler_hash = build_train_sampler(
         train_df,
@@ -834,7 +967,9 @@ def extract_point_feature_stores(
         random_seed=random_seed,
         step_multiplier=step_multiplier,
         step_q=step_q,
+        max_step_q=max_step_q,
         gap_q=gap_q,
+        bounds_buffer_deg=bounds_buffer_deg,
     )
 
     results: dict[str, Any] = {}
@@ -846,7 +981,6 @@ def extract_point_feature_stores(
             split=split,
             df_split=split_df,
             plan=plan,
-            config_path=config_path,
             sampler=sampler,
             sampler_state=sampler_state,
             sampler_hash=sampler_hash,
@@ -856,4 +990,4 @@ def extract_point_feature_stores(
             skip_existing=skip_existing,
         )
 
-    return {"study_id": str(study_id), "config_hash": plan.config_hash, "sampler_hash": sampler_hash, "splits": results}
+    return {"study_id": str(study_id), "rasters_hash": plan.rasters_hash, "sampler_hash": sampler_hash, "splits": results}

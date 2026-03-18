@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from movebench.layers.config import LayersConfig, config_hash, rasters_hash
+from movebench.layers.config import LayersConfig, rasters_hash
 from movebench.layers.plan import Channel, LayerPlan
 
 
@@ -440,7 +440,6 @@ class LayerRegistry:
         channels = self._build_channels(cfg.layers)
 
         return LayerPlan(
-            config_hash=config_hash(cfg),
             rasters_hash=rasters_hash(cfg),
             layers_in_order=list(cfg.layers),
             channels=channels,

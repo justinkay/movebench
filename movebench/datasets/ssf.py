@@ -4,7 +4,7 @@ These datasets are intentionally thin wrappers over the on-disk point feature
 stores written by `Study.extract_point_features(...)`.
 
 They do not perform raster IO or candidate generation. They:
-- load `features.pt` and `manifest.json`,
+- load band files, `shared.pt`, and `manifest.json`,
 - optionally apply cached env normalization,
 - (iSSF only) append movement/time/id features and interaction terms.
 """
@@ -20,7 +20,12 @@ import torch
 from torch.utils.data import Dataset
 
 from movebench.features.normalization import load_points_normalization_mean_std
-from movebench.features.points import select_point_store_dir
+from movebench.features.points import (
+    load_point_store_bands,
+    load_point_store_manifest,
+    load_point_store_shared,
+    resolve_sampler_hash,
+)
 from movebench.layers.plan import Channel, LayerPlan
 from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
@@ -102,7 +107,6 @@ def _subset_plan_env_channels(
     derived_dependencies = {k: list(v) for k, v in plan.derived_dependencies.items()}
 
     return indices, LayerPlan(
-        config_hash=str(plan.config_hash),
         rasters_hash=str(plan.rasters_hash),
         layers_in_order=layers_in_order,
         channels=channels,
@@ -127,38 +131,42 @@ class SSFDataset(Dataset):
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ) -> None:
         self.study_dir = Path(study_dir)
         self.split = str(split)
-
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="empirical",
+        requested_band_ids = plan.band_ids_in_order()
+        sampler_hash = resolve_sampler_hash(
+            sampler_type="empirical",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
+        )
+        store_dir, m = load_point_store_manifest(
+            study_dir=self.study_dir,
+            split=self.split,
+            rasters_hash=str(plan.rasters_hash),
+            sampler_hash=str(sampler_hash),
         )
 
         self.store_dir = store_dir
         self.manifest = m
-        self.plan = m.layer_plan
+        self.plan = plan
         self.sampler_hash = str(m.sampler_hash)
         self.normalize = bool(normalize)
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
-        self.env = d["env"]
-        self.valid = d["valid"]
-        self.step_length_m = d.get("step_length_m")
-        self.turn_angle_rad = d.get("turn_angle_rad")
-        self.point_id_start = d.get("point_id_start")
-        self.timestamp_ns = d.get("timestamp_ns")
+        self.env, self.valid = load_point_store_bands(store_dir=store_dir, manifest=m, band_ids=requested_band_ids)
+        shared = load_point_store_shared(store_dir)
+        self.step_length_m = shared.get("step_length_m")
+        self.turn_angle_rad = shared.get("turn_angle_rad")
+        self.point_id_start = shared.get("point_id_start")
+        self.timestamp_ns = shared.get("timestamp_ns")
 
         if self.env.ndim != 3 or self.valid.ndim != 3:
             raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
@@ -226,6 +234,7 @@ class iSSFDataset(SSFDataset):
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ) -> None:
@@ -234,35 +243,39 @@ class iSSFDataset(SSFDataset):
         self.split = str(split)
         self.trajectories_path = Path(trajectories_path)
 
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+        requested_band_ids = plan.band_ids_in_order()
+        sampler_hash = resolve_sampler_hash(
+            sampler_type="parametric",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
+        )
+        store_dir, m = load_point_store_manifest(
+            study_dir=self.study_dir,
+            split=self.split,
+            rasters_hash=str(plan.rasters_hash),
+            sampler_hash=str(sampler_hash),
         )
 
         self.store_dir = store_dir
         self.manifest = m
-        self.plan = m.layer_plan
+        self.plan = plan
         self.sampler_hash = str(m.sampler_hash)
         self.normalize = bool(normalize)
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
-        self.env = d["env"]
-        self.valid = d["valid"]
-        self.step_length_m = d.get("step_length_m")
-        self.turn_angle_rad = d.get("turn_angle_rad")
-        self.point_id_start = d.get("point_id_start")
-        self.timestamp_ns = d.get("timestamp_ns")
+        self.env, self.valid = load_point_store_bands(store_dir=store_dir, manifest=m, band_ids=requested_band_ids)
+        shared = load_point_store_shared(store_dir)
+        self.step_length_m = shared.get("step_length_m")
+        self.turn_angle_rad = shared.get("turn_angle_rad")
+        self.point_id_start = shared.get("point_id_start")
+        self.timestamp_ns = shared.get("timestamp_ns")
 
         if self.step_length_m is None or self.turn_angle_rad is None or self.point_id_start is None or self.timestamp_ns is None:
-            raise ValueError("features.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
+            raise ValueError("shared.pt missing required iSSF keys: step_length_m, turn_angle_rad, point_id_start, timestamp_ns")
 
         if self.env.ndim != 3 or self.valid.ndim != 3:
             raise ValueError(f"Expected env/valid rank-3 [N,C,P]; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
@@ -302,10 +315,10 @@ class iSSFDataset(SSFDataset):
                     / "features"
                     / "points"
                     / "train"
-                    / str(self.plan.config_hash)
+                    / str(self.plan.rasters_hash)
                     / str(self.sampler_hash)
                 )
-                train_pt = train_dir / "features.pt"
+                train_pt = train_dir / "shared.pt"
                 if not train_pt.exists():
                     raise FileNotFoundError(
                         "Train point feature store not found to compute movement_stats. "

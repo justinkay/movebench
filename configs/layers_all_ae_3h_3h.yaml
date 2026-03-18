@@ -2,6 +2,7 @@ raster_params:
   buffer:
     step_multiplier: 2.0
     step_q: 0.95
+    max_step_q: 0.99
     gap_q: 0.999
     min_step_time: 3h
     max_step_time: 3h

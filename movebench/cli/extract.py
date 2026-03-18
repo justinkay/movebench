@@ -74,6 +74,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Quantile for time gap cutoff used when fitting the sampler (default: 0.999).",
     )
     parser.add_argument(
+        "--max-step-q",
+        type=float,
+        default=0.99,
+        help="Upper quantile cap for valid step lengths used during extraction (default: 0.99).",
+    )
+    parser.add_argument(
         "--bounds-buffer-deg",
         type=float,
         default=0.01,
@@ -121,6 +127,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"Parametric: {bool(args.parametric)}")
     print(f"Candidates: {args.num_candidates}")
     print(f"Seed: {args.random_seed}")
+    print(f"Max step q: {args.max_step_q}")
     print()
 
     any_failed = False
@@ -142,6 +149,7 @@ def run(args: argparse.Namespace) -> int:
                 skip_existing=not bool(args.no_skip_existing),
                 step_multiplier=float(args.step_multiplier),
                 step_q=float(args.step_q),
+                max_step_q=float(args.max_step_q),
                 gap_q=float(args.gap_q),
                 bounds_buffer_deg=float(args.bounds_buffer_deg),
             )

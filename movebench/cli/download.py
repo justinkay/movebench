@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+from pathlib import Path
 from typing import Any
+
+from movebench.layers import REGISTRY
+from movebench.layers.config import load_layers_config
+from movebench.study import Study
 
 
 def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
@@ -24,18 +30,115 @@ def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
 
 
 def _format_study_download_summary(name: str, result: dict[str, Any] | None) -> str:
+    failed = 0
     if not isinstance(result, dict):
         chip_present = 0
         tile_present = 0
     else:
         chip_stats = result.get("chips")
+        failed += int(chip_stats.get("failed", 0)) if isinstance(chip_stats, dict) else 0
         chip_present = (
             int(chip_stats.get("downloaded", 0)) + int(chip_stats.get("existing", 0))
             if isinstance(chip_stats, dict)
             else 0
         )
-        tile_present = _count_present_tiles(result.get("tiles"))
-    return f"OK {name}: {chip_present} chips, {tile_present} tiles present"
+        tile_stats = result.get("tiles")
+        tile_present = _count_present_tiles(tile_stats)
+        if isinstance(tile_stats, dict):
+            for layer_stats in tile_stats.values():
+                if not isinstance(layer_stats, dict):
+                    continue
+                years = layer_stats.get("years")
+                if isinstance(years, dict):
+                    for year_stats in years.values():
+                        if isinstance(year_stats, dict):
+                            failed += int(year_stats.get("failed", 0))
+                else:
+                    failed += int(layer_stats.get("failed", 0))
+    status = "WARN" if failed > 0 else "OK"
+    msg = f"{status} {name}: {chip_present} chips, {tile_present} tiles present"
+    if failed > 0:
+        msg += f", {failed} failures"
+    return msg
+
+
+def _study_failure_details(result: dict[str, Any] | None) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+
+    details: list[str] = []
+
+    chip_stats = result.get("chips")
+    if isinstance(chip_stats, dict):
+        chip_failures = chip_stats.get("failures")
+        if isinstance(chip_failures, list) and chip_failures:
+            seen: set[tuple[str, str]] = set()
+            for item in chip_failures:
+                if not isinstance(item, dict):
+                    continue
+                group = str(item.get("group", "unknown"))
+                error = str(item.get("error", "unknown"))
+                key = (group, error)
+                if key in seen:
+                    continue
+                seen.add(key)
+                details.append(f"chip {group}: {error}")
+
+    tile_stats = result.get("tiles")
+    if not isinstance(tile_stats, dict):
+        return details
+
+    def _append_tile_details(label: str, stats: dict[str, Any]) -> None:
+        if int(stats.get("failed", 0)) <= 0:
+            return
+        index_path = stats.get("index_path")
+        if not index_path:
+            details.append(f"{label}: {int(stats.get('failed', 0))} tile failures")
+            return
+
+        try:
+            with open(Path(index_path), "r") as f:
+                payload = json.load(f)
+        except Exception as e:
+            details.append(f"{label}: {int(stats.get('failed', 0))} tile failures ({e})")
+            return
+
+        reasons: list[str] = []
+        seen_reasons: set[str] = set()
+        for item in payload.get("errors", []):
+            if not isinstance(item, dict):
+                continue
+            error = str(item.get("error", "unknown"))
+            if error in seen_reasons:
+                continue
+            seen_reasons.add(error)
+            reasons.append(error)
+        for item in payload.get("tiles", []):
+            if not isinstance(item, dict) or "error" not in item:
+                continue
+            error = str(item["error"])
+            if error in seen_reasons:
+                continue
+            seen_reasons.add(error)
+            reasons.append(error)
+
+        if reasons:
+            details.append(f"{label}: " + " | ".join(reasons[:2]))
+        else:
+            details.append(f"{label}: {int(stats.get('failed', 0))} tile failures")
+
+    for layer_name, layer_stats in sorted(tile_stats.items(), key=lambda kv: str(kv[0])):
+        if not isinstance(layer_stats, dict):
+            continue
+        years = layer_stats.get("years")
+        if isinstance(years, dict):
+            for year, year_stats in sorted(years.items(), key=lambda kv: int(kv[0])):
+                if isinstance(year_stats, dict):
+                    _append_tile_details(f"{layer_name}[{int(year)}]", year_stats)
+            continue
+        _append_tile_details(str(layer_name), layer_stats)
+
+    return details
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -91,19 +194,13 @@ def run(args: argparse.Namespace) -> int:
     if args.paths_config:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
-    try:
-        from movebench.study import Study
-    except ModuleNotFoundError as e:
-        print(f"Import failed: {e}")
-        print("Make sure movebench dependencies are installed in your environment.")
-        return 1
-
     all_names = Study.list_available()
     names = args.studies if args.studies else all_names
 
     print(f"Studies to download: {len(names)}")
     if args.config:
         print(f"Config: {args.config}")
+        print(f"Rasters hash: {REGISTRY.resolve(load_layers_config(args.config)).rasters_hash}")
     if args.splits:
         print(f"Splits: {args.splits}")
     print(f"Workers: {args.n_workers}")
@@ -124,6 +221,8 @@ def run(args: argparse.Namespace) -> int:
                 skip_existing=not args.no_skip_existing,
             )
             print(f"[{i}/{len(names)}] {_format_study_download_summary(name, result)}")
+            for detail in _study_failure_details(result):
+                print(f"  {detail}")
         except Exception as e:
             print(f"  ERROR: {e}")
 

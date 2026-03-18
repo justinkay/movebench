@@ -45,6 +45,21 @@ def haversine_distance_m(
 
 _haversine_distance_m = haversine_distance_m
 
+
+def compute_step_length_extent_m(
+    step_lengths_m,
+    *,
+    step_q: float,
+    step_multiplier: float,
+    max_step_q: float = 0.99,
+) -> float:
+    """Compute the extent cutoff from step lengths."""
+    valid = np.asarray(step_lengths_m, dtype=np.float64)
+    base_extent_m = float(step_multiplier) * float(np.nanquantile(valid, q=float(step_q)))
+    max_extent_m = float(np.nanquantile(valid, q=float(max_step_q)))
+    return min(base_extent_m, max_extent_m)
+
+
 def load_trajectories_csv(path: str) -> pd.DataFrame:
     """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
     df = pd.read_csv(path)
@@ -190,6 +205,7 @@ def compute_movement_features(
     *,
     step_multiplier: float = 2.0,
     step_q: float = 0.95,
+    max_step_q: float = 0.99,
     gap_q: float = 0.999,
 ) -> pd.DataFrame:
     """Compute movement metrics + step-start flags for stepwise algorithms.
@@ -234,7 +250,12 @@ def compute_movement_features(
     df["valid_step"] = df["within_time"] & df["step_length_m"].notna() & (df["step_length_m"] > 0)
 
     # ---- step-length cutoff ----
-    max_step_len = float(step_multiplier) * float(np.nanquantile(df.loc[df["valid_step"], "step_length_m"], q=step_q))
+    max_step_len = compute_step_length_extent_m(
+        df.loc[df["valid_step"], "step_length_m"],
+        step_q=step_q,
+        max_step_q=max_step_q,
+        step_multiplier=step_multiplier,
+    )
     df["max_step_len"] = max_step_len
     df["valid_step"] &= df["step_length_m"] <= max_step_len
 
@@ -284,6 +305,7 @@ def select_step_starts(
     *,
     step_multiplier: float = 2.0,
     step_q: float = 0.95,
+    max_step_q: float = 0.99,
     gap_q: float = 0.999,
 ) -> pd.DataFrame:
     """Select valid step starts and attach observed endpoints.
@@ -302,7 +324,13 @@ def select_step_starts(
     if missing:
         raise ValueError(f"trajectories df missing required columns: {missing}")
 
-    d = compute_movement_features(df, step_multiplier=step_multiplier, step_q=step_q, gap_q=gap_q)
+    d = compute_movement_features(
+        df,
+        step_multiplier=step_multiplier,
+        step_q=step_q,
+        max_step_q=max_step_q,
+        gap_q=gap_q,
+    )
     starts = d[d["can_be_step_start"]].copy()
     if len(starts) == 0:
         return pd.DataFrame(

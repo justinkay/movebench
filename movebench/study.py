@@ -86,6 +86,7 @@ class Study:
         if len(train_df) == 0:
             raise ValueError("No training data found (set=='train'); cannot compute buffer")
         buf = cfg.raster_params["buffer"]
+        max_step_q = float(buf.get("max_step_q", 0.99))
         min_step_time_s = buf.get("min_step_time_s")
         max_step_time_s = buf.get("max_step_time_s")
 
@@ -94,6 +95,7 @@ class Study:
             step_time_s=min_step_time_s,
             step_multiplier=float(buf["step_multiplier"]),
             step_q=float(buf["step_q"]),
+            max_step_q=max_step_q,
             gap_q=float(buf["gap_q"]),
         )
         if max_step_time_s == min_step_time_s:
@@ -104,6 +106,7 @@ class Study:
                 step_time_s=max_step_time_s,
                 step_multiplier=float(buf["step_multiplier"]),
                 step_q=float(buf["step_q"]),
+                max_step_q=max_step_q,
                 gap_q=float(buf["gap_q"]),
             )
 
@@ -145,7 +148,6 @@ class Study:
         )
 
         return {
-            "config_hash": plan.config_hash,
             "rasters_hash": plan.rasters_hash,
             "buffer_km": extent_buffer_km,
             "resolution_buffer_km": resolution_buffer_km,
@@ -166,14 +168,16 @@ class Study:
         skip_existing: bool = True,
         step_multiplier: float = 2.0,
         step_q: float = 0.95,
+        max_step_q: float = 0.99,
         gap_q: float = 0.999,
         bounds_buffer_deg: float = 0.01,
     ) -> dict:
         """Extract SSF / iSSF point feature stores for a layers config.
 
         Writes to:
-          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/features.pt`
-          `study_dir/features/points/<split>/<config_hash>/<sampler_hash>/manifest.json`
+          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/shared.pt`
+          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/bands/*.pt`
+          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/manifest.json`
         """
         plan = self.layer_plan(config)
 
@@ -185,7 +189,6 @@ class Study:
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
             plan=plan,
-            config_path=str(config),
             splits=splits,
             parametric=parametric,
             num_candidates=num_candidates,
@@ -194,6 +197,7 @@ class Study:
             skip_existing=skip_existing,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
@@ -281,6 +285,7 @@ class Study:
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ):
@@ -303,6 +308,7 @@ class Study:
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
@@ -319,6 +325,7 @@ class Study:
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ):
@@ -338,6 +345,7 @@ class Study:
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
@@ -358,6 +366,7 @@ class Study:
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ):
@@ -382,6 +391,7 @@ class Study:
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )

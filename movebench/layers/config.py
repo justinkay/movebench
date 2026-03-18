@@ -15,6 +15,7 @@ DEFAULT_RASTER_PARAMS: dict[str, Any] = {
     "buffer": {
         "step_multiplier": 2.0,
         "step_q": 0.95,
+        "max_step_q": 0.99,
         "gap_q": 0.999,
         "min_step_time_s": None,
         "max_step_time_s": None,
@@ -24,9 +25,11 @@ DEFAULT_RASTER_PARAMS: dict[str, Any] = {
         "max_pixels": 100,
     },
     "tiles": {
-        "px_per_side": 500,
+        "px_per_side": 350,
     },
 }
+
+_MAX_ARTIFACT_KEY_LEN = 96
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,54 @@ class LayersConfig:
     layers: list[str]
     chip_groups: dict[str, dict[str, Any]]
     raster_params: dict[str, Any]
+
+
+def _compact_name(name: str) -> str:
+    parts = re.findall(r"[a-z0-9]+", str(name).lower())
+    if not parts:
+        return "x"
+    return "".join(part[:4] for part in parts)
+
+
+def _format_slug_number(value: int | float) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    value = float(value)
+    if value.is_integer():
+        whole = int(value)
+        if -10 < whole < 10:
+            return f"{whole}0"
+        return str(whole)
+    text = f"{value:g}"
+    if "." not in text:
+        return text
+    whole, frac = text.split(".", 1)
+    frac = frac.rstrip("0")
+    if not frac:
+        return whole
+    if whole in {"0", "-0"}:
+        return ("n" if whole.startswith("-") else "") + "0" + frac
+    return f"{whole}p{frac}"
+
+
+def _format_slug_duration(seconds: int) -> str:
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def _truncate_key(base: str, *, payload: bytes, max_len: int = _MAX_ARTIFACT_KEY_LEN) -> str:
+    if len(base) <= max_len:
+        return base
+    suffix = hashlib.sha256(payload).hexdigest()[:8]
+    keep = max_len - len("-k") - len(suffix)
+    return f"{base[:keep].rstrip('-')}-k{suffix}"
 
 def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
     return {
@@ -44,17 +95,12 @@ def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
         for name, g in sorted(cfg.chip_groups.items(), key=lambda kv: kv[0])
     }
 
-def _canonical_dict(cfg: LayersConfig) -> dict[str, Any]:
-    return {
-        "layers": list(cfg.layers),
-        "chip_groups": _canonical_chip_groups(cfg),
-    }
-
 def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
     rp = cfg.raster_params
     buffer = {
         "step_multiplier": float(rp["buffer"]["step_multiplier"]),
         "step_q": float(rp["buffer"]["step_q"]),
+        "max_step_q": float(rp["buffer"].get("max_step_q", DEFAULT_RASTER_PARAMS["buffer"]["max_step_q"])),
         "gap_q": float(rp["buffer"]["gap_q"]),
     }
     if rp["buffer"].get("min_step_time_s") is not None:
@@ -76,21 +122,34 @@ def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
         },
     }
 
-
-def config_hash(cfg: LayersConfig) -> str:
-    """Stable hash for a layers config."""
-    payload = json.dumps(_canonical_dict(cfg), sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
-
 def rasters_hash(cfg: LayersConfig) -> str:
-    """Stable hash for the on-disk rasters cache.
+    """Readable, bounded key for the on-disk rasters cache.
 
     This is intentionally computed from only the config fields that affect
     transferability of downloaded rasters across layer configs (e.g. between a
     superset config and a strict subset config).
     """
-    payload = json.dumps(_canonical_raster_params(cfg), sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
+    raster_params = _canonical_raster_params(cfg)
+    payload = json.dumps(raster_params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    buffer = raster_params["buffer"]
+    parts = [
+        f"sm{_format_slug_number(buffer['step_multiplier'])}",
+        f"sq{_format_slug_number(buffer['step_q'])}",
+        f"msq{_format_slug_number(buffer['max_step_q'])}",
+        f"gq{_format_slug_number(buffer['gap_q'])}",
+    ]
+    if buffer.get("min_step_time_s") is not None:
+        parts.append(f"mns{_format_slug_duration(int(buffer['min_step_time_s']))}")
+    if buffer.get("max_step_time_s") is not None:
+        parts.append(f"mxs{_format_slug_duration(int(buffer['max_step_time_s']))}")
+    parts.extend(
+        [
+            f"mnp{int(raster_params['scale_clamp']['min_pixels'])}",
+            f"mxp{int(raster_params['scale_clamp']['max_pixels'])}",
+            f"pps{int(raster_params['tiles']['px_per_side'])}",
+        ]
+    )
+    return _truncate_key("-".join(parts), payload=payload)
 
 
 _DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$")
@@ -141,6 +200,7 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     buf = {**DEFAULT_RASTER_PARAMS["buffer"], **buf_raw}
     step_multiplier = float(buf["step_multiplier"])
     step_q = float(buf["step_q"])
+    max_step_q = float(buf["max_step_q"])
     gap_q = float(buf["gap_q"])
     min_step_time_s = _parse_duration_seconds(
         buf_raw.get("min_step_time"),
@@ -156,6 +216,8 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
         raise ValueError(f"raster_params.buffer.step_multiplier must be > 0, got {step_multiplier}")
     if not (0.0 <= step_q <= 1.0):
         raise ValueError(f"raster_params.buffer.step_q must be in [0,1], got {step_q}")
+    if not (0.0 <= max_step_q <= 1.0):
+        raise ValueError(f"raster_params.buffer.max_step_q must be in [0,1], got {max_step_q}")
     if not (0.0 <= gap_q <= 1.0):
         raise ValueError(f"raster_params.buffer.gap_q must be in [0,1], got {gap_q}")
 
@@ -178,6 +240,7 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
         "buffer": {
             "step_multiplier": step_multiplier,
             "step_q": step_q,
+            "max_step_q": max_step_q,
             "gap_q": gap_q,
             "min_step_time_s": min_step_time_s,
             "max_step_time_s": max_step_time_s,

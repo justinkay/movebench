@@ -53,6 +53,7 @@ from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
+    compute_step_length_extent_m,
     haversine_distance_m,
     prepare_interval_step_starts,
 )
@@ -1281,6 +1282,7 @@ def get_buffer_m_for_study(
     *,
     step_time_s: int | None = None,
     step_q: float = 0.95,
+    max_step_q: float = 0.99,
     step_multiplier: float = 2.0,
     gap_q: float = 0.999,
 ) -> float:
@@ -1293,7 +1295,12 @@ def get_buffer_m_for_study(
         valid = d.loc[d["valid_step_start"], "step_length_m"].to_numpy(dtype=np.float64, copy=False)
         if len(valid) == 0:
             raise ValueError("No valid interval step lengths computed")
-        return float(step_multiplier) * float(np.nanquantile(valid, q=step_q))
+        return compute_step_length_extent_m(
+            valid,
+            step_q=step_q,
+            max_step_q=max_step_q,
+            step_multiplier=step_multiplier,
+        )
 
     d = df.copy()
     d[TIME_COL] = pd.to_datetime(d[TIME_COL], errors="coerce")
@@ -1319,7 +1326,12 @@ def get_buffer_m_for_study(
     if len(valid) == 0:
         raise ValueError("No valid step lengths computed")
 
-    return float(step_multiplier) * float(np.nanquantile(valid, q=step_q))
+    return compute_step_length_extent_m(
+        valid,
+        step_q=step_q,
+        max_step_q=max_step_q,
+        step_multiplier=step_multiplier,
+    )
 
 
 def download_tile_layer(

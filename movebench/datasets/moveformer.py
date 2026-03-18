@@ -20,7 +20,12 @@ from torch.utils.data import Dataset
 
 from movebench.datasets.ssf import _subset_plan_env_channels
 from movebench.features.normalization import load_points_normalization_mean_std
-from movebench.features.points import select_point_store_dir
+from movebench.features.points import (
+    load_point_store_bands,
+    load_point_store_manifest,
+    load_point_store_shared,
+    resolve_sampler_hash,
+)
 from movebench.layers.constants import WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
@@ -69,12 +74,14 @@ def _select_step_starts_with_targets(
     *,
     step_multiplier: float,
     step_q: float,
+    max_step_q: float,
     gap_q: float,
 ) -> _StepStarts:
     d = compute_movement_features(
         df_split,
         step_multiplier=float(step_multiplier),
         step_q=float(step_q),
+        max_step_q=float(max_step_q),
         gap_q=float(gap_q),
     )
     starts = d[d["can_be_step_start"]].copy()
@@ -158,6 +165,7 @@ class MoveFormerPointStoreDataset(Dataset):
         random_seed: int | None = None,
         step_multiplier: float | None = None,
         step_q: float | None = None,
+        max_step_q: float | None = None,
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ) -> None:
@@ -170,29 +178,33 @@ class MoveFormerPointStoreDataset(Dataset):
         self.normalize_env = bool(normalize_env)
         self.require_normalization_stats = bool(require_normalization_stats)
 
-        store_dir, m = select_point_store_dir(
-            study_dir=self.study_dir,
-            split=self.split,
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
+        requested_band_ids = plan.band_ids_in_order()
+        sampler_hash = resolve_sampler_hash(
+            sampler_type="parametric",
             num_candidates=num_candidates,
             random_seed=random_seed,
             step_multiplier=step_multiplier,
             step_q=step_q,
+            max_step_q=max_step_q,
             gap_q=gap_q,
             bounds_buffer_deg=bounds_buffer_deg,
         )
+        store_dir, m = load_point_store_manifest(
+            study_dir=self.study_dir,
+            split=self.split,
+            rasters_hash=str(plan.rasters_hash),
+            sampler_hash=str(sampler_hash),
+        )
         self.store_dir = store_dir
         self.manifest = m
-        self.plan = m.layer_plan
+        self.plan = plan
 
-        d = torch.load(store_dir / "features.pt", map_location="cpu")
-        self.env: torch.Tensor = d["env"]
-        self.valid: torch.Tensor = d["valid"]
-        self.step_length_m: torch.Tensor = d["step_length_m"]
-        self.turn_angle_rad: torch.Tensor = d["turn_angle_rad"]
-        self.point_id_start: torch.Tensor = d["point_id_start"]
-        self.timestamp_ns: torch.Tensor = d["timestamp_ns"]
+        self.env, self.valid = load_point_store_bands(store_dir=store_dir, manifest=m, band_ids=requested_band_ids)
+        shared = load_point_store_shared(store_dir)
+        self.step_length_m = shared["step_length_m"]
+        self.turn_angle_rad = shared["turn_angle_rad"]
+        self.point_id_start = shared["point_id_start"]
+        self.timestamp_ns = shared["timestamp_ns"]
 
         if self.env.ndim != 3:
             raise ValueError(f"Expected env shape (N,C,P); got {tuple(self.env.shape)}")
@@ -231,10 +243,10 @@ class MoveFormerPointStoreDataset(Dataset):
                 / "features"
                 / "points"
                 / "train"
-                / str(self.plan.config_hash)
+                / str(self.plan.rasters_hash)
                 / str(self.manifest.sampler_hash)
             )
-            train_pt = train_dir / "features.pt"
+            train_pt = train_dir / "shared.pt"
             if not train_pt.exists():
                 raise FileNotFoundError(
                     "Train point feature store not found to compute mov_vec_scale. "
@@ -282,6 +294,7 @@ class MoveFormerPointStoreDataset(Dataset):
             df_split,
             step_multiplier=float(sampler["step_multiplier"]),
             step_q=float(sampler["step_q"]),
+            max_step_q=float(sampler["max_step_q"]),
             gap_q=float(sampler["gap_q"]),
         )
 

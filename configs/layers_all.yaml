@@ -2,12 +2,13 @@ raster_params:
   buffer:
     step_multiplier: 2.0
     step_q: 0.95
+    max_step_q: 0.99
     gap_q: 0.999
   scale_clamp:
     min_pixels: 3
     max_pixels: 100
   tiles:
-    px_per_side: 500
+    px_per_side: 350
 
 layers:
   - era5_land
