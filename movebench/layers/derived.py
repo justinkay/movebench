@@ -136,17 +136,17 @@ def compute_landsat_lst(*, landsat: Raster) -> np.ndarray:
     return thermal[np.newaxis]
 
 
-def compute_orographic_uplift(*, slope: Raster, aspect: Raster, era5_land: Raster) -> np.ndarray:
+def compute_orographic_uplift_hourly(*, slope: Raster, aspect: Raster, era5_land_hourly: Raster) -> np.ndarray:
     slope_rad = np.radians(slope.array[0])
 
     sin_asp = aspect.array[0]
     cos_asp = aspect.array[1]
     aspect_rad = np.arctan2(sin_asp, cos_asp)
 
-    u_i = _band_index(era5_land, "era5_land.u_component_of_wind_10m")
-    v_i = _band_index(era5_land, "era5_land.v_component_of_wind_10m")
-    u10 = era5_land.array[u_i].astype(np.float64)
-    v10 = era5_land.array[v_i].astype(np.float64)
+    u_i = _band_index(era5_land_hourly, "era5_land_hourly.u_component_of_wind_10m")
+    v_i = _band_index(era5_land_hourly, "era5_land_hourly.v_component_of_wind_10m")
+    u10 = era5_land_hourly.array[u_i].astype(np.float64)
+    v10 = era5_land_hourly.array[v_i].astype(np.float64)
     u10 = np.where(np.isfinite(u10), u10, np.nan)
     v10 = np.where(np.isfinite(v10), v10, np.nan)
 
@@ -162,14 +162,14 @@ def compute_orographic_uplift(*, slope: Raster, aspect: Raster, era5_land: Raste
     return wo[np.newaxis]
 
 
-def compute_thermal_uplift(*, era5_land: Raster, era5: Raster) -> np.ndarray:
-    t_i = _band_index(era5_land, "era5_land.temperature_2m")
-    shf_i = _band_index(era5_land, "era5_land.surface_sensible_heat_flux")
-    blh_i = _band_index(era5, "era5.boundary_layer_height")
+def compute_thermal_uplift_hourly(*, era5_land_hourly: Raster, era5_hourly: Raster) -> np.ndarray:
+    t_i = _band_index(era5_land_hourly, "era5_land_hourly.temperature_2m")
+    shf_i = _band_index(era5_land_hourly, "era5_land_hourly.surface_sensible_heat_flux")
+    blh_i = _band_index(era5_hourly, "era5_hourly.boundary_layer_height")
 
-    t2m = era5_land.array[t_i].astype(np.float64)
-    shf = era5_land.array[shf_i].astype(np.float64)
-    blh = era5.array[blh_i].astype(np.float64)
+    t2m = era5_land_hourly.array[t_i].astype(np.float64)
+    shf = era5_land_hourly.array[shf_i].astype(np.float64)
+    blh = era5_hourly.array[blh_i].astype(np.float64)
 
     t2m = np.where(np.isfinite(t2m), t2m, np.nan)
     shf = np.where(np.isfinite(shf), shf, np.nan)
@@ -198,5 +198,5 @@ def compute_thermal_uplift(*, era5_land: Raster, era5: Raster) -> np.ndarray:
     else:
         w_star = 0.0
 
-    H, W = era5_land.array.shape[1:]
+    H, W = era5_land_hourly.array.shape[1:]
     return np.full((1, H, W), w_star, dtype=np.float32)

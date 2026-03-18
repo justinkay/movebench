@@ -54,8 +54,8 @@ LAYERS: dict[str, LayerSpec] = {
     # ERA5 - weather reanalysis data
     # Low spatial resolution, high temporal resolution
     # Include hourly and daily layers
-    "era5_land": LayerSpec(
-        name="era5_land",
+    "era5_land_hourly": LayerSpec(
+        name="era5_land_hourly",
         source="gee_chip",
         bands=[
             "temperature_2m",
@@ -76,8 +76,8 @@ LAYERS: dict[str, LayerSpec] = {
         gee_collection="ECMWF/ERA5_LAND/HOURLY",
         temporal="hourly",
     ),
-    "era5": LayerSpec(
-        name="era5",
+    "era5_hourly": LayerSpec(
+        name="era5_hourly",
         source="gee_chip",
         bands=["boundary_layer_height", "total_cloud_cover", "mean_sea_level_pressure"],
         native_scale_m=27830.0,
@@ -330,21 +330,21 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="static",
         derived_from=["dem"],
     ),
-    "orographic_uplift": LayerSpec(
-        name="orographic_uplift",
+    "orographic_uplift_hourly": LayerSpec(
+        name="orographic_uplift_hourly",
         source="derived",
-        bands=["orographic_uplift"],
+        bands=["orographic_uplift_hourly"],
         native_scale_m=30.0,
         temporal="hourly",
-        derived_from=["slope", "aspect", "era5_land"],
+        derived_from=["slope", "aspect", "era5_land_hourly"],
     ),
-    "thermal_uplift": LayerSpec(
-        name="thermal_uplift",
+    "thermal_uplift_hourly": LayerSpec(
+        name="thermal_uplift_hourly",
         source="derived",
-        bands=["thermal_uplift"],
+        bands=["thermal_uplift_hourly"],
         native_scale_m=11132.0,
         temporal="hourly",
-        derived_from=["era5_land", "era5"],
+        derived_from=["era5_land_hourly", "era5_hourly"],
     ),
 
     # Other GEE features

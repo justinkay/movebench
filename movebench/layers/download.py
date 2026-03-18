@@ -420,9 +420,16 @@ def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
 
     img = _nearest_temporal_chip_image(spec=spec, timestamp=timestamp)
 
-    if layer == "era5_land":
-        era5 = _nearest_from_window("ECMWF/ERA5/HOURLY", timestamp, bands=spec.bands, start=-1, end=1, unit="hour")
-        img = img.unmask(era5, sameFootprint=False)
+    if layer == "era5_land_hourly":
+        era5_hourly_fallback = _nearest_from_window(
+            "ECMWF/ERA5/HOURLY",
+            timestamp,
+            bands=spec.bands,
+            start=-1,
+            end=1,
+            unit="hour",
+        )
+        img = img.unmask(era5_hourly_fallback, sameFootprint=False)
 
     if layer == "era5_land_daily":
         src = [

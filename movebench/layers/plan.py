@@ -23,7 +23,7 @@ class Channel:
 
     `band_id` must be stable across configs and ordering changes.
     Examples:
-      - "era5_land.temperature_2m"
+      - "era5_land_hourly.temperature_2m"
       - "dem.elevation"
       - "modis_lc.class_7"
     """

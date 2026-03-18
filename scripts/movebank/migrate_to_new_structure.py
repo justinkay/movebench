@@ -31,7 +31,7 @@ import pandas as pd
 
 # Mapping from old resolution names to new layer group names
 RESOLUTION_TO_LAYER = {
-    "big": "era5",      # ERA5-Land + ERA5
+    "big": "era5",  # ERA5-Land + ERA5
     "medium": "modis",  # MODIS spectral products
     # "small": "landcover",  # Dynamic World (disabled)
 }

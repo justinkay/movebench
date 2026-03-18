@@ -11,8 +11,8 @@ raster_params:
     px_per_side: 350
 
 layers:
-  - era5_land
-  - era5
+  - era5_land_hourly
+  - era5_hourly
   - era5_land_daily
   - modis_lc
   - modis_cvf_tree
@@ -29,8 +29,8 @@ layers:
   - aspect
   - rugosity
   - dist_water
-  - orographic_uplift
-  - thermal_uplift
+  - orographic_uplift_hourly
+  - thermal_uplift_hourly
   - hii
   - bioclim
   - dynamic_world
@@ -39,8 +39,8 @@ layers:
 chip_groups:
   era5:
     layers:
-      - era5_land
-      - era5
+      - era5_land_hourly
+      - era5_hourly
       - era5_land_daily
     target_scale_m: 11132.0
   high_res:
