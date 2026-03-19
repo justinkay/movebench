@@ -257,7 +257,7 @@ def _expanded_bounds_to_rects(
     return out
 
 
-def compute_dynamic_extent_buffers_km(
+def compute_dynamic_extent_buffers_m(
     df,
     *,
     train_df,
@@ -290,7 +290,7 @@ def compute_dynamic_extent_buffers_km(
             f"No valid {time_col!r} values available for dynamic extent estimation"
         )
 
-    out = pd.Series(np.nan, index=df.index, dtype=np.float64, name="extent_buffer_km")
+    out = pd.Series(np.nan, index=df.index, dtype=np.float64, name="extent_buffer_m")
 
     train = train_df.copy()
     train[time_col] = pd.to_datetime(train[time_col], errors="coerce")
@@ -309,7 +309,7 @@ def compute_dynamic_extent_buffers_km(
     )
 
     if len(valid) == 0:
-        out.loc[query_mask] = max_extent_buffer_m / 1000.0
+        out.loc[query_mask] = max_extent_buffer_m
     else:
         step_times = (
             valid[time_col].astype("int64").to_numpy(dtype=np.int64, copy=False)
@@ -345,7 +345,7 @@ def compute_dynamic_extent_buffers_km(
                 max(buffer_m, min_extent_buffer_m), max_extent_buffer_m
             )
 
-        out.loc[query_mask] = unique_buffers_m[inverse] / 1000.0
+        out.loc[query_mask] = unique_buffers_m[inverse]
 
     valid_out = out.dropna()
     if len(valid_out) == 0:
@@ -353,11 +353,11 @@ def compute_dynamic_extent_buffers_km(
 
     summary = {
         "mode": "rolling_window",
-        "min_km": float(valid_out.min()),
-        "median_km": float(valid_out.median()),
-        "max_km": float(valid_out.max()),
-        "lower_bound_km": float(min_extent_buffer_m) / 1000.0,
-        "upper_bound_km": float(max_extent_buffer_m) / 1000.0,
+        "min_m": float(valid_out.min()),
+        "median_m": float(valid_out.median()),
+        "max_m": float(valid_out.max()),
+        "lower_bound_m": float(min_extent_buffer_m),
+        "upper_bound_m": float(max_extent_buffer_m),
         "window_s": int(window_s),
     }
     return out, summary
@@ -366,8 +366,8 @@ def compute_dynamic_extent_buffers_km(
 def estimate_tile_count(
     df,
     *,
-    extent_buffer_km: float | None = None,
-    extent_buffer_km_col: str | None = None,
+    extent_buffer_m: float | None = None,
+    extent_buffer_m_col: str | None = None,
     grid_size_m: float,
     set_col: str,
     lon_col: str,
@@ -396,30 +396,30 @@ def estimate_tile_count(
     bucket_deg_lon = max(float(bucket_deg_lon), 1e-6)
     bucket_deg_lat = max(float(bucket_deg_lat), 1e-6)
 
-    if extent_buffer_km_col is not None:
-        if extent_buffer_km_col not in df.columns:
+    if extent_buffer_m_col is not None:
+        if extent_buffer_m_col not in df.columns:
             raise ValueError(
-                f"trajectories df missing extent buffer column: {extent_buffer_km_col!r}"
+                f"trajectories df missing extent buffer column: {extent_buffer_m_col!r}"
             )
-        extent_values_km = df[extent_buffer_km_col].astype(float)
-        if extent_values_km.isna().any():
+        extent_values_m = df[extent_buffer_m_col].astype(float)
+        if extent_values_m.isna().any():
             raise ValueError(
-                f"trajectories df contains NaN values in {extent_buffer_km_col!r}"
+                f"trajectories df contains NaN values in {extent_buffer_m_col!r}"
             )
-        if (extent_values_km <= 0).any():
+        if (extent_values_m <= 0).any():
             raise ValueError(
-                f"trajectories df contains non-positive values in {extent_buffer_km_col!r}"
+                f"trajectories df contains non-positive values in {extent_buffer_m_col!r}"
             )
-    elif extent_buffer_km is None:
+    elif extent_buffer_m is None:
         raise ValueError(
-            "estimate_tile_count requires extent_buffer_km or extent_buffer_km_col"
+            "estimate_tile_count requires extent_buffer_m or extent_buffer_m_col"
         )
 
     base = pd.DataFrame(
         {"split": df[set_col].astype(str), "lon": lon, "lat": lat, "lat_abs": lat.abs()}
     )
-    if extent_buffer_km_col is not None:
-        base["extent_buffer_km"] = extent_values_km.to_numpy(dtype=float, copy=False)
+    if extent_buffer_m_col is not None:
+        base["extent_buffer_m"] = extent_values_m.to_numpy(dtype=float, copy=False)
 
     grouped = None
     b_lon = float(bucket_deg_lon)
@@ -475,9 +475,9 @@ def estimate_tile_count(
 
     cells: set[tuple[int, int]] = set()
 
-    if extent_buffer_km_col is None:
+    if extent_buffer_m_col is None:
         for _, r in grouped.iterrows():
-            buffer_m = float(extent_buffer_km) * 1000.0
+            buffer_m = float(extent_buffer_m)
 
             buffer_deg_lat = buffer_m / 110540.0
             lon_deg_to_m = 111320.0 * math.cos(math.radians(float(r["max_abs_lat"])))
@@ -508,9 +508,7 @@ def estimate_tile_count(
     for _, group_df in grouped_base.groupby(group_cols, sort=False):
         lon_vals = group_df["lon"].to_numpy(dtype=float, copy=False)
         lat_vals = group_df["lat"].to_numpy(dtype=float, copy=False)
-        buffer_m = (
-            group_df["extent_buffer_km"].to_numpy(dtype=float, copy=False) * 1000.0
-        )
+        buffer_m = group_df["extent_buffer_m"].to_numpy(dtype=float, copy=False)
         buffer_deg_lat = buffer_m / 110540.0
         lon_deg_to_m = 111320.0 * np.cos(np.deg2rad(lat_vals))
         buffer_deg_lon = np.where(
@@ -832,16 +830,14 @@ def main(argv: list[str]) -> int:
             print(f"  SKIP: buffer_failed: {e}")
             continue
 
-        resolution_buffer_km = float(resolution_buffer_m) / 1000.0
-        extent_buffer_km = float(extent_buffer_m) / 1000.0
-        dynamic_extent_col = "_extent_buffer_km_est"
+        dynamic_extent_col = "_extent_buffer_m_est"
         extent_buffer_summary: dict[str, Any] = {
             "mode": "study_wide",
-            "min_km": float(extent_buffer_km),
-            "median_km": float(extent_buffer_km),
-            "max_km": float(extent_buffer_km),
-            "lower_bound_km": float(extent_buffer_km),
-            "upper_bound_km": float(extent_buffer_km),
+            "min_m": float(extent_buffer_m),
+            "median_m": float(extent_buffer_m),
+            "max_m": float(extent_buffer_m),
+            "lower_bound_m": float(extent_buffer_m),
+            "upper_bound_m": float(extent_buffer_m),
         }
 
         if extent_mode == "rolling_window":
@@ -860,8 +856,8 @@ def main(argv: list[str]) -> int:
                 continue
 
             try:
-                extent_buffer_series_km, extent_buffer_summary = (
-                    compute_dynamic_extent_buffers_km(
+                extent_buffer_series_m, extent_buffer_summary = (
+                    compute_dynamic_extent_buffers_m(
                         df,
                         train_df=train_df,
                         min_extent_buffer_m=float(resolution_buffer_m),
@@ -889,7 +885,7 @@ def main(argv: list[str]) -> int:
                 continue
 
             df = df.copy()
-            df[dynamic_extent_col] = extent_buffer_series_km.reindex(df.index).to_numpy(
+            df[dynamic_extent_col] = extent_buffer_series_m.reindex(df.index).to_numpy(
                 dtype=float, copy=False
             )
 
@@ -918,7 +914,7 @@ def main(argv: list[str]) -> int:
             target_scale_m = float(group["target_scale_m"])
             scale = float(
                 compute_group_scale(
-                    float(resolution_buffer_km),
+                    float(resolution_buffer_m),
                     float(target_scale_m),
                     min_pixels=int(min_pixels),
                     max_pixels=int(max_pixels),
@@ -934,11 +930,8 @@ def main(argv: list[str]) -> int:
                 lats = sub[LAT_COL].astype(float).to_numpy()
                 sec_lat = 1.0 / np.maximum(np.cos(np.deg2rad(lats)), 1e-6)
                 if dynamic_extent_col in sub.columns:
-                    buffer_m = (
-                        sub[dynamic_extent_col]
-                        .astype(float)
-                        .to_numpy(dtype=float, copy=False)
-                        * 1000.0
+                    buffer_m = sub[dynamic_extent_col].astype(float).to_numpy(
+                        dtype=float, copy=False
                     )
                     side = (2.0 * buffer_m) / float(scale)
                     pixel_bands_total += float(
@@ -978,7 +971,7 @@ def main(argv: list[str]) -> int:
                 continue
             layer_scale = float(
                 compute_group_scale(
-                    float(resolution_buffer_km),
+                    float(resolution_buffer_m),
                     float(spec.native_scale_m),
                     min_pixels=int(min_pixels),
                     max_pixels=int(max_pixels),
@@ -988,8 +981,8 @@ def main(argv: list[str]) -> int:
             tile_count = int(
                 estimate_tile_count(
                     df,
-                    extent_buffer_km=float(extent_buffer_km),
-                    extent_buffer_km_col=dynamic_extent_col
+                    extent_buffer_m=float(extent_buffer_m),
+                    extent_buffer_m_col=dynamic_extent_col
                     if dynamic_extent_col in df.columns
                     else None,
                     grid_size_m=float(grid_size_m),
@@ -1194,9 +1187,9 @@ def main(argv: list[str]) -> int:
             "extent_window": str(extent_window)
             if extent_mode == "rolling_window"
             else None,
-            "buffer_km": float(extent_buffer_km),
-            "resolution_buffer_km": float(resolution_buffer_km),
-            "extent_buffer_km": float(extent_buffer_km),
+            "buffer_m": float(extent_buffer_m),
+            "resolution_buffer_m": float(resolution_buffer_m),
+            "extent_buffer_m": float(extent_buffer_m),
             "extent_buffer_summary": extent_buffer_summary,
             "est_payload_bytes": int(est_payload_total_i),
             "est_disk_bytes": int(est_disk_total_i),
@@ -1211,16 +1204,16 @@ def main(argv: list[str]) -> int:
         report["studies"].append(study_out)
 
         print(
-            f"  points: {n_points_total}  resolution_buffer_km: {resolution_buffer_km:.3f}"
-            f"  extent_buffer_km: {extent_buffer_km:.3f}"
+            f"  points: {n_points_total}  resolution_buffer_m: {resolution_buffer_m:.1f}"
+            f"  extent_buffer_m: {extent_buffer_m:.1f}"
         )
         if extent_mode == "rolling_window":
             print(
-                "  extent_buffer_summary_km: "
+                "  extent_buffer_summary_m: "
                 f"window={extent_buffer_summary['window']} "
-                f"min={float(extent_buffer_summary['min_km']):.3f} "
-                f"median={float(extent_buffer_summary['median_km']):.3f} "
-                f"max={float(extent_buffer_summary['max_km']):.3f}"
+                f"min={float(extent_buffer_summary['min_m']):.1f} "
+                f"median={float(extent_buffer_summary['median_m']):.1f} "
+                f"max={float(extent_buffer_summary['max_m']):.1f}"
             )
         print(f"  est_payload: {_format_bytes(est_payload_total)}")
         print(f"  est_disk:    {_format_bytes(est_disk_total)}")
@@ -1276,8 +1269,8 @@ def main(argv: list[str]) -> int:
                 fieldnames=[
                     "study_id",
                     "n_points",
-                    "resolution_buffer_km",
-                    "extent_buffer_km",
+                    "resolution_buffer_m",
+                    "extent_buffer_m",
                     "est_payload_bytes",
                     "est_disk_bytes",
                     "actual_bytes",
@@ -1292,8 +1285,8 @@ def main(argv: list[str]) -> int:
                     {
                         "study_id": s.get("study_id"),
                         "n_points": s.get("n_points"),
-                        "resolution_buffer_km": s.get("resolution_buffer_km"),
-                        "extent_buffer_km": s.get("extent_buffer_km"),
+                        "resolution_buffer_m": s.get("resolution_buffer_m"),
+                        "extent_buffer_m": s.get("extent_buffer_m"),
                         "est_payload_bytes": s.get("est_payload_bytes"),
                         "est_disk_bytes": s.get("est_disk_bytes"),
                         "actual_bytes": s.get("actual_bytes"),

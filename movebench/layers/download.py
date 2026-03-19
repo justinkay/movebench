@@ -70,24 +70,22 @@ def ensure_ee_initialized() -> None:
 
 
 def compute_group_scale(
-    buffer_km: float,
+    buffer_m: float,
     native_scale_m: float,
     *,
     min_pixels: int,
     max_pixels: int,
 ) -> float:
     """Compute meters/pixel scale, clamped so chips are not too big/small."""
-    if buffer_km <= 0:
-        raise ValueError(f"buffer_km must be > 0, got {buffer_km}")
+    if buffer_m <= 0:
+        raise ValueError(f"buffer_m must be > 0, got {buffer_m}")
     if native_scale_m <= 0:
         raise ValueError(f"native_scale_m must be > 0, got {native_scale_m}")
 
-    R_m = buffer_km * 1000.0
-
     # Coarsest allowed scale (fewest pixels).
-    scale_for_max = (2.0 * R_m) / float(max_pixels)
+    scale_for_max = (2.0 * float(buffer_m)) / float(max_pixels)
     # Finest allowed scale (most pixels).
-    scale_for_min = (2.0 * R_m) / float(min_pixels)
+    scale_for_min = (2.0 * float(buffer_m)) / float(min_pixels)
 
     if native_scale_m < scale_for_max:
         return float(scale_for_max)
@@ -164,10 +162,10 @@ def _fix_geotiff_colorinterp(path: Path, *, num_bands: int | None = None) -> Non
         return
 
 
-def square_region_for_point(lon: float, lat: float, buffer_km: float):
+def square_region_for_point(lon: float, lat: float, buffer_m: float):
     ensure_ee_initialized()
     pt = ee.Geometry.Point([lon, lat])
-    return pt.buffer(float(buffer_km) * 1000.0).bounds()
+    return pt.buffer(float(buffer_m)).bounds()
 
 
 def union_regions(regions: list):
@@ -840,26 +838,26 @@ def _clear_chip_group_dir(group_dir: Path) -> None:
             p.unlink()
 
 
-def _resolve_buffer_km_args(
+def _resolve_buffer_m_args(
     *,
-    buffer_km: float | None,
-    resolution_buffer_km: float | None,
-    extent_buffer_km: float | None,
+    buffer_m: float | None,
+    resolution_buffer_m: float | None,
+    extent_buffer_m: float | None,
     caller_name: str,
 ) -> tuple[float, float]:
-    if resolution_buffer_km is None:
-        if buffer_km is None:
+    if resolution_buffer_m is None:
+        if buffer_m is None:
             raise ValueError(
-                f"{caller_name} requires resolution_buffer_km or legacy buffer_km"
+                f"{caller_name} requires resolution_buffer_m or buffer_m"
             )
-        resolution_buffer_km = float(buffer_km)
-    if extent_buffer_km is None:
-        if buffer_km is None:
+        resolution_buffer_m = float(buffer_m)
+    if extent_buffer_m is None:
+        if buffer_m is None:
             raise ValueError(
-                f"{caller_name} requires extent_buffer_km or legacy buffer_km"
+                f"{caller_name} requires extent_buffer_m or buffer_m"
             )
-        extent_buffer_km = float(buffer_km)
-    return float(resolution_buffer_km), float(extent_buffer_km)
+        extent_buffer_m = float(buffer_m)
+    return float(resolution_buffer_m), float(extent_buffer_m)
 
 
 def _require_columns(
@@ -1226,8 +1224,8 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
     req, ctx = args
 
     study_dir = Path(ctx["study_dir"])
-    resolution_buffer_km = float(ctx["resolution_buffer_km"])
-    extent_buffer_km = float(ctx["extent_buffer_km"])
+    resolution_buffer_m = float(ctx["resolution_buffer_m"])
+    extent_buffer_m = float(ctx["extent_buffer_m"])
     skip_existing = bool(ctx["skip_existing"])
     plan: LayerPlan = ctx["plan"]
     registry: LayerRegistry = ctx["registry"]
@@ -1256,7 +1254,7 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
 
     ensure_ee_initialized()
 
-    region = square_region_for_point(req.lon, req.lat, extent_buffer_km)
+    region = square_region_for_point(req.lon, req.lat, extent_buffer_m)
 
     for group_name, group in plan.chip_groups.items():
         out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
@@ -1270,7 +1268,7 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
             continue
 
         scale = compute_group_scale(
-            resolution_buffer_km,
+            resolution_buffer_m,
             float(group["target_scale_m"]),
             min_pixels=min_pixels,
             max_pixels=max_pixels,
@@ -1312,9 +1310,9 @@ def download_chips(
     study_dir: Path,
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
-    buffer_km: float | None = None,
-    resolution_buffer_km: float | None = None,
-    extent_buffer_km: float | None = None,
+    buffer_m: float | None = None,
+    resolution_buffer_m: float | None = None,
+    extent_buffer_m: float | None = None,
     min_pixels: int,
     max_pixels: int,
     splits: list[str] | None = None,
@@ -1322,10 +1320,10 @@ def download_chips(
     skip_existing: bool = True,
 ) -> dict[str, Any]:
     study_dir = Path(study_dir)
-    resolution_buffer_km, extent_buffer_km = _resolve_buffer_km_args(
-        buffer_km=buffer_km,
-        resolution_buffer_km=resolution_buffer_km,
-        extent_buffer_km=extent_buffer_km,
+    resolution_buffer_m, extent_buffer_m = _resolve_buffer_m_args(
+        buffer_m=buffer_m,
+        resolution_buffer_m=resolution_buffer_m,
+        extent_buffer_m=extent_buffer_m,
         caller_name="download_chips",
     )
     min_pixels = int(min_pixels)
@@ -1431,8 +1429,8 @@ def download_chips(
 
     ctx = {
         "study_dir": str(study_dir),
-        "resolution_buffer_km": float(resolution_buffer_km),
-        "extent_buffer_km": float(extent_buffer_km),
+        "resolution_buffer_m": float(resolution_buffer_m),
+        "extent_buffer_m": float(extent_buffer_m),
         "skip_existing": bool(skip_existing),
         "plan": plan,
         "registry": registry,
@@ -1594,9 +1592,9 @@ def download_tile_layer(
     plan: LayerPlan,
     registry: LayerRegistry,
     layer: str,
-    buffer_km: float | None = None,
-    resolution_buffer_km: float | None = None,
-    extent_buffer_km: float | None = None,
+    buffer_m: float | None = None,
+    resolution_buffer_m: float | None = None,
+    extent_buffer_m: float | None = None,
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
@@ -1606,10 +1604,10 @@ def download_tile_layer(
     if layer not in plan.layers_in_order:
         raise ValueError(f"Layer {layer!r} not present in plan.layers_in_order")
 
-    resolution_buffer_km, extent_buffer_km = _resolve_buffer_km_args(
-        buffer_km=buffer_km,
-        resolution_buffer_km=resolution_buffer_km,
-        extent_buffer_km=extent_buffer_km,
+    resolution_buffer_m, extent_buffer_m = _resolve_buffer_m_args(
+        buffer_m=buffer_m,
+        resolution_buffer_m=resolution_buffer_m,
+        extent_buffer_m=extent_buffer_m,
         caller_name="download_tile_layer",
     )
     min_pixels = int(min_pixels)
@@ -1710,7 +1708,7 @@ def download_tile_layer(
         ensure_ee_initialized()
 
     layer_scale = compute_group_scale(
-        resolution_buffer_km,
+        resolution_buffer_m,
         float(spec.native_scale_m),
         min_pixels=min_pixels,
         max_pixels=max_pixels,
@@ -1789,14 +1787,14 @@ def download_tile_layer(
     rect_bounds: list[tuple[float, float, float, float]] = []
 
     for _, r in grouped.iterrows():
-        buffer_m = float(extent_buffer_km) * 1000.0
-
-        buffer_deg_lat = buffer_m / METERS_PER_DEG_LAT
+        buffer_deg_lat = float(extent_buffer_m) / METERS_PER_DEG_LAT
         lon_deg_to_m = METERS_PER_DEG_LON_EQUATOR * math.cos(
             math.radians(float(r["max_abs_lat"]))
         )
         buffer_deg_lon = (
-            WGS84_MAX_LON if abs(lon_deg_to_m) < 1e-6 else buffer_m / lon_deg_to_m
+            WGS84_MAX_LON
+            if abs(lon_deg_to_m) < 1e-6
+            else float(extent_buffer_m) / lon_deg_to_m
         )
 
         min_lon_exp = float(r["min_lon"]) - buffer_deg_lon
@@ -1997,9 +1995,9 @@ def download_tiles(
     study_dir: Path,
     plan: LayerPlan,
     registry: LayerRegistry = REGISTRY,
-    buffer_km: float | None = None,
-    resolution_buffer_km: float | None = None,
-    extent_buffer_km: float | None = None,
+    buffer_m: float | None = None,
+    resolution_buffer_m: float | None = None,
+    extent_buffer_m: float | None = None,
     min_pixels: int,
     max_pixels: int,
     px_per_side: int,
@@ -2019,9 +2017,9 @@ def download_tiles(
             plan=plan,
             registry=registry,
             layer=layer,
-            buffer_km=buffer_km,
-            resolution_buffer_km=resolution_buffer_km,
-            extent_buffer_km=extent_buffer_km,
+            buffer_m=buffer_m,
+            resolution_buffer_m=resolution_buffer_m,
+            extent_buffer_m=extent_buffer_m,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,

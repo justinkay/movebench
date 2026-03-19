@@ -7,7 +7,7 @@ from movebench import paths
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
 from movebench.layers.plan import LayerPlan
-from movebench.trajectories import SET_COL, TIME_COL
+from movebench.trajectories import SET_COL, TIME_COL, prepare_interval_step_starts
 
 from movebench.layers.io import LayerIO
 import pandas as pd
@@ -19,6 +19,33 @@ from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 from movebench.datasets.ssf import SSFDataset
 from movebench.datasets.ssf import iSSFDataset
 from movebench.features.normalization import compute_points_normalization_stats
+
+
+def _rows_for_raster_downloads(
+    df: pd.DataFrame,
+    *,
+    splits: list[str],
+    raster_buffer_cfg: dict,
+) -> pd.DataFrame:
+    """Return the trajectory rows that should drive raster downloads."""
+    sub = df[df[SET_COL].isin(splits)].copy()
+
+    min_step_time_s = raster_buffer_cfg.get("min_step_time_s")
+    max_step_time_s = raster_buffer_cfg.get("max_step_time_s")
+    if (
+        min_step_time_s is None
+        or max_step_time_s is None
+        or int(min_step_time_s) != int(max_step_time_s)
+    ):
+        return sub
+
+    original_columns = list(sub.columns)
+    prepared = prepare_interval_step_starts(
+        sub,
+        step_time_s=int(min_step_time_s),
+        gap_q=float(raster_buffer_cfg["gap_q"]),
+    )
+    return prepared.loc[prepared["valid_step_start"], original_columns].copy()
 
 
 @dataclass(frozen=True)
@@ -119,23 +146,41 @@ class Study:
                 gap_q=float(buf["gap_q"]),
             )
 
-        resolution_buffer_km = float(resolution_buffer_m) / 1000.0
-        extent_buffer_km = float(extent_buffer_m) / 1000.0
-
         if splits is None:
             splits = sorted(df[SET_COL].dropna().unique().tolist())
+        download_df = _rows_for_raster_downloads(
+            df,
+            splits=splits,
+            raster_buffer_cfg=buf,
+        )
 
         clamp = cfg.raster_params["scale_clamp"]
         min_pixels = int(clamp["min_pixels"])
         max_pixels = int(clamp["max_pixels"])
         px_per_side = int(cfg.raster_params["tiles"]["px_per_side"])
 
+        if len(download_df) == 0:
+            return {
+                "rasters_hash": plan.rasters_hash,
+                "buffer_m": extent_buffer_m,
+                "resolution_buffer_m": resolution_buffer_m,
+                "extent_buffer_m": extent_buffer_m,
+                "chips": {
+                    "total_points": 0,
+                    "downloaded": 0,
+                    "existing": 0,
+                    "failed": 0,
+                    "failures": [],
+                },
+                "tiles": {},
+            }
+
         chip_stats = mb2dl.download_chips(
-            df,
+            download_df,
             study_dir=self.study_dir,
             plan=plan,
-            resolution_buffer_km=resolution_buffer_km,
-            extent_buffer_km=extent_buffer_km,
+            resolution_buffer_m=resolution_buffer_m,
+            extent_buffer_m=extent_buffer_m,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             splits=splits,
@@ -144,11 +189,11 @@ class Study:
         )
 
         tile_stats = mb2dl.download_tiles(
-            df[df[SET_COL].isin(splits)].copy(),
+            download_df,
             study_dir=self.study_dir,
             plan=plan,
-            resolution_buffer_km=resolution_buffer_km,
-            extent_buffer_km=extent_buffer_km,
+            resolution_buffer_m=resolution_buffer_m,
+            extent_buffer_m=extent_buffer_m,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             px_per_side=px_per_side,
@@ -158,9 +203,9 @@ class Study:
 
         return {
             "rasters_hash": plan.rasters_hash,
-            "buffer_km": extent_buffer_km,
-            "resolution_buffer_km": resolution_buffer_km,
-            "extent_buffer_km": extent_buffer_km,
+            "buffer_m": extent_buffer_m,
+            "resolution_buffer_m": resolution_buffer_m,
+            "extent_buffer_m": extent_buffer_m,
             "chips": chip_stats,
             "tiles": tile_stats,
         }
