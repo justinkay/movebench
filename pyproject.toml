@@ -51,3 +51,7 @@ moveformer = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["movebench*"]
+
+[tool.ruff]
+# In addition to the standard set of exclusions, omit all tests, plus a specific file.
+extend-exclude = ["tests", "notebooks", "one_time_scripts", "mbr", "movebank", "execplans", "results", "docs", "movebench/lib", "trajectory_viz_app.py"]

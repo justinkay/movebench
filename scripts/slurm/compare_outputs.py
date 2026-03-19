@@ -29,7 +29,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -584,9 +584,9 @@ def _worker(args: argparse.Namespace) -> int:
     if args.max_steps is not None:
         idxs = idxs[: max(0, int(args.max_steps))]
     else:
-        k = min(int(args.max_steps), n)
+        k = min(int(args.max_steps), n_steps)
         rng = np.random.default_rng(0)
-        idxs = sorted(int(x) for x in rng.choice(n, size=k, replace=False).tolist())
+        idxs = sorted(int(x) for x in rng.choice(n_steps, size=k, replace=False).tolist())
 
     # Truth dx/dy in meters.
     to_m = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)

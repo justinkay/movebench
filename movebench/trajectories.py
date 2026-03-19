@@ -243,7 +243,7 @@ def compute_movement_features(
 
     df["lat_prev"] = g["lat_rad"].shift()
     df["lon_prev"] = g["lon_rad"].shift()
-    dlat = df["lat_rad"] - df["lat_prev"]
+    df["lat_rad"] - df["lat_prev"]
     dlon = df["lon_rad"] - df["lon_prev"]
 
     # Initial valid step mask (time + positive distance).

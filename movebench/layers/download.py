@@ -1731,7 +1731,7 @@ def download_tiles(
     n_workers: int = 16,
     skip_existing: bool = True,
 ) -> dict[str, Any]:
-    tile_layers = [l for l in plan.layers_in_order if registry.get(l).source == "gee_tile"]
+    tile_layers = [layer for layer in plan.layers_in_order if registry.get(layer).source == "gee_tile"]
     out: dict[str, Any] = {}
     for layer in tile_layers:
         out[layer] = download_tile_layer(

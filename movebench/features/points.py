@@ -30,12 +30,9 @@ from movebench.layers.constants import WGS84_CRS
 from movebench.layers.config import _format_slug_number, _truncate_key
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
+from movebench.rasters import Raster
 from movebench.trajectories import (
-    LAT_COL,
-    LON_COL,
-    POINT_ID_COL,
     SET_COL,
-    TIME_COL,
     compute_movement_features,
     select_step_starts,
 )

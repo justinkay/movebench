@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from typing import List, Optional, Union
 
-import gps2var
 
 from .. import training_utils
 

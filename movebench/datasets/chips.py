@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -259,7 +258,7 @@ class ChipDataset(Dataset):
             if self.registry.get(layer).source == "gee_chip":
                 return layer
         # Otherwise fall back to a tile layer (e.g. dem/dist_water). Prefer dem when present.
-        tile_layers = [l for l in self.plan.layers_in_order if self.registry.get(l).source == "gee_tile"]
+        tile_layers = [layer for layer in self.plan.layers_in_order if self.registry.get(layer).source == "gee_tile"]
         if not tile_layers:
             raise ValueError(
                 "ChipDataset requires at least one gee_chip or gee_tile layer in the LayerPlan to define bounds."
@@ -372,8 +371,8 @@ class ChipDataset(Dataset):
         chip_groups: dict[str, Raster] = {g: self.io.load_chip_group(g, point_id=point_id) for g in needed_chip_groups}
 
         # Build the set of non-chip output layers to load/compute once.
-        non_chip_layers = [l for l in self.plan.layers_in_order if self.registry.get(l).source != "gee_chip"]
-        non_chip_rasters = [get_raster(l) for l in non_chip_layers]
+        non_chip_layers = [layer for layer in self.plan.layers_in_order if self.registry.get(layer).source != "gee_chip"]
+        non_chip_rasters = [get_raster(layer) for layer in non_chip_layers]
 
         # Warp: reference raster first, then other chip groups, then non-chip layers.
         warp_kinds: list[str] = []

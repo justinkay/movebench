@@ -26,13 +26,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .constants import PAD_INDEX
 from .data_loading import DataProcessor
 from .geo_utils import (
     gcs_to_distance,
     gcs_to_bearing,
     gcs_to_n_vector,
-    apply_move,
     to_rad,
 )
 from .num_utils import find_repeated, split_ranges
