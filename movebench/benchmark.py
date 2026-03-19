@@ -53,11 +53,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
     with open(p, "r") as f:
         user = yaml.safe_load(f) or {}
     if not isinstance(user, dict):
-        raise ValueError(f"Benchmark config must be a mapping/dict at the top level; got {type(user).__name__}")
+        raise ValueError(
+            f"Benchmark config must be a mapping/dict at the top level; got {type(user).__name__}"
+        )
 
     cfg = user
     if int(cfg.get("version", -1)) != 1:
-        raise ValueError(f"Unsupported benchmark config version={cfg.get('version')!r} (expected 1)")
+        raise ValueError(
+            f"Unsupported benchmark config version={cfg.get('version')!r} (expected 1)"
+        )
 
     for key in ("layers_config", "output_dir", "runtime", "datasets", "methods"):
         if key not in cfg:
@@ -85,7 +89,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
         "bounds_buffer_deg",
     ):
         if key not in issf["sampler"]:
-            raise ValueError(f"Benchmark config missing required key: datasets.issf.sampler.{key!r}")
+            raise ValueError(
+                f"Benchmark config missing required key: datasets.issf.sampler.{key!r}"
+            )
 
     if not isinstance(cfg["methods"], list) or not cfg["methods"]:
         raise ValueError("Benchmark config must include a non-empty `methods:` list.")
@@ -94,20 +100,30 @@ def load_config(path: str | Path) -> dict[str, Any]:
     env = cfg.get("env")
     if env is not None:
         if not isinstance(env, dict):
-            raise ValueError("`env` must be a mapping of environment variable overrides.")
+            raise ValueError(
+                "`env` must be a mapping of environment variable overrides."
+            )
         for k, v in env.items():
             os.environ[str(k)] = str(v)
 
-    def _validate_schedule_hparams(*, method_name: str, hparams: dict[str, Any]) -> None:
-        use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
+    def _validate_schedule_hparams(
+        *, method_name: str, hparams: dict[str, Any]
+    ) -> None:
+        use_epochs = any(
+            k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs")
+        )
         if use_epochs:
             for key in ("max_epochs", "patience_epochs"):
                 if key not in hparams:
-                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (epoch schedule)")
+                    raise ValueError(
+                        f"Method {method_name!r} missing required hparam: {key!r} (epoch schedule)"
+                    )
         else:
             for key in ("max_steps", "eval_interval", "patience"):
                 if key not in hparams:
-                    raise ValueError(f"Method {method_name!r} missing required hparam: {key!r} (step schedule)")
+                    raise ValueError(
+                        f"Method {method_name!r} missing required hparam: {key!r} (step schedule)"
+                    )
 
     # Validate methods (no default filling; rely on model/dataset defaults where applicable).
     allowed_kinds = {"issf_linear", "issf_mlp", "deepssf", "moveformer"}
@@ -136,36 +152,62 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if kind in {"issf_linear", "issf_mlp"}:
             for key in ("lr", "weight_decay"):
                 if key not in hparams:
-                    raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
+                    raise ValueError(
+                        f"Method {name!r} missing required hparam: {key!r}"
+                    )
             _validate_schedule_hparams(method_name=name, hparams=hparams)
         elif kind == "deepssf":
-            if "deepssf" not in cfg["datasets"] or not isinstance(cfg["datasets"]["deepssf"], dict):
-                raise ValueError("Benchmark config missing required key: datasets.deepssf (required for kind='deepssf')")
+            if "deepssf" not in cfg["datasets"] or not isinstance(
+                cfg["datasets"]["deepssf"], dict
+            ):
+                raise ValueError(
+                    "Benchmark config missing required key: datasets.deepssf (required for kind='deepssf')"
+                )
             for key in ("lr_movement", "lr_habitat", "weight_decay"):
                 if key not in hparams:
-                    raise ValueError(f"Method {name!r} missing required hparam: {key!r}")
+                    raise ValueError(
+                        f"Method {name!r} missing required hparam: {key!r}"
+                    )
             _validate_schedule_hparams(method_name=name, hparams=hparams)
         elif kind == "moveformer":
-            if "moveformer" not in cfg["datasets"] or not isinstance(cfg["datasets"]["moveformer"], dict):
-                raise ValueError("Benchmark config missing required key: datasets.moveformer (required for kind='moveformer')")
+            if "moveformer" not in cfg["datasets"] or not isinstance(
+                cfg["datasets"]["moveformer"], dict
+            ):
+                raise ValueError(
+                    "Benchmark config missing required key: datasets.moveformer (required for kind='moveformer')"
+                )
             dcfg = cfg["datasets"]["moveformer"]
             if "normalize_env" in dcfg and not isinstance(dcfg["normalize_env"], bool):
-                raise ValueError("datasets.moveformer.normalize_env must be a boolean if provided")
-            if "require_normalization_stats" in dcfg and not isinstance(dcfg["require_normalization_stats"], bool):
-                raise ValueError("datasets.moveformer.require_normalization_stats must be a boolean if provided")
+                raise ValueError(
+                    "datasets.moveformer.normalize_env must be a boolean if provided"
+                )
+            if "require_normalization_stats" in dcfg and not isinstance(
+                dcfg["require_normalization_stats"], bool
+            ):
+                raise ValueError(
+                    "datasets.moveformer.require_normalization_stats must be a boolean if provided"
+                )
             _validate_schedule_hparams(method_name=name, hparams=hparams)
         else:
             raise RuntimeError(f"Internal error: unhandled kind={kind!r}")
 
-        methods_out.append({"name": name, "kind": kind, "model": model_cfg, "hparams": hparams})
+        methods_out.append(
+            {"name": name, "kind": kind, "model": model_cfg, "hparams": hparams}
+        )
 
     wandb_cfg = cfg.get("wandb", None)
     if wandb_cfg is not None:
         if not isinstance(wandb_cfg, dict):
-            raise ValueError("Benchmark config `wandb` must be a mapping/dict when provided.")
+            raise ValueError(
+                "Benchmark config `wandb` must be a mapping/dict when provided."
+            )
         if "enabled" in wandb_cfg and not isinstance(wandb_cfg["enabled"], bool):
             raise ValueError("wandb.enabled must be a boolean if provided.")
-        if "tags" in wandb_cfg and wandb_cfg["tags"] is not None and not isinstance(wandb_cfg["tags"], list):
+        if (
+            "tags" in wandb_cfg
+            and wandb_cfg["tags"] is not None
+            and not isinstance(wandb_cfg["tags"], list)
+        ):
             raise ValueError("wandb.tags must be a list of strings if provided.")
 
     cfg["methods"] = methods_out
@@ -177,7 +219,9 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
     from movebench import paths
 
     studies_val = cfg.get("studies", None)
-    if studies_val is None or (isinstance(studies_val, str) and studies_val.strip().lower() == "all"):
+    if studies_val is None or (
+        isinstance(studies_val, str) and studies_val.strip().lower() == "all"
+    ):
         out = Study.list_available()
     elif isinstance(studies_val, list):
         out = [str(s).strip() for s in studies_val if str(s).strip()]
@@ -262,7 +306,9 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
     return sampler_hash
 
 
-def _make_loaders(*, ds_train, ds_test, collate_fn, batch_size: int | None, num_workers: int | None):
+def _make_loaders(
+    *, ds_train, ds_test, collate_fn, batch_size: int | None, num_workers: int | None
+):
     from torch.utils.data import DataLoader
 
     kwargs: dict[str, Any] = {"collate_fn": collate_fn, "drop_last": False}
@@ -284,24 +330,34 @@ def _make_loaders(*, ds_train, ds_test, collate_fn, batch_size: int | None, num_
     return train_loader, test_loader
 
 
-def _resolve_fit_schedule(*, hparams: dict[str, Any], steps_per_epoch: int) -> dict[str, int]:
+def _resolve_fit_schedule(
+    *, hparams: dict[str, Any], steps_per_epoch: int
+) -> dict[str, int]:
     steps_per_epoch = int(steps_per_epoch)
     if steps_per_epoch <= 0:
         raise ValueError(f"steps_per_epoch must be > 0; got {steps_per_epoch}")
 
-    use_epochs = any(k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs"))
+    use_epochs = any(
+        k in hparams for k in ("max_epochs", "eval_every_epochs", "patience_epochs")
+    )
     if use_epochs:
         if "max_epochs" not in hparams or "patience_epochs" not in hparams:
-            raise ValueError("Epoch-based schedule requires hparams.max_epochs and hparams.patience_epochs.")
+            raise ValueError(
+                "Epoch-based schedule requires hparams.max_epochs and hparams.patience_epochs."
+            )
         max_epochs = int(hparams["max_epochs"])
         eval_every_epochs = int(hparams.get("eval_every_epochs", 1))
         patience_epochs = int(hparams["patience_epochs"])
         if max_epochs <= 0:
             raise ValueError(f"hparams.max_epochs must be > 0; got {max_epochs}")
         if eval_every_epochs <= 0:
-            raise ValueError(f"hparams.eval_every_epochs must be > 0; got {eval_every_epochs}")
+            raise ValueError(
+                f"hparams.eval_every_epochs must be > 0; got {eval_every_epochs}"
+            )
         if patience_epochs <= 0:
-            raise ValueError(f"hparams.patience_epochs must be > 0; got {patience_epochs}")
+            raise ValueError(
+                f"hparams.patience_epochs must be > 0; got {patience_epochs}"
+            )
 
         max_steps = int(max_epochs) * int(steps_per_epoch)
         eval_interval = int(eval_every_epochs) * int(steps_per_epoch)
@@ -348,7 +404,11 @@ def _run_issf(
     model_kind: str,
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
-    from movebench.models.ssf import LinearStepSelect, MLPStepSelect, random_baseline_metrics
+    from movebench.models.ssf import (
+        LinearStepSelect,
+        MLPStepSelect,
+        random_baseline_metrics,
+    )
     from movebench.train import fit_step_select_tensor
 
     issf = cfg["datasets"]["issf"]
@@ -364,7 +424,14 @@ def _run_issf(
         "gap_q": float(sampler["gap_q"]),
         "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
     }
-    for k in ("include_time", "normalize", "subset_env_layers", "subset_band_ids", "include_individual_id", "normalize_movement"):
+    for k in (
+        "include_time",
+        "normalize",
+        "subset_env_layers",
+        "subset_band_ids",
+        "include_individual_id",
+        "normalize_movement",
+    ):
         if k in issf:
             ds_kwargs[k] = issf[k]
 
@@ -375,16 +442,24 @@ def _run_issf(
 
     batch_size = int(issf.get("batch_size", None) or 1)
     steps_per_epoch = int(math.ceil(float(len(train_ds)) / float(batch_size)))
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch)
+    schedule = _resolve_fit_schedule(
+        hparams=dict(method["hparams"]), steps_per_epoch=steps_per_epoch
+    )
 
     # Cache expanded features once. On CUDA we store bf16 on GPU when possible,
     # otherwise fall back to pinned CPU and stream batches to the GPU.
     feat_dtype = torch.bfloat16 if str(device.type) == "cuda" else torch.float32
-    x_train = train_ds.build_expanded_x(cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True)
-    x_test = test_ds.build_expanded_x(cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True)
+    x_train = train_ds.build_expanded_x(
+        cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True
+    )
+    x_test = test_ds.build_expanded_x(
+        cache_device=device, dtype=feat_dtype, fallback_to_pinned_cpu=True
+    )
 
     if x_train.ndim != 3:
-        raise ValueError(f"iSSF dataset must produce x with shape (N,C,P); got {tuple(x_train.shape)}")
+        raise ValueError(
+            f"iSSF dataset must produce x with shape (N,C,P); got {tuple(x_train.shape)}"
+        )
     _n, c, p = x_train.shape
     random_metrics = random_baseline_metrics(int(p), TOP_K_VALUES)
 
@@ -454,7 +529,12 @@ def _run_issf(
 
 
 def run_issf_linear(
-    *, study, cfg: dict[str, Any], method: dict[str, Any], device, log_callback: Any | None = None
+    *,
+    study,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    log_callback: Any | None = None,
 ) -> dict[str, Any]:
     return _run_issf(
         study=study,
@@ -467,7 +547,12 @@ def run_issf_linear(
 
 
 def run_issf_mlp(
-    *, study, cfg: dict[str, Any], method: dict[str, Any], device, log_callback: Any | None = None
+    *,
+    study,
+    cfg: dict[str, Any],
+    method: dict[str, Any],
+    device,
+    log_callback: Any | None = None,
 ) -> dict[str, Any]:
     return _run_issf(
         study=study,
@@ -489,7 +574,12 @@ def run_deepssf(
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
     from movebench.models.deepssf import DeepSSF
-    from movebench.train import collate_deepssf, eval_deepssf, fit_deepssf, random_grid_baseline_metrics
+    from movebench.train import (
+        collate_deepssf,
+        eval_deepssf,
+        fit_deepssf,
+        random_grid_baseline_metrics,
+    )
 
     dcfg = cfg["datasets"]["deepssf"]
     subset_idxs = None
@@ -500,7 +590,9 @@ def run_deepssf(
         want = {str(x) for x in subset_band_ids}
         missing = sorted(want - set(band_ids))
         if missing:
-            raise ValueError(f"datasets.deepssf.subset_band_ids contains unknown band_id(s): {missing}")
+            raise ValueError(
+                f"datasets.deepssf.subset_band_ids contains unknown band_id(s): {missing}"
+            )
         subset_idxs = [i for i, bid in enumerate(band_ids) if bid in want]
 
     ds_kwargs_train: dict[str, Any] = {
@@ -517,7 +609,9 @@ def run_deepssf(
         v = dcfg[k]
         if k == "output_hw":
             if not (isinstance(v, (list, tuple)) and len(v) == 2):
-                raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+                raise ValueError(
+                    "datasets.deepssf.output_hw must be a 2-item sequence like [101,101]."
+                )
             v = (int(v[0]), int(v[1]))
         ds_kwargs_train[k] = v
         ds_kwargs_test[k] = v
@@ -526,29 +620,37 @@ def run_deepssf(
     use_cache = False
     if cache_cfg is not None:
         if not isinstance(cache_cfg, dict):
-            raise ValueError("datasets.deepssf.cache must be a mapping/dict when provided")
+            raise ValueError(
+                "datasets.deepssf.cache must be a mapping/dict when provided"
+            )
         use_cache = bool(cache_cfg.get("enabled", False))
 
     if use_cache:
-        from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_train_test_loaders
+        from movebench.datasets.deepssf_wds_cache import (
+            make_deepssf_wds_train_test_loaders,
+        )
 
         assert isinstance(cache_cfg, dict)
         batch_size = dcfg.get("batch_size", None)
         bs = int(batch_size) if batch_size is not None else 1
         num_workers = int(dcfg.get("num_workers", 0) or 0)
 
-        train_loader, test_loader, m_train, m_test, steps_per_epoch = make_deepssf_wds_train_test_loaders(
-            study=study,
-            layers_config=str(cfg["layers_config"]),
-            ds_kwargs_train=ds_kwargs_train,
-            ds_kwargs_test=ds_kwargs_test,
-            cache_cfg=cache_cfg,
-            batch_size=int(bs),
-            num_workers=int(num_workers),
-            runtime_seed=int(cfg["runtime"]["seed"]),
+        train_loader, test_loader, m_train, m_test, steps_per_epoch = (
+            make_deepssf_wds_train_test_loaders(
+                study=study,
+                layers_config=str(cfg["layers_config"]),
+                ds_kwargs_train=ds_kwargs_train,
+                ds_kwargs_test=ds_kwargs_test,
+                cache_cfg=cache_cfg,
+                batch_size=int(bs),
+                num_workers=int(num_workers),
+                runtime_seed=int(cfg["runtime"]["seed"]),
+            )
         )
 
-        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=int(steps_per_epoch))
+        schedule = _resolve_fit_schedule(
+            hparams=dict(method["hparams"]), steps_per_epoch=int(steps_per_epoch)
+        )
         pixel_size_test = float(m_test["pixel_size_m"])
         pixel_size_train = float(m_train["pixel_size_m"])
 
@@ -562,7 +664,9 @@ def run_deepssf(
 
         collate_fn = collate_deepssf
         if subset_idxs is not None:
-            collate_fn = functools.partial(_collate_deepssf_subset, subset_idxs=subset_idxs)
+            collate_fn = functools.partial(
+                _collate_deepssf_subset, subset_idxs=subset_idxs
+            )
         train_loader, test_loader = _make_loaders(
             ds_train=train_ds,
             ds_test=test_ds,
@@ -571,7 +675,9 @@ def run_deepssf(
             num_workers=dcfg.get("num_workers", None),
         )
 
-        schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+        schedule = _resolve_fit_schedule(
+            hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader)
+        )
 
     x1, _x2, _x3, _y = next(iter(train_loader))
     b, c_env, h, w = x1.shape
@@ -581,12 +687,16 @@ def run_deepssf(
     model_cfg = method["model"]
     image_dim = int(model_cfg.get("image_dim", int(h)))
     if int(image_dim) != int(h):
-        raise ValueError(f"deepSSF model.image_dim ({image_dim}) must match dataset chip size ({h}).")
+        raise ValueError(
+            f"deepSSF model.image_dim ({image_dim}) must match dataset chip size ({h})."
+        )
 
     model = DeepSSF(
         int(c_env),
         image_dim=int(image_dim),
-        pixel_size_m=float(pixel_size_train if use_cache else train_ds.chips.pixel_size_m),
+        pixel_size_m=float(
+            pixel_size_train if use_cache else train_ds.chips.pixel_size_m
+        ),
         device=device,
     )
 
@@ -647,7 +757,12 @@ def run_deepssf(
     random_grid = random_grid_baseline_metrics(int(h) * int(w), TOP_K_VALUES)
 
     return {
-        "grid": {"H": int(h), "W": int(w), "num_pixels": int(h) * int(w), "pixel_size_m": float(model.pixel_size_m)},
+        "grid": {
+            "H": int(h),
+            "W": int(w),
+            "num_pixels": int(h) * int(w),
+            "pixel_size_m": float(model.pixel_size_m),
+        },
         "random_grid": random_grid,
         "schedule": schedule,
         "fit": fit,
@@ -691,7 +806,9 @@ def run_moveformer(
     if "normalize_env" in dcfg:
         ds_kwargs["normalize_env"] = bool(dcfg["normalize_env"])
     if "require_normalization_stats" in dcfg:
-        ds_kwargs["require_normalization_stats"] = bool(dcfg["require_normalization_stats"])
+        ds_kwargs["require_normalization_stats"] = bool(
+            dcfg["require_normalization_stats"]
+        )
     if "subset_band_ids" in dcfg:
         ds_kwargs["subset_band_ids"] = dcfg["subset_band_ids"]
 
@@ -706,7 +823,9 @@ def run_moveformer(
         num_workers=dcfg.get("num_workers", None),
     )
 
-    schedule = _resolve_fit_schedule(hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader))
+    schedule = _resolve_fit_schedule(
+        hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader)
+    )
 
     P = int(getattr(train_ds, "num_candidates_total", 0))
     if P <= 0:
@@ -786,9 +905,21 @@ def run_method(
     log_callback: Any | None = None,
 ):
     if kind == "issf_linear":
-        return run_issf_linear(study=study, cfg=cfg, method=method, device=device, log_callback=log_callback)
+        return run_issf_linear(
+            study=study,
+            cfg=cfg,
+            method=method,
+            device=device,
+            log_callback=log_callback,
+        )
     if kind == "issf_mlp":
-        return run_issf_mlp(study=study, cfg=cfg, method=method, device=device, log_callback=log_callback)
+        return run_issf_mlp(
+            study=study,
+            cfg=cfg,
+            method=method,
+            device=device,
+            log_callback=log_callback,
+        )
     if kind == "deepssf":
         return run_deepssf(
             study=study,
@@ -890,7 +1021,12 @@ def run_method(
 #
 
 
-def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, resume: bool = False) -> None:
+def main(
+    *,
+    config_path: str | Path,
+    overrides: dict[str, Any] | None = None,
+    resume: bool = False,
+) -> None:
     import torch
 
     from movebench import Study
@@ -915,7 +1051,9 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
     if resume and raw_results_path.exists():
         loaded = json.loads(raw_results_path.read_text())
         if not isinstance(loaded, dict):
-            raise ValueError(f"Expected raw_results.json to contain a dict; got {type(loaded).__name__}")
+            raise ValueError(
+                f"Expected raw_results.json to contain a dict; got {type(loaded).__name__}"
+            )
         results = loaded  # type: ignore[assignment]
 
     skipped_studies: list[tuple[str, str]] = []
@@ -929,7 +1067,10 @@ def main(*, config_path: str | Path, overrides: dict[str, Any] | None = None, re
             return isinstance(x, dict) and "fit" in x and "test" in x
 
         if resume:
-            needs_any = any(not _is_complete(existing_study.get(str(m["name"]))) for m in cfg["methods"])
+            needs_any = any(
+                not _is_complete(existing_study.get(str(m["name"])))
+                for m in cfg["methods"]
+            )
             if not needs_any:
                 print(f"[{study_id}] all methods already present; skipping (--resume)")
                 continue

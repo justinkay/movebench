@@ -43,7 +43,9 @@ TargetDType = Literal["uint8", "float16", "float32"]
 
 
 def _stable_hash_dict(d: dict[str, Any]) -> str:
-    payload = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    payload = json.dumps(
+        d, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
@@ -73,7 +75,9 @@ def deepssf_wds_cache_hash(
             "split": str(split),
             "output_hw": [int(output_hw[0]), int(output_hw[1])],
             "normalize": bool(normalize),
-            "normalization_sampler_hash": str(normalization_sampler_hash) if normalization_sampler_hash is not None else None,
+            "normalization_sampler_hash": str(normalization_sampler_hash)
+            if normalization_sampler_hash is not None
+            else None,
             "step_multiplier": float(step_multiplier),
             "step_q": float(step_q),
             "gap_q": float(gap_q),
@@ -83,6 +87,7 @@ def deepssf_wds_cache_hash(
             "compression": str(compression),
         }
     )
+
 
 _MANIFEST_SCHEMA_VERSION = "2"
 _PAYLOAD_FORMAT = "pth"
@@ -98,14 +103,22 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
     with open(path, "r") as f:
         d = json.load(f)
     if str(d.get("schema_version", "")) != _MANIFEST_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported schema_version={d.get('schema_version')!r} (expected {_MANIFEST_SCHEMA_VERSION!r}).")
+        raise ValueError(
+            f"Unsupported schema_version={d.get('schema_version')!r} (expected {_MANIFEST_SCHEMA_VERSION!r})."
+        )
     payload = str(d.get("payload_format", _PAYLOAD_FORMAT))
     if payload != _PAYLOAD_FORMAT:
-        raise ValueError(f"Unsupported payload_format={payload!r} (expected {_PAYLOAD_FORMAT!r}).")
+        raise ValueError(
+            f"Unsupported payload_format={payload!r} (expected {_PAYLOAD_FORMAT!r})."
+        )
     if int(d.get("num_samples", 0)) <= 0:
-        raise ValueError(f"manifest.num_samples must be > 0; got {d.get('num_samples')!r}")
+        raise ValueError(
+            f"manifest.num_samples must be > 0; got {d.get('num_samples')!r}"
+        )
     if float(d.get("pixel_size_m", 0.0)) <= 0:
-        raise ValueError(f"manifest.pixel_size_m must be > 0; got {d.get('pixel_size_m')!r}")
+        raise ValueError(
+            f"manifest.pixel_size_m must be > 0; got {d.get('pixel_size_m')!r}"
+        )
     return dict(d)
 
 
@@ -146,7 +159,9 @@ def build_deepssf_wds_cache(
     shards_dir.mkdir(parents=True, exist_ok=True)
 
     if not hasattr(dataset, "chips"):
-        raise TypeError("dataset must have a .chips attribute (expected DeepSSFDataset)")
+        raise TypeError(
+            "dataset must have a .chips attribute (expected DeepSSFDataset)"
+        )
     chips = dataset.chips
     plan = getattr(chips, "plan", None)
     from movebench.layers.plan import LayerPlan
@@ -185,7 +200,9 @@ def build_deepssf_wds_cache(
     def _resume_offset() -> int:
         if not shards_dir.exists():
             return 0
-        shard_paths = sorted([p for p in shards_dir.glob("shard-*.tar*") if p.is_file()])
+        shard_paths = sorted(
+            [p for p in shards_dir.glob("shard-*.tar*") if p.is_file()]
+        )
         if not shard_paths:
             return 0
 
@@ -232,7 +249,9 @@ def build_deepssf_wds_cache(
         if start_idx < 0:
             start_idx = 0
         if start_idx > n:
-            raise RuntimeError(f"Cache already has {start_idx} samples but dataset has len={n}; rebuild with overwrite=True.")
+            raise RuntimeError(
+                f"Cache already has {start_idx} samples but dataset has len={n}; rebuild with overwrite=True."
+            )
         if start_idx == n:
             # Shards already contain the full dataset; just write the manifest.
             env_channels = int(plan.num_channels())
@@ -254,7 +273,9 @@ def build_deepssf_wds_cache(
     perm = torch.randperm(n, generator=g)
     remaining = perm[int(start_idx) :].tolist()
     if not remaining:
-        raise RuntimeError("No remaining samples to write (resume offset consumed dataset).")
+        raise RuntimeError(
+            "No remaining samples to write (resume offset consumed dataset)."
+        )
 
     from torch.utils.data import Subset
 
@@ -271,9 +292,13 @@ def build_deepssf_wds_cache(
     ext = ".tar.gz" if compression == "gz" else ".tar"
     if resuming:
         tag = 0
-        while any(shards_dir.glob(f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-*{ext}")):
+        while any(
+            shards_dir.glob(f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-*{ext}")
+        ):
             tag += 1
-        pattern = str(shards_dir / f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-%06d{ext}")
+        pattern = str(
+            shards_dir / f"shard-resume-{int(start_idx):09d}-{int(tag):02d}-%06d{ext}"
+        )
     else:
         pattern = str(shards_dir / f"shard-%06d{ext}")
     sink = wds.ShardWriter(pattern, maxcount=int(samples_per_shard))
@@ -283,22 +308,42 @@ def build_deepssf_wds_cache(
         total = int(n - int(start_idx))
         prefix = "resume_" if int(start_idx) > 0 else ""
         study_id = str(out_dir).replace(str(paths.studies_root()), "").split("/")[1]
-        it = tqdm(loader, total=total, desc=f"{study_id} | {prefix}build_deepssf_wds_cache[{split}]", unit="samples")
+        it = tqdm(
+            loader,
+            total=total,
+            desc=f"{study_id} | {prefix}build_deepssf_wds_cache[{split}]",
+            unit="samples",
+        )
 
     try:
         for j, (spatial, scalars, bearing, target) in enumerate(it):
             idx = int(start_idx) + int(j)
-            spatial_t = spatial.detach().to(device="cpu", dtype=spatial_torch_dtype).contiguous()
-            scalars_t = scalars.detach().to(device="cpu", dtype=torch.float32).contiguous()
-            bearing_t = bearing.detach().to(device="cpu", dtype=torch.float32).contiguous()
+            spatial_t = (
+                spatial.detach()
+                .to(device="cpu", dtype=spatial_torch_dtype)
+                .contiguous()
+            )
+            scalars_t = (
+                scalars.detach().to(device="cpu", dtype=torch.float32).contiguous()
+            )
+            bearing_t = (
+                bearing.detach().to(device="cpu", dtype=torch.float32).contiguous()
+            )
 
             if target_torch_dtype == torch.uint8:
-                target_t = (target.detach().to(device="cpu", dtype=torch.float32) > 0.5).to(dtype=torch.uint8)
+                target_t = (
+                    target.detach().to(device="cpu", dtype=torch.float32) > 0.5
+                ).to(dtype=torch.uint8)
             else:
                 target_t = target.detach().to(device="cpu", dtype=target_torch_dtype)
             target_t = target_t.contiguous()
 
-            sink.write({"__key__": f"{int(idx):09d}", "pth": wds.torch_dumps((spatial_t, scalars_t, bearing_t, target_t))})
+            sink.write(
+                {
+                    "__key__": f"{int(idx):09d}",
+                    "pth": wds.torch_dumps((spatial_t, scalars_t, bearing_t, target_t)),
+                }
+            )
     finally:
         sink.close()
 
@@ -321,7 +366,9 @@ def build_deepssf_wds_cache(
     return dict(manifest)
 
 
-def _decode_pth_sample(sample: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _decode_pth_sample(
+    sample: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     spatial, scalars, bearing, target = wds.torch_loads(bytes(sample["pth"]))
     return (
         spatial.to(dtype=torch.float32),
@@ -424,12 +471,16 @@ def ensure_deepssf_wds_cache_split(
 
     output_hw = ds_kwargs.get("output_hw", (101, 101))
     if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
-        raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+        raise ValueError(
+            "datasets.deepssf.output_hw must be a 2-item sequence like [101,101]."
+        )
     output_hw = (int(output_hw[0]), int(output_hw[1]))
 
     normalize = bool(ds_kwargs.get("normalize", True))
     norm_hash_raw = ds_kwargs.get("normalization_sampler_hash", None)
-    norm_hash = str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+    norm_hash = (
+        str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+    )
 
     step_multiplier = float(ds_kwargs.get("step_multiplier", 2.0))
     step_q = float(ds_kwargs.get("step_q", 0.95))

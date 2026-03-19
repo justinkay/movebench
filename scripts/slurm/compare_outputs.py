@@ -60,9 +60,18 @@ def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default_config = _REPO_ROOT / "configs" / "benchmarks" / "all.yaml"
 
-    p = argparse.ArgumentParser(description="Evaluate SSF surface samples per study on Slurm.")
-    p.add_argument("--config", type=str, default=str(default_config), help="Benchmark YAML config path.")
-    p.add_argument("--study", type=str, default=None, help="Worker mode: run a single study id.")
+    p = argparse.ArgumentParser(
+        description="Evaluate SSF surface samples per study on Slurm."
+    )
+    p.add_argument(
+        "--config",
+        type=str,
+        default=str(default_config),
+        help="Benchmark YAML config path.",
+    )
+    p.add_argument(
+        "--study", type=str, default=None, help="Worker mode: run a single study id."
+    )
     p.add_argument(
         "--studies",
         type=str,
@@ -81,29 +90,89 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory for Slurm stdout/stderr logs (default: results/slurm/compare_outputs/<config_stem>/).",
     )
-    p.add_argument("--overwrite", action="store_true", help="Overwrite per-study outputs if they exist.")
-    p.add_argument("--dry-run", action="store_true", help="Print actions/commands but do not submit jobs.")
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite per-study outputs if they exist.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions/commands but do not submit jobs.",
+    )
 
     # Sampling params (defaults match the notebook).
     p.add_argument("--issf-surface-num-candidates", type=int, default=10_000)
     p.add_argument("--issf-surface-num-samples", type=int, default=500)
     p.add_argument("--deepssf-surface-num-samples", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--max-workers", type=int, default=8, help="Max workers for threaded iSSF extraction/scoring.")
-    p.add_argument("--max-steps", type=int, default=2500, help="Optional cap on number of steps (debug).")
-    p.add_argument("--device", type=str, default=None, help="Override torch device (e.g. 'cuda' or 'cpu').")
-    p.add_argument("--skip-energy", action="store_true", help="Skip energy-score computation (faster).")
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=8,
+        help="Max workers for threaded iSSF extraction/scoring.",
+    )
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=2500,
+        help="Optional cap on number of steps (debug).",
+    )
+    p.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Override torch device (e.g. 'cuda' or 'cpu').",
+    )
+    p.add_argument(
+        "--skip-energy",
+        action="store_true",
+        help="Skip energy-score computation (faster).",
+    )
 
     # Slurm defaults match other scripts in scripts/slurm.
-    p.add_argument("--max-concurrent-jobs", type=int, default=32, help="Launcher: maximum concurrent `srun` jobs.")
-    p.add_argument("--polling-interval", type=int, default=30, help="Launcher: seconds between job status checks.")
-    p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
-    p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
-    p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
-    p.add_argument("--time", type=str, default="1-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
-    p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
-    p.add_argument("--cpus-per-task", type=int, default=16, help="Slurm CPUs per task (--cpus-per-task).")
-    p.add_argument("--gpus-per-node", type=int, default=1, help="Slurm GPUs per node (--gpus-per-node).")
+    p.add_argument(
+        "--max-concurrent-jobs",
+        type=int,
+        default=32,
+        help="Launcher: maximum concurrent `srun` jobs.",
+    )
+    p.add_argument(
+        "--polling-interval",
+        type=int,
+        default=30,
+        help="Launcher: seconds between job status checks.",
+    )
+    p.add_argument(
+        "--partition", type=str, default="vision-beery", help="Slurm partition (-p)."
+    )
+    p.add_argument(
+        "--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q)."
+    )
+    p.add_argument(
+        "--account", type=str, default="vision-beery", help="Slurm account (-A)."
+    )
+    p.add_argument(
+        "--time",
+        type=str,
+        default="1-00:00:00",
+        help="Slurm time limit (-t), e.g. '7-00:00:00'.",
+    )
+    p.add_argument(
+        "--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'."
+    )
+    p.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=16,
+        help="Slurm CPUs per task (--cpus-per-task).",
+    )
+    p.add_argument(
+        "--gpus-per-node",
+        type=int,
+        default=1,
+        help="Slurm GPUs per node (--gpus-per-node).",
+    )
     return p.parse_args(argv)
 
 
@@ -161,7 +230,9 @@ def _issf_sampler_params(cfg: dict[str, Any]) -> _SamplerParams:
     )
 
 
-def _select_parametric_store(*, study_dir: Path, plan, split: str, sampler: _SamplerParams):
+def _select_parametric_store(
+    *, study_dir: Path, plan, split: str, sampler: _SamplerParams
+):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
     from movebench.features.points import select_point_store_dir
@@ -181,7 +252,14 @@ def _select_parametric_store(*, study_dir: Path, plan, split: str, sampler: _Sam
 
 
 def _norm_stats_path(*, study_dir: Path, config_hash: str, sampler_hash: str) -> Path:
-    return Path(study_dir) / "normalization" / "points" / str(config_hash) / str(sampler_hash) / "stats.json"
+    return (
+        Path(study_dir)
+        / "normalization"
+        / "points"
+        / str(config_hash)
+        / str(sampler_hash)
+        / "stats.json"
+    )
 
 
 def _compare_dir(out_dir: Path) -> Path:
@@ -232,8 +310,12 @@ def _check_prereqs(
             return False, None, f"missing_rasters_root: {rasters_root}"
 
     try:
-        _train_dir, train_m = _select_parametric_store(study_dir=study.study_dir, plan=plan, split="train", sampler=sampler)
-        _select_parametric_store(study_dir=study.study_dir, plan=plan, split="test", sampler=sampler)
+        _train_dir, train_m = _select_parametric_store(
+            study_dir=study.study_dir, plan=plan, split="train", sampler=sampler
+        )
+        _select_parametric_store(
+            study_dir=study.study_dir, plan=plan, split="test", sampler=sampler
+        )
     except (FileNotFoundError, ValueError) as e:
         return False, None, f"missing_parametric_point_store: {e}"
 
@@ -321,10 +403,20 @@ def _build_srun_cmd(
     return cmd
 
 
-def _movement_stats_from_train_store(*, study_dir: Path, plan_config_hash: str, sampler_hash: str) -> dict[str, float]:
+def _movement_stats_from_train_store(
+    *, study_dir: Path, plan_config_hash: str, sampler_hash: str
+) -> dict[str, float]:
     import torch
 
-    pt = Path(study_dir) / "features" / "points" / "train" / str(plan_config_hash) / str(sampler_hash) / "features.pt"
+    pt = (
+        Path(study_dir)
+        / "features"
+        / "points"
+        / "train"
+        / str(plan_config_hash)
+        / str(sampler_hash)
+        / "features.pt"
+    )
     d = torch.load(pt, map_location="cpu")
     sl = d["step_length_m"][:, -1].to(dtype=torch.float64)
     ta = d["turn_angle_rad"][:, -1].to(dtype=torch.float64)
@@ -365,11 +457,15 @@ def _issf_step_x(
     import torch
 
     if bool(issf_cfg.get("include_individual_id", False)):
-        raise ValueError("include_individual_id is not supported in this evaluation script")
+        raise ValueError(
+            "include_individual_id is not supported in this evaluation script"
+        )
 
     P, Cenv = int(env.shape[1]), int(env.shape[0])
     if bool(issf_cfg.get("normalize", True)):
-        env = torch.where(valid, (env - mean.view(-1, 1)) / std.view(-1, 1), torch.zeros_like(env))
+        env = torch.where(
+            valid, (env - mean.view(-1, 1)) / std.view(-1, 1), torch.zeros_like(env)
+        )
 
     move = torch.stack([sl_m, torch.log(sl_m + 1e-8), torch.cos(ta)], dim=0)
     if bool(issf_cfg.get("normalize_movement", True)):
@@ -385,15 +481,19 @@ def _issf_step_x(
         ts = pd.to_datetime(int(timestamp_ns), unit="ns", utc=True)
         doy = int(ts.dayofyear)
         hf = float(ts.hour) + float(ts.minute) / 60.0 + float(ts.second) / 3600.0
-        time = torch.tensor(
-            [
-                math.sin(2.0 * math.pi * doy / 365.25),
-                math.cos(2.0 * math.pi * doy / 365.25),
-                math.sin(2.0 * math.pi * hf / 24.0),
-                math.cos(2.0 * math.pi * hf / 24.0),
-            ],
-            dtype=torch.float32,
-        ).view(4, 1).expand(4, P)
+        time = (
+            torch.tensor(
+                [
+                    math.sin(2.0 * math.pi * doy / 365.25),
+                    math.cos(2.0 * math.pi * doy / 365.25),
+                    math.sin(2.0 * math.pi * hf / 24.0),
+                    math.cos(2.0 * math.pi * hf / 24.0),
+                ],
+                dtype=torch.float32,
+            )
+            .view(4, 1)
+            .expand(4, P)
+        )
         parts.append(time)
         valids.append(torch.ones((4, P), dtype=torch.bool))
 
@@ -435,7 +535,13 @@ def _worker(args: argparse.Namespace) -> int:
     from movebench.features.normalization import load_points_normalization_mean_std
     from movebench.models.deepssf import DeepSSF
     from movebench.models.ssf import LinearStepSelect, MLPStepSelect
-    from movebench.trajectories import SET_COL, TIME_COL, POINT_ID_COL, compute_movement_features, select_step_starts
+    from movebench.trajectories import (
+        SET_COL,
+        TIME_COL,
+        POINT_ID_COL,
+        compute_movement_features,
+        select_step_starts,
+    )
     from movebench.train import collate_deepssf, collate_moveformer
     import movebench.features.points as mb_points
 
@@ -446,8 +552,16 @@ def _worker(args: argparse.Namespace) -> int:
     cmp_dir = _compare_dir(out_dir)
     cmp_dir.mkdir(parents=True, exist_ok=True)
 
-    ckpt_root = Path(str(args.checkpoint_root)) if args.checkpoint_root else (out_dir / "checkpoints")
-    methods = {str(m["kind"]): dict(m) for m in cfg.get("methods", []) if isinstance(m, dict) and "kind" in m and "name" in m}
+    ckpt_root = (
+        Path(str(args.checkpoint_root))
+        if args.checkpoint_root
+        else (out_dir / "checkpoints")
+    )
+    methods = {
+        str(m["kind"]): dict(m)
+        for m in cfg.get("methods", [])
+        if isinstance(m, dict) and "kind" in m and "name" in m
+    }
 
     study_id = str(args.study)
     per_study_path = _study_results_path(out_dir, study_id)
@@ -481,8 +595,12 @@ def _worker(args: argparse.Namespace) -> int:
     if args.device:
         device = torch.device(str(args.device))
     else:
-        runtime = cfg.get("runtime", {}) if isinstance(cfg.get("runtime", {}), dict) else {}
-        device = torch.device(str(runtime.get("device", "cuda" if torch.cuda.is_available() else "cpu")))
+        runtime = (
+            cfg.get("runtime", {}) if isinstance(cfg.get("runtime", {}), dict) else {}
+        )
+        device = torch.device(
+            str(runtime.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+        )
     print("[compare_outputs] study:", study_id, "device:", device, flush=True)
 
     # Helper: checkpoint path based on benchmark method name.
@@ -525,8 +643,14 @@ def _worker(args: argparse.Namespace) -> int:
         return m.to(device).eval()
 
     # Load normalization + movement stats (from extracted point store).
-    mean, std = load_points_normalization_mean_std(study_dir=study.study_dir, plan=plan, sampler_hash=str(sampler_hash))
-    mv = _movement_stats_from_train_store(study_dir=study.study_dir, plan_config_hash=str(plan.config_hash), sampler_hash=str(sampler_hash))
+    mean, std = load_points_normalization_mean_std(
+        study_dir=study.study_dir, plan=plan, sampler_hash=str(sampler_hash)
+    )
+    mv = _movement_stats_from_train_store(
+        study_dir=study.study_dir,
+        plan_config_hash=str(plan.config_hash),
+        sampler_hash=str(sampler_hash),
+    )
 
     # Load available models.
     models: dict[str, torch.nn.Module] = {}
@@ -545,7 +669,9 @@ def _worker(args: argparse.Namespace) -> int:
             max_len=int(mfcfg.get("max_len", 500)),
             min_len=int(mfcfg.get("min_len", 2)),
             normalize_env=bool(mfcfg.get("normalize_env", True)),
-            require_normalization_stats=bool(mfcfg.get("require_normalization_stats", False)),
+            require_normalization_stats=bool(
+                mfcfg.get("require_normalization_stats", False)
+            ),
             num_candidates=int(s_cfg["num_candidates"]),
             random_seed=int(s_cfg["random_seed"]),
             step_multiplier=float(s_cfg["step_multiplier"]),
@@ -558,7 +684,10 @@ def _worker(args: argparse.Namespace) -> int:
             models["moveformer"] = m
 
     if not models:
-        print(f"[compare_outputs] WARNING: no checkpoints found for study={study_id!r}; skipping", flush=True)
+        print(
+            f"[compare_outputs] WARNING: no checkpoints found for study={study_id!r}; skipping",
+            flush=True,
+        )
         return 0
 
     issf_cfg = cfg["datasets"]["issf"]
@@ -576,7 +705,10 @@ def _worker(args: argparse.Namespace) -> int:
         gap_q=float(s_cfg["gap_q"]),
     )
     if len(steps) == 0:
-        print(f"[compare_outputs] WARNING: no test steps for study={study_id!r}; skipping", flush=True)
+        print(
+            f"[compare_outputs] WARNING: no test steps for study={study_id!r}; skipping",
+            flush=True,
+        )
         return 0
 
     n_steps = int(len(steps))
@@ -586,11 +718,15 @@ def _worker(args: argparse.Namespace) -> int:
     else:
         k = min(int(args.max_steps), n_steps)
         rng = np.random.default_rng(0)
-        idxs = sorted(int(x) for x in rng.choice(n_steps, size=k, replace=False).tolist())
+        idxs = sorted(
+            int(x) for x in rng.choice(n_steps, size=k, replace=False).tolist()
+        )
 
     # Truth dx/dy in meters.
     to_m = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    x0, y0 = to_m.transform(steps["start_lon"].to_numpy(), steps["start_lat"].to_numpy())
+    x0, y0 = to_m.transform(
+        steps["start_lon"].to_numpy(), steps["start_lat"].to_numpy()
+    )
     x1, y1 = to_m.transform(steps["end_lon"].to_numpy(), steps["end_lat"].to_numpy())
     truth = pd.DataFrame(
         {
@@ -642,7 +778,9 @@ def _worker(args: argparse.Namespace) -> int:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         tls = threading.local()
-        layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
+        layer_slices = {
+            layer: plan.layer_slice(layer) for layer in plan.layers_in_order
+        }
 
         def get_io():
             if not hasattr(tls, "io"):
@@ -733,7 +871,11 @@ def _worker(args: argparse.Namespace) -> int:
     # --- deepSSF surface sampling (batched) ---
     if "deepssf" in models:
         nw_cfg = int(dcfg.get("num_workers", 0) or 0)
-        nw = min(8, os.cpu_count() or 1) if nw_cfg <= 0 else min(8, os.cpu_count() or 1, nw_cfg)
+        nw = (
+            min(8, os.cpu_count() or 1)
+            if nw_cfg <= 0
+            else min(8, os.cpu_count() or 1, nw_cfg)
+        )
         loader = DataLoader(
             Subset(deepssf_test, idxs),
             batch_size=int(dcfg.get("batch_size", 32)),
@@ -748,13 +890,19 @@ def _worker(args: argparse.Namespace) -> int:
             for x1b, x2b, x3b, _yb in tqdm(loader, desc="deepssf surface"):
                 step_batch = idxs[pos : pos + int(x1b.shape[0])]
                 pos += int(x1b.shape[0])
-                out = models["deepssf"]((x1b.to(device), x2b.to(device), x3b.to(device)))
+                out = models["deepssf"](
+                    (x1b.to(device), x2b.to(device), x3b.to(device))
+                )
                 scores = out[..., 0] + out[..., 1]
                 B, H, W = scores.shape
-                prob = torch.softmax(scores.reshape(int(B), int(H) * int(W)).detach().cpu(), dim=1)
+                prob = torch.softmax(
+                    scores.reshape(int(B), int(H) * int(W)).detach().cpu(), dim=1
+                )
                 for bi, step_idx in enumerate(step_batch):
                     g = torch.Generator(device="cpu")
-                    g.manual_seed(_seed(int(args.seed), study_id, int(step_idx), "deepssf"))
+                    g.manual_seed(
+                        _seed(int(args.seed), study_id, int(step_idx), "deepssf")
+                    )
                     pix = torch.multinomial(
                         prob[int(bi)],
                         int(args.deepssf_surface_num_samples),
@@ -766,7 +914,13 @@ def _worker(args: argparse.Namespace) -> int:
                     dx = (cc - (int(W) // 2)) * px
                     dy = ((int(H) // 2) - rr) * px
                     surface_rows.extend(
-                        {"study_id": study_id, "step_idx": int(step_idx), "kind": "deepssf", "dx_m": float(ddx), "dy_m": float(ddy)}
+                        {
+                            "study_id": study_id,
+                            "step_idx": int(step_idx),
+                            "kind": "deepssf",
+                            "dx_m": float(ddx),
+                            "dy_m": float(ddy),
+                        }
                         for ddx, ddy in zip(dx, dy)
                     )
 
@@ -801,7 +955,11 @@ def _worker(args: argparse.Namespace) -> int:
 
         mfcfg = dict((cfg.get("datasets", {}) or {}).get("moveformer", {}) or {})
         nw_cfg = int(mfcfg.get("num_workers", 0) or 0)
-        nw = min(8, os.cpu_count() or 1) if nw_cfg <= 0 else min(8, os.cpu_count() or 1, nw_cfg)
+        nw = (
+            min(8, os.cpu_count() or 1)
+            if nw_cfg <= 0
+            else min(8, os.cpu_count() or 1, nw_cfg)
+        )
         loader = DataLoader(
             _MoveFormerIdx(mf_test),
             batch_size=int(mfcfg.get("batch_size", 1)),
@@ -815,7 +973,13 @@ def _worker(args: argparse.Namespace) -> int:
             for seg_ids, batch in tqdm(loader, desc="moveformer logits"):
                 features = {k: v.to(device) for k, v in batch.items()}
                 logits, _loss, _metrics = models["moveformer"](features)
-                mask = features.get("loss_mask", features["mask"]).to(torch.bool).detach().cpu().numpy()
+                mask = (
+                    features.get("loss_mask", features["mask"])
+                    .to(torch.bool)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
                 logits = logits.detach().cpu().numpy()
                 for bi, seg_id in enumerate(seg_ids):
                     start, end = mf_test._segments[int(seg_id)]
@@ -838,10 +1002,20 @@ def _worker(args: argparse.Namespace) -> int:
                     prob = prob / sprob
             g = torch.Generator(device="cpu")
             g.manual_seed(_seed(int(args.seed), study_id, int(step_idx), "moveformer"))
-            samp = torch.multinomial(prob, int(args.issf_surface_num_samples), replacement=True, generator=g).numpy()
+            samp = torch.multinomial(
+                prob, int(args.issf_surface_num_samples), replacement=True, generator=g
+            ).numpy()
             surface_rows.extend(
-                {"study_id": study_id, "step_idx": int(step_idx), "kind": "moveformer", "dx_m": float(dx), "dy_m": float(dy)}
-                for dx, dy in zip(dx_cand[int(step_idx), samp], dy_cand[int(step_idx), samp])
+                {
+                    "study_id": study_id,
+                    "step_idx": int(step_idx),
+                    "kind": "moveformer",
+                    "dx_m": float(dx),
+                    "dy_m": float(dy),
+                }
+                for dx, dy in zip(
+                    dx_cand[int(step_idx), samp], dy_cand[int(step_idx), samp]
+                )
             )
 
     # --- Baselines ---
@@ -860,17 +1034,37 @@ def _worker(args: argparse.Namespace) -> int:
         r = steps.iloc[int(step_idx)]
         b = float(r.start_bearing)
 
-        surface_rows.append({"study_id": study_id, "step_idx": int(step_idx), "kind": "baseline_nomove", "dx_m": 0.0, "dy_m": 0.0})
+        surface_rows.append(
+            {
+                "study_id": study_id,
+                "step_idx": int(step_idx),
+                "kind": "baseline_nomove",
+                "dx_m": 0.0,
+                "dy_m": 0.0,
+            }
+        )
 
         sl0 = float(sl_prev.get(int(r.point_id_start), np.nan))
         surface_rows.append(
-            {"study_id": study_id, "step_idx": int(step_idx), "kind": "baseline_constvel", "dx_m": sl0 * math.sin(b), "dy_m": sl0 * math.cos(b)}
+            {
+                "study_id": study_id,
+                "step_idx": int(step_idx),
+                "kind": "baseline_constvel",
+                "dx_m": sl0 * math.sin(b),
+                "dy_m": sl0 * math.cos(b),
+            }
         )
 
         lens, turns = mb_points._sample_pseudo_steps(rw_state, int(r.point_id_start))
         headings = b + turns
         surface_rows.extend(
-            {"study_id": study_id, "step_idx": int(step_idx), "kind": "baseline_randomwalk", "dx_m": float(dx), "dy_m": float(dy)}
+            {
+                "study_id": study_id,
+                "step_idx": int(step_idx),
+                "kind": "baseline_randomwalk",
+                "dx_m": float(dx),
+                "dy_m": float(dy),
+            }
             for dx, dy in zip(lens * np.sin(headings), lens * np.cos(headings))
         )
 
@@ -882,7 +1076,10 @@ def _worker(args: argparse.Namespace) -> int:
 
     # --- L2 summary ---
     df_surf_l2 = df_surf.merge(truth, on=["study_id", "step_idx"], how="left")
-    df_surf_l2["l2_m"] = np.hypot(df_surf_l2["dx_m"] - df_surf_l2["dx_true_m"], df_surf_l2["dy_m"] - df_surf_l2["dy_true_m"])
+    df_surf_l2["l2_m"] = np.hypot(
+        df_surf_l2["dx_m"] - df_surf_l2["dx_true_m"],
+        df_surf_l2["dy_m"] - df_surf_l2["dy_true_m"],
+    )
     l2_summary = (
         df_surf_l2.groupby("kind", sort=False)["l2_m"]
         .agg(["count", "mean", "median", "std"])
@@ -906,11 +1103,21 @@ def _worker(args: argparse.Namespace) -> int:
             n = int(len(g))
             if n == 0:
                 continue
-            y = torch.tensor([g["dx_true_m"].iloc[0], g["dy_true_m"].iloc[0]], dtype=torch.float32)
+            y = torch.tensor(
+                [g["dx_true_m"].iloc[0], g["dy_true_m"].iloc[0]], dtype=torch.float32
+            )
             x = torch.tensor(g[["dx_m", "dy_m"]].to_numpy(), dtype=torch.float32)
             term1 = torch.linalg.norm(x - y, dim=1).mean()
             term2 = torch.tensor(0.0) if n == 1 else torch.cdist(x, x).mean()
-            rows.append({"study_id": study_id, "step_idx": int(step_idx), "kind": str(kind), "n": n, "energy_l2": float(term1 - 0.5 * term2)})
+            rows.append(
+                {
+                    "study_id": study_id,
+                    "step_idx": int(step_idx),
+                    "kind": str(kind),
+                    "n": n,
+                    "energy_l2": float(term1 - 0.5 * term2),
+                }
+            )
 
         df_energy = pd.DataFrame(rows)
         energy_path = cmp_dir / f"{study_id}_energy_by_step.csv"
@@ -1021,7 +1228,11 @@ def _launcher(args: argparse.Namespace) -> int:
     if not log_dir.is_absolute():
         log_dir = (_REPO_ROOT / log_dir).resolve()
 
-    ckpt_root = Path(str(args.checkpoint_root)) if args.checkpoint_root else (out_dir / "checkpoints")
+    ckpt_root = (
+        Path(str(args.checkpoint_root))
+        if args.checkpoint_root
+        else (out_dir / "checkpoints")
+    )
     layers_config = Path(str(cfg["layers_config"]))
     if not layers_config.is_absolute():
         layers_config = (_REPO_ROOT / layers_config).resolve()
@@ -1075,7 +1286,10 @@ def _launcher(args: argparse.Namespace) -> int:
     )
     if blocked:
         for sid, reason in blocked:
-            print(f"[compare_outputs] BLOCKED study={sid} reason={reason}", file=sys.stderr)
+            print(
+                f"[compare_outputs] BLOCKED study={sid} reason={reason}",
+                file=sys.stderr,
+            )
 
     if args.dry_run:
         if queue:
@@ -1084,10 +1298,15 @@ def _launcher(args: argparse.Namespace) -> int:
                 flush=True,
             )
             for sid in queue[:10]:
-                cmd = _build_srun_cmd(args=args, study_id=sid, config_path=str(args.config), log_dir=log_dir)
+                cmd = _build_srun_cmd(
+                    args=args,
+                    study_id=sid,
+                    config_path=str(args.config),
+                    log_dir=log_dir,
+                )
                 print("[compare_outputs] ", shlex.join(cmd), flush=True)
             if len(queue) > 10:
-                print(f"[compare_outputs] ... ({len(queue)-10} more)", flush=True)
+                print(f"[compare_outputs] ... ({len(queue) - 10} more)", flush=True)
         return 2 if blocked else 0
 
     if int(args.max_concurrent_jobs) <= 0:
@@ -1101,7 +1320,10 @@ def _launcher(args: argparse.Namespace) -> int:
         try:
             _merge_outputs(out_dir=out_dir)
         except Exception as e:
-            print(f"[compare_outputs] WARNING: failed to merge outputs: {e}", file=sys.stderr)
+            print(
+                f"[compare_outputs] WARNING: failed to merge outputs: {e}",
+                file=sys.stderr,
+            )
         return 2 if blocked else 0
 
     running: dict[str, subprocess.Popen] = {}
@@ -1111,8 +1333,13 @@ def _launcher(args: argparse.Namespace) -> int:
     queue_idx = 0
 
     def _launch_one(study_id: str) -> None:
-        cmd = _build_srun_cmd(args=args, study_id=study_id, config_path=str(args.config), log_dir=log_dir)
-        print(f"[compare_outputs] Launching study={study_id}: {shlex.join(cmd)}", flush=True)
+        cmd = _build_srun_cmd(
+            args=args, study_id=study_id, config_path=str(args.config), log_dir=log_dir
+        )
+        print(
+            f"[compare_outputs] Launching study={study_id}: {shlex.join(cmd)}",
+            flush=True,
+        )
         proc = subprocess.Popen(cmd, cwd=str(_REPO_ROOT))
         running[study_id] = proc
 
@@ -1133,11 +1360,17 @@ def _launcher(args: argparse.Namespace) -> int:
                 completed += 1
                 if int(rc) != 0:
                     failures.append(sid)
-                    print(f"[compare_outputs] FAILED study={sid} exit_code={rc}", file=sys.stderr, flush=True)
+                    print(
+                        f"[compare_outputs] FAILED study={sid} exit_code={rc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     print(f"[compare_outputs] DONE study={sid}", flush=True)
 
-            while queue_idx < len(queue) and len(running) < int(args.max_concurrent_jobs):
+            while queue_idx < len(queue) and len(running) < int(
+                args.max_concurrent_jobs
+            ):
                 sid = queue[queue_idx]
                 queue_idx += 1
                 _launch_one(sid)
@@ -1148,22 +1381,42 @@ def _launcher(args: argparse.Namespace) -> int:
                 flush=True,
             )
             if running:
-                print(f"[compare_outputs] Running: {sorted(running.keys())}", flush=True)
+                print(
+                    f"[compare_outputs] Running: {sorted(running.keys())}", flush=True
+                )
     except KeyboardInterrupt:
-        print("[compare_outputs] Interrupted. Not launching new jobs.", file=sys.stderr, flush=True)
+        print(
+            "[compare_outputs] Interrupted. Not launching new jobs.",
+            file=sys.stderr,
+            flush=True,
+        )
         if running:
-            print(f"[compare_outputs] Still running: {sorted(running.keys())}", file=sys.stderr, flush=True)
+            print(
+                f"[compare_outputs] Still running: {sorted(running.keys())}",
+                file=sys.stderr,
+                flush=True,
+            )
         return 130
 
     try:
         _merge_outputs(out_dir=out_dir)
     except Exception as e:
-        print(f"[compare_outputs] WARNING: failed to merge outputs: {e}", file=sys.stderr)
+        print(
+            f"[compare_outputs] WARNING: failed to merge outputs: {e}", file=sys.stderr
+        )
 
     if failures or blocked:
-        print(f"[compare_outputs] Finished with failures={len(failures)} blocked={len(blocked)}", file=sys.stderr, flush=True)
+        print(
+            f"[compare_outputs] Finished with failures={len(failures)} blocked={len(blocked)}",
+            file=sys.stderr,
+            flush=True,
+        )
         if failures:
-            print(f"[compare_outputs] Failed studies: {sorted(failures)}", file=sys.stderr, flush=True)
+            print(
+                f"[compare_outputs] Failed studies: {sorted(failures)}",
+                file=sys.stderr,
+                flush=True,
+            )
         return 2
 
     print("[compare_outputs] All jobs completed successfully.", flush=True)

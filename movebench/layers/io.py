@@ -14,7 +14,12 @@ from movebench import paths
 from movebench.layers.constants import GEE_NODATA_SENTINEL, WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import LayerRegistry, REGISTRY
-from movebench.rasters import Raster, merge_hdf_window, read_geotiff, read_geotiff_window
+from movebench.rasters import (
+    Raster,
+    merge_hdf_window,
+    read_geotiff,
+    read_geotiff_window,
+)
 
 
 def _year_from_timestamp(ts: Any) -> int:
@@ -56,7 +61,9 @@ def _modis_grid_rows() -> list[tuple[int, int, float, float, float, float]]:
     return rows
 
 
-def _modis_tiles_for_bounds(bounds_latlon: tuple[float, float, float, float]) -> list[tuple[int, int]]:
+def _modis_tiles_for_bounds(
+    bounds_latlon: tuple[float, float, float, float],
+) -> list[tuple[int, int]]:
     lon_min, lat_min, lon_max, lat_max = bounds_latlon
     out: list[tuple[int, int]] = []
     for h, v, lo0, lo1, la0, la1 in _modis_grid_rows():
@@ -95,7 +102,9 @@ class LayerIO:
     It does not download anything; it only reads from disk and local datasets.
     """
 
-    def __init__(self, study_dir: Path, plan: LayerPlan, registry: LayerRegistry = REGISTRY):
+    def __init__(
+        self, study_dir: Path, plan: LayerPlan, registry: LayerRegistry = REGISTRY
+    ):
         self.study_dir = Path(study_dir)
         self.plan = plan
         self.registry = registry
@@ -141,26 +150,39 @@ class LayerIO:
 
         if spec.source == "gee_chip":
             if point_id is None:
-                raise ValueError(f"point_id is required to load gee_chip layer {layer!r}")
+                raise ValueError(
+                    f"point_id is required to load gee_chip layer {layer!r}"
+                )
             return self._load_gee_chip_layer(layer, point_id)
 
         if spec.source == "gee_tile":
             if bounds_latlon is None:
-                raise ValueError(f"bounds_latlon is required to load gee_tile layer {layer!r}")
+                raise ValueError(
+                    f"bounds_latlon is required to load gee_tile layer {layer!r}"
+                )
             return self._load_gee_tile_layer(layer, bounds_latlon, timestamp=timestamp)
 
         if spec.source == "local_tiff":
             if bounds_latlon is None:
-                raise ValueError(f"bounds_latlon is required to load local_tiff layer {layer!r}")
+                raise ValueError(
+                    f"bounds_latlon is required to load local_tiff layer {layer!r}"
+                )
             return self._load_local_tiff_layer(layer, bounds_latlon, timestamp)
 
         if spec.source == "local_hdf":
             if bounds_latlon is None:
-                raise ValueError(f"bounds_latlon is required to load local_hdf layer {layer!r}")
+                raise ValueError(
+                    f"bounds_latlon is required to load local_hdf layer {layer!r}"
+                )
             return self._load_local_hdf_layer(layer, bounds_latlon, timestamp)
 
         if spec.source == "derived":
-            return self._load_derived_layer(layer, point_id=point_id, bounds_latlon=bounds_latlon, timestamp=timestamp)
+            return self._load_derived_layer(
+                layer,
+                point_id=point_id,
+                bounds_latlon=bounds_latlon,
+                timestamp=timestamp,
+            )
 
         raise ValueError(f"Unknown LayerSource for {layer!r}: {spec.source!r}")
 
@@ -185,7 +207,12 @@ class LayerIO:
 
         spec = self.registry.get(layer)
         if spec.source != "derived":
-            r = self.load_layer(layer, point_id=point_id, bounds_latlon=bounds_latlon, timestamp=timestamp)
+            r = self.load_layer(
+                layer,
+                point_id=point_id,
+                bounds_latlon=bounds_latlon,
+                timestamp=timestamp,
+            )
             cache[layer] = r
             return r
 
@@ -207,11 +234,15 @@ class LayerIO:
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)
         if fn is None:
-            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived")
+            raise ValueError(
+                f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived"
+            )
 
         arr = fn(**parents)
         if arr.ndim != 3:
-            raise ValueError(f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}")
+            raise ValueError(
+                f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}"
+            )
 
         base = parents[spec.derived_from[0]]
         r = Raster(
@@ -232,7 +263,9 @@ class LayerIO:
     def _chip_group_for_layer(self, layer: str) -> str:
         group = self.plan.chip_group_for_layer(layer)
         if group is None:
-            raise ValueError(f"gee_chip layer {layer!r} is not listed in any chip group")
+            raise ValueError(
+                f"gee_chip layer {layer!r} is not listed in any chip group"
+            )
         return group
 
     def _chip_group_band_ids(self, chip_group: str) -> list[str]:
@@ -253,7 +286,7 @@ class LayerIO:
 
         chip_path = self._chip_path(chip_group, point_id)
         r = read_geotiff(chip_path)
-        
+
         # GEE downloads use a numeric sentinel for masked pixels. Convert it to NaN
         # immediately so downstream valid masking and derived math are correct.
         arr = r.array.astype(np.float32, copy=False)
@@ -305,7 +338,9 @@ class LayerIO:
             self._tile_index_years_cache[layer] = years
         return years
 
-    def _tile_index(self, layer: str, *, timestamp: Any | None = None) -> dict[str, Any]:
+    def _tile_index(
+        self, layer: str, *, timestamp: Any | None = None
+    ) -> dict[str, Any]:
         spec = self.registry.get(layer)
         resolved_year: int | None = None
         index_path = self._tile_dir(layer) / "index.json"
@@ -332,12 +367,16 @@ class LayerIO:
                     f"Tile index not found for annual gee_tile layer={layer!r}: {index_path}. "
                     f"Expected {tile_dir}/index_<year>.json; run downloads for this study."
                 )
-            raise FileNotFoundError(f"Tile index.json not found for layer={layer!r}: {index_path}")
+            raise FileNotFoundError(
+                f"Tile index.json not found for layer={layer!r}: {index_path}"
+            )
 
         with open(index_path, "r") as f:
             d = json.load(f)
         if not isinstance(d, dict) or "tiles" not in d:
-            raise ValueError(f"Invalid tile index.json for layer {layer!r}: {index_path}")
+            raise ValueError(
+                f"Invalid tile index.json for layer {layer!r}: {index_path}"
+            )
         self._tile_index_cache[cache_key] = d
         return d
 
@@ -403,14 +442,16 @@ class LayerIO:
 
                 datasets = [rasterio.open(p) for p in matches]
                 try:
-                    mosaic, out_transform = merge(datasets, bounds=bounds_latlon, nodata=datasets[0].nodata)
+                    mosaic, out_transform = merge(
+                        datasets, bounds=bounds_latlon, nodata=datasets[0].nodata
+                    )
                     base = Raster(
                         array=mosaic,
                         transform=out_transform,
                         crs=datasets[0].crs,
                         nodata=datasets[0].nodata,
                         bounds=bounds_latlon,
-                        band_ids=[f"band_{i+1}" for i in range(mosaic.shape[0])],
+                        band_ids=[f"band_{i + 1}" for i in range(mosaic.shape[0])],
                     )
                 finally:
                     for ds in datasets:
@@ -420,7 +461,9 @@ class LayerIO:
                 from rasterio.errors import RasterioIOError
             except Exception:
                 RasterioIOError = None  # type: ignore[assignment]
-            if isinstance(exc, FileNotFoundError) or (RasterioIOError is not None and isinstance(exc, RasterioIOError)):
+            if isinstance(exc, FileNotFoundError) or (
+                RasterioIOError is not None and isinstance(exc, RasterioIOError)
+            ):
                 _warn_missing("io_error")
                 return _missing_raster()
             raise
@@ -439,7 +482,12 @@ class LayerIO:
             band_ids=band_ids,
         )
 
-    def _load_local_tiff_layer(self, layer: str, bounds_latlon: tuple[float, float, float, float], timestamp: Any | None) -> Raster:
+    def _load_local_tiff_layer(
+        self,
+        layer: str,
+        bounds_latlon: tuple[float, float, float, float],
+        timestamp: Any | None,
+    ) -> Raster:
         spec = self.registry.get(layer)
         if not spec.path_pattern:
             raise ValueError(f"local_tiff layer {layer!r} missing spec.path_pattern")
@@ -454,7 +502,11 @@ class LayerIO:
 
             base = rasters[0]
             for r in rasters[1:]:
-                if r.array.shape[1:] != base.array.shape[1:] or r.transform != base.transform or r.crs != base.crs:
+                if (
+                    r.array.shape[1:] != base.array.shape[1:]
+                    or r.transform != base.transform
+                    or r.crs != base.crs
+                ):
                     raise ValueError(f"Bioclim bands did not align for layer {layer!r}")
 
             arr = np.concatenate([r.array for r in rasters], axis=0)
@@ -467,7 +519,10 @@ class LayerIO:
                 band_ids=[f"{layer}.{b}" for b in spec.bands],
             )
 
-        year = _clamp_year(_year_from_timestamp(timestamp) if "{year}" in spec.path_pattern else 0, spec.year_bounds)
+        year = _clamp_year(
+            _year_from_timestamp(timestamp) if "{year}" in spec.path_pattern else 0,
+            spec.year_bounds,
+        )
         p = Path(spec.path_pattern.format(**cfg, year=year))
         r = read_geotiff_window(p, bounds_latlon)
         return Raster(
@@ -503,7 +558,12 @@ class LayerIO:
         self._hdf_index_cache[layer] = idx
         return idx
 
-    def _load_local_hdf_layer(self, layer: str, bounds_latlon: tuple[float, float, float, float], timestamp: Any | None) -> Raster:
+    def _load_local_hdf_layer(
+        self,
+        layer: str,
+        bounds_latlon: tuple[float, float, float, float],
+        timestamp: Any | None,
+    ) -> Raster:
         spec = self.registry.get(layer)
         if not spec.hdf_path_suffix:
             raise ValueError(f"local_hdf layer {layer!r} missing spec.hdf_path_suffix")
@@ -538,7 +598,9 @@ class LayerIO:
                     stacklevel=2,
                 )
                 continue
-            subdataset_paths.append(f"HDF4_EOS:EOS_GRID:{hdf_path}{spec.hdf_path_suffix}")
+            subdataset_paths.append(
+                f"HDF4_EOS:EOS_GRID:{hdf_path}{spec.hdf_path_suffix}"
+            )
 
         if not subdataset_paths:
             warnings.warn(
@@ -585,11 +647,15 @@ class LayerIO:
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)
         if fn is None:
-            raise ValueError(f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived")
+            raise ValueError(
+                f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived"
+            )
 
         arr = fn(**parents)
         if arr.ndim != 3:
-            raise ValueError(f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}")
+            raise ValueError(
+                f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}"
+            )
 
         base = parents[spec.derived_from[0]]
         return Raster(

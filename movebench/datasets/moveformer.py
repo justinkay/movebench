@@ -106,7 +106,9 @@ def _select_step_starts_with_targets(
     starts = starts.reset_index(drop=True)
     ends = ends.reset_index(drop=True)
     if len(starts) != len(ends):
-        raise RuntimeError(f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})")
+        raise RuntimeError(
+            f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})"
+        )
 
     out = _StepStarts(
         point_id_start=starts[POINT_ID_COL].to_numpy(dtype=np.int64, copy=False),
@@ -124,7 +126,10 @@ def _select_step_starts_with_targets(
     )
 
     finite = np.isfinite(
-        np.stack([out.start_lon, out.start_lat, out.start_bearing, out.end_lon, out.end_lat], axis=1)
+        np.stack(
+            [out.start_lon, out.start_lat, out.start_bearing, out.end_lon, out.end_lat],
+            axis=1,
+        )
     ).all(axis=1)
     if not finite.all():
         keep = finite
@@ -199,7 +204,9 @@ class MoveFormerPointStoreDataset(Dataset):
         self.manifest = m
         self.plan = plan
 
-        self.env, self.valid = load_point_store_bands(store_dir=store_dir, manifest=m, band_ids=requested_band_ids)
+        self.env, self.valid = load_point_store_bands(
+            store_dir=store_dir, manifest=m, band_ids=requested_band_ids
+        )
         shared = load_point_store_shared(store_dir)
         self.step_length_m = shared["step_length_m"]
         self.turn_angle_rad = shared["turn_angle_rad"]
@@ -209,16 +216,22 @@ class MoveFormerPointStoreDataset(Dataset):
         if self.env.ndim != 3:
             raise ValueError(f"Expected env shape (N,C,P); got {tuple(self.env.shape)}")
         if tuple(self.env.shape) != tuple(self.valid.shape):
-            raise ValueError(f"env and valid must have identical shapes; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}")
+            raise ValueError(
+                f"env and valid must have identical shapes; got env={tuple(self.env.shape)} valid={tuple(self.valid.shape)}"
+            )
         if int(self.env.shape[1]) != int(self.plan.num_channels()):
-            raise ValueError(f"env.shape[1] ({self.env.shape[1]}) must match plan.num_channels() ({self.plan.num_channels()})")
+            raise ValueError(
+                f"env.shape[1] ({self.env.shape[1]}) must match plan.num_channels() ({self.plan.num_channels()})"
+            )
         if self.step_length_m.shape[:2] != self.env.shape[:1] + self.env.shape[2:]:
             raise ValueError(
                 "Expected step_length_m shape (N,P) matching env; "
                 f"got step_length_m={tuple(self.step_length_m.shape)} env={tuple(self.env.shape)}"
             )
 
-        idxs, view_plan = _subset_plan_env_channels(self.plan, subset_env_layers=None, subset_band_ids=subset_band_ids)
+        idxs, view_plan = _subset_plan_env_channels(
+            self.plan, subset_env_layers=None, subset_band_ids=subset_band_ids
+        )
         if len(idxs) != int(self.plan.num_channels()):
             self.env = self.env[:, idxs, :]
             self.valid = self.valid[:, idxs, :]
@@ -226,10 +239,13 @@ class MoveFormerPointStoreDataset(Dataset):
 
         self.num_candidates_total = int(self.env.shape[2])
         if self.num_candidates_total <= 1:
-            raise ValueError(f"Expected P>=2 candidates; got P={self.num_candidates_total}")
+            raise ValueError(
+                f"Expected P>=2 candidates; got P={self.num_candidates_total}"
+            )
         self.cov_dim = int(self.env.shape[1])
         self._cand_perm = torch.tensor(
-            [self.num_candidates_total - 1] + list(range(self.num_candidates_total - 1)),
+            [self.num_candidates_total - 1]
+            + list(range(self.num_candidates_total - 1)),
             dtype=torch.long,
         )
 
@@ -286,7 +302,9 @@ class MoveFormerPointStoreDataset(Dataset):
         df = load_trajectories_csv(str(self.trajectories_path))
         df_split = df[df[SET_COL] == self.split].copy()
         if len(df_split) == 0:
-            raise ValueError(f"No trajectories found for split={self.split!r} in {self.trajectories_path}")
+            raise ValueError(
+                f"No trajectories found for split={self.split!r} in {self.trajectories_path}"
+            )
 
         # Recompute movement features with the same params used by point-store extraction.
         sampler = self.manifest.sampler
@@ -300,7 +318,9 @@ class MoveFormerPointStoreDataset(Dataset):
 
         n_steps = int(self.env.shape[0])
         if int(len(self._starts.point_id_start)) != n_steps:
-            raise ValueError(f"Step-start count mismatch: point_store={n_steps} trajectories={len(self._starts.point_id_start)}")
+            raise ValueError(
+                f"Step-start count mismatch: point_store={n_steps} trajectories={len(self._starts.point_id_start)}"
+            )
 
         # Assert alignment by point_id_start + timestamp.
         pid_store = self.point_id_start.numpy()
@@ -334,7 +354,9 @@ class MoveFormerPointStoreDataset(Dataset):
         i = 0
         while i < n_steps:
             j = i + 1
-            while j < n_steps and indiv[j] == indiv[i] and int(burst[j]) == int(burst[i]):
+            while (
+                j < n_steps and indiv[j] == indiv[i] and int(burst[j]) == int(burst[i])
+            ):
                 j += 1
 
             group_len = j - i
@@ -346,9 +368,13 @@ class MoveFormerPointStoreDataset(Dataset):
             i = j
 
         if not self._segments:
-            raise ValueError(f"No segments found for split={self.split!r} (min_len={self.min_len}, max_len={self.max_len})")
+            raise ValueError(
+                f"No segments found for split={self.split!r} (min_len={self.min_len}, max_len={self.max_len})"
+            )
 
-        from movebench.lib.moveformer.geo_transformers.trajectory import SimpleTrajectoryProcessor
+        from movebench.lib.moveformer.geo_transformers.trajectory import (
+            SimpleTrajectoryProcessor,
+        )
 
         self._processor = SimpleTrajectoryProcessor(
             use_target=True,
@@ -363,14 +389,19 @@ class MoveFormerPointStoreDataset(Dataset):
         # Light sanity check: reconstructed true candidate matches the observed endpoint.
         n_check = min(25, n_steps)
         if n_check > 0:
-            lons_cand, lats_cand = self._reconstruct_candidates(0, n_check)  # (n_check,P)
+            lons_cand, lats_cand = self._reconstruct_candidates(
+                0, n_check
+            )  # (n_check,P)
             lons_true = lons_cand[:, 0]
             lats_true = lats_cand[:, 0]
             max_err = float(
                 np.max(
                     np.abs(
                         np.stack(
-                            [lons_true - self._starts.end_lon[:n_check], lats_true - self._starts.end_lat[:n_check]],
+                            [
+                                lons_true - self._starts.end_lon[:n_check],
+                                lats_true - self._starts.end_lat[:n_check],
+                            ],
                             axis=1,
                         )
                     )
@@ -385,7 +416,9 @@ class MoveFormerPointStoreDataset(Dataset):
     def __len__(self) -> int:
         return len(self._segments)
 
-    def _reconstruct_candidates(self, start: int, end: int) -> tuple[np.ndarray, np.ndarray]:
+    def _reconstruct_candidates(
+        self, start: int, end: int
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Return (lons, lats) for candidates with MoveFormer ordering (true is index 0)."""
         to_3857, to_4326 = _crs_transformers()
 
@@ -393,8 +426,12 @@ class MoveFormerPointStoreDataset(Dataset):
         start_lat = self._starts.start_lat[start:end]
         start_bearing = self._starts.start_bearing[start:end]
 
-        sl = self.step_length_m[start:end].numpy().astype(np.float64, copy=False)  # (L,P)
-        ta = self.turn_angle_rad[start:end].numpy().astype(np.float64, copy=False)  # (L,P)
+        sl = (
+            self.step_length_m[start:end].numpy().astype(np.float64, copy=False)
+        )  # (L,P)
+        ta = (
+            self.turn_angle_rad[start:end].numpy().astype(np.float64, copy=False)
+        )  # (L,P)
 
         x0, y0 = to_3857.transform(start_lon, start_lat)
         x0 = np.asarray(x0, dtype=np.float64)
@@ -449,9 +486,13 @@ class MoveFormerPointStoreDataset(Dataset):
         env = env.index_select(dim=2, index=self._cand_perm)
         valid = valid.index_select(dim=2, index=self._cand_perm)
 
-        cov_cand = env.permute(0, 2, 1).contiguous().numpy().astype(np.float32, copy=False)  # (L,P,C)
+        cov_cand = (
+            env.permute(0, 2, 1).contiguous().numpy().astype(np.float32, copy=False)
+        )  # (L,P,C)
         cov_v = valid.permute(0, 2, 1).contiguous().numpy()  # (L,P,C)
-        cov_cand = np.where(cov_v, cov_cand, np.float32(np.nan)).astype(np.float32, copy=False)
+        cov_cand = np.where(cov_v, cov_cand, np.float32(np.nan)).astype(
+            np.float32, copy=False
+        )
 
         # Current-location env is previous step's target within the same burst.
         global_idxs = np.arange(start, end, dtype=np.int64)
@@ -474,9 +515,13 @@ class MoveFormerPointStoreDataset(Dataset):
                 assert self._std is not None
                 cov_prev = (cov_prev - self._mean.view(1, -1)) / self._std.view(1, -1)
 
-            cov_prev = cov_prev.contiguous().numpy().astype(np.float32, copy=False)  # (K,C)
+            cov_prev = (
+                cov_prev.contiguous().numpy().astype(np.float32, copy=False)
+            )  # (K,C)
             cov_prev_v = valid_prev[:, :, true_idx].contiguous().numpy()  # (K,C)
-            cov_prev = np.where(cov_prev_v, cov_prev, np.float32(np.nan)).astype(np.float32, copy=False)
+            cov_prev = np.where(cov_prev_v, cov_prev, np.float32(np.nan)).astype(
+                np.float32, copy=False
+            )
 
             cov_cur[has_prev] = cov_prev
 

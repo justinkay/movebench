@@ -34,7 +34,9 @@ def _time_features_notebook_order(timestamps: pd.Series) -> torch.Tensor:
     ts = pd.to_datetime(timestamps, utc=True, errors="coerce")
     if ts.isna().any():
         bad = int(ts.isna().sum())
-        raise ValueError(f"Found {bad} NaT timestamps in step starts; cannot build deepSSF time features")
+        raise ValueError(
+            f"Found {bad} NaT timestamps in step starts; cannot build deepSSF time features"
+        )
 
     doy = ts.dt.dayofyear.to_numpy(dtype=np.float64)
     hour = ts.dt.hour.to_numpy(dtype=np.float64)
@@ -48,7 +50,9 @@ def _time_features_notebook_order(timestamps: pd.Series) -> torch.Tensor:
     sin_tod = np.sin(2.0 * math.pi * hour_frac / 24.0)
     cos_tod = np.cos(2.0 * math.pi * hour_frac / 24.0)
 
-    feats = np.stack([sin_tod, cos_tod, sin_doy, cos_doy], axis=1).astype(np.float32, copy=False)
+    feats = np.stack([sin_tod, cos_tod, sin_doy, cos_doy], axis=1).astype(
+        np.float32, copy=False
+    )
     return torch.from_numpy(feats)
 
 
@@ -63,15 +67,21 @@ class DeepSSFDataset(Dataset):
         steps = chips.step_starts_df
         for col in ("timestamp", "start_bearing"):
             if col not in steps.columns:
-                raise ValueError(f"ChipDataset.step_starts_df missing required column: {col!r}")
+                raise ValueError(
+                    f"ChipDataset.step_starts_df missing required column: {col!r}"
+                )
 
         bearing_north0 = steps["start_bearing"].to_numpy(dtype=np.float64, copy=False)
-        bearing_east0 = _bearing_movebench_to_deepssf(bearing_north0).astype(np.float32, copy=False)
+        bearing_east0 = _bearing_movebench_to_deepssf(bearing_north0).astype(
+            np.float32, copy=False
+        )
         self._bearing = torch.from_numpy(bearing_east0)  # (N,)
 
         self._time = _time_features_notebook_order(steps["timestamp"])  # (N,4)
 
-        if int(len(self._bearing)) != int(len(self.chips)) or int(self._time.shape[0]) != int(len(self.chips)):
+        if int(len(self._bearing)) != int(len(self.chips)) or int(
+            self._time.shape[0]
+        ) != int(len(self.chips)):
             raise RuntimeError(
                 "Internal error: ChipDataset length does not match step_starts_df length "
                 f"(chips={len(self.chips)} steps={len(steps)})"
@@ -80,7 +90,9 @@ class DeepSSFDataset(Dataset):
     def __len__(self) -> int:
         return len(self.chips)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         spatial, _valid, target, _xfm, _crs = self.chips[int(idx)]
         spatial = spatial.to(dtype=torch.float32)
         target = target.to(dtype=torch.float32)

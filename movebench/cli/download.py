@@ -23,9 +23,13 @@ def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
         if isinstance(years, dict):
             for year_stats in years.values():
                 if isinstance(year_stats, dict):
-                    total += int(year_stats.get("downloaded", 0)) + int(year_stats.get("existing", 0))
+                    total += int(year_stats.get("downloaded", 0)) + int(
+                        year_stats.get("existing", 0)
+                    )
             continue
-        total += int(layer_stats.get("downloaded", 0)) + int(layer_stats.get("existing", 0))
+        total += int(layer_stats.get("downloaded", 0)) + int(
+            layer_stats.get("existing", 0)
+        )
     return total
 
 
@@ -36,7 +40,9 @@ def _format_study_download_summary(name: str, result: dict[str, Any] | None) -> 
         tile_present = 0
     else:
         chip_stats = result.get("chips")
-        failed += int(chip_stats.get("failed", 0)) if isinstance(chip_stats, dict) else 0
+        failed += (
+            int(chip_stats.get("failed", 0)) if isinstance(chip_stats, dict) else 0
+        )
         chip_present = (
             int(chip_stats.get("downloaded", 0)) + int(chip_stats.get("existing", 0))
             if isinstance(chip_stats, dict)
@@ -100,7 +106,9 @@ def _study_failure_details(result: dict[str, Any] | None) -> list[str]:
             with open(Path(index_path), "r") as f:
                 payload = json.load(f)
         except Exception as e:
-            details.append(f"{label}: {int(stats.get('failed', 0))} tile failures ({e})")
+            details.append(
+                f"{label}: {int(stats.get('failed', 0))} tile failures ({e})"
+            )
             return
 
         reasons: list[str] = []
@@ -127,7 +135,9 @@ def _study_failure_details(result: dict[str, Any] | None) -> list[str]:
         else:
             details.append(f"{label}: {int(stats.get('failed', 0))} tile failures")
 
-    for layer_name, layer_stats in sorted(tile_stats.items(), key=lambda kv: str(kv[0])):
+    for layer_name, layer_stats in sorted(
+        tile_stats.items(), key=lambda kv: str(kv[0])
+    ):
         if not isinstance(layer_stats, dict):
             continue
         years = layer_stats.get("years")
@@ -200,7 +210,9 @@ def run(args: argparse.Namespace) -> int:
     print(f"Studies to download: {len(names)}")
     if args.config:
         print(f"Config: {args.config}")
-        print(f"Rasters hash: {REGISTRY.resolve(load_layers_config(args.config)).rasters_hash}")
+        print(
+            f"Rasters hash: {REGISTRY.resolve(load_layers_config(args.config)).rasters_hash}"
+        )
     if args.splits:
         print(f"Splits: {args.splits}")
     print(f"Workers: {args.n_workers}")

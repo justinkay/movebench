@@ -67,6 +67,7 @@ os.makedirs(PNG_DIR, exist_ok=True)
 # Streamlit rerun helper (compatible with older/newer versions)
 # -------------------------------------------------------------------
 
+
 def _rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -77,6 +78,7 @@ def _rerun():
 # -------------------------------------------------------------------
 # Helper functions: review list I/O
 # -------------------------------------------------------------------
+
 
 def _read_list(path: str) -> set:
     """Read a newline-separated list of filenames (basenames)."""
@@ -105,14 +107,14 @@ def get_remaining_files():
     ok_set, not_ok_set = get_review_status()
     reviewed_basenames = ok_set | not_ok_set
 
-    remaining = [f for f in all_files
-                 if os.path.basename(f) not in reviewed_basenames]
+    remaining = [f for f in all_files if os.path.basename(f) not in reviewed_basenames]
     return remaining, ok_set, not_ok_set
 
 
 # -------------------------------------------------------------------
 # Helper functions: bad individuals I/O
 # -------------------------------------------------------------------
+
 
 def _read_bad_individuals() -> set:
     """
@@ -147,6 +149,7 @@ def _append_bad_individual(filename_basename: str, individual_id: str) -> None:
 # Helper functions: split overrides I/O
 # -------------------------------------------------------------------
 
+
 def _read_split_overrides() -> dict:
     """
     Read split overrides from SPLIT_OVERRIDES_PATH.
@@ -176,7 +179,9 @@ def _read_split_overrides() -> dict:
     return overrides
 
 
-def _append_split_override(filename_basename: str, individual_id: str, split_date) -> None:
+def _append_split_override(
+    filename_basename: str, individual_id: str, split_date
+) -> None:
     """
     Append one split override entry to SPLIT_OVERRIDES_PATH.
 
@@ -190,12 +195,13 @@ def _append_split_override(filename_basename: str, individual_id: str, split_dat
 # Core logic: processing & plotting from a DataFrame
 # -------------------------------------------------------------------
 
+
 def build_figure_from_df(
     df: pd.DataFrame,
     basename: str,
     study_name: str,
     save_path=None,
-    split_times= None,
+    split_times=None,
 ):
     """
     Given a DataFrame for a single CSV, run the full processing pipeline and return:
@@ -206,189 +212,200 @@ def build_figure_from_df(
     split_times: optional dict mapping individual_id -> pd.Timestamp
                  for train/test split. If None, use mid-time per individual.
     """
-    if 'timestamp' not in df.columns:
+    if "timestamp" not in df.columns:
         raise RuntimeError("Expected a 'timestamp' column in the data.")
 
     df = df.copy()
     # df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['timestamp'] = pd.to_datetime(
-        df['timestamp'],
-            format='mixed',   # let pandas infer per element
-            errors='coerce'   # bad parses become NaT instead of raising
-        )
-    df = df[df['timestamp'].notna()].copy()
-    df['individual_local_identifier'] = df['individual_local_identifier'].astype(str)
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        format="mixed",  # let pandas infer per element
+        errors="coerce",  # bad parses become NaT instead of raising
+    )
+    df = df[df["timestamp"].notna()].copy()
+    df["individual_local_identifier"] = df["individual_local_identifier"].astype(str)
 
-    duration = df['timestamp'].max() - df['timestamp'].min()
-    num_individuals = df['individual_local_identifier'].nunique()
+    duration = df["timestamp"].max() - df["timestamp"].min()
+    num_individuals = df["individual_local_identifier"].nunique()
     num_points = len(df)
 
-    if 'individual_taxon_canonical_name' in df.columns:
-        species = df['individual_taxon_canonical_name'].dropna().unique()
+    if "individual_taxon_canonical_name" in df.columns:
+        species = df["individual_taxon_canonical_name"].dropna().unique()
         species_str = ", ".join(map(str, species))
     else:
         species_str = "N/A (column 'individual_taxon_canonical_name' missing)"
 
     metadata = {
-        "Study ID": basename.split('_')[0],
+        "Study ID": basename.split("_")[0],
         "Filename": basename,
         "Species": species_str,
         "Number of individuals": f"{num_individuals:,}",
         "Number of data points": f"{num_points:,}",
-        "Average points per individual": f"{num_points / num_individuals:.1f}" if num_individuals > 0 else "N/A",
+        "Average points per individual": f"{num_points / num_individuals:.1f}"
+        if num_individuals > 0
+        else "N/A",
         "Time range": f"{df['timestamp'].min()} to {df['timestamp'].max()}",
         "Duration (days)": duration.days,
     }
 
     # For the UI: counts
-    individual_counts = df['individual_local_identifier'].value_counts().sort_index()
+    individual_counts = df["individual_local_identifier"].value_counts().sort_index()
 
     # -------------------------------------------------------------------
     # 1) Compute and filter by time gap (per-individual quantile)
     # -------------------------------------------------------------------
 
-    df = df.sort_values(['individual_local_identifier', 'timestamp'])
-    df['time_since_last'] = df.groupby('individual_local_identifier')['timestamp'].diff()
+    df = df.sort_values(["individual_local_identifier", "timestamp"])
+    df["time_since_last"] = df.groupby("individual_local_identifier")[
+        "timestamp"
+    ].diff()
 
     gap_q = 0.999  # very high quantile for time gap per individual
-    per_indiv_cutoff = (
-        df.groupby('individual_local_identifier')['time_since_last']
-        .transform(lambda s: s.dropna().quantile(gap_q))
-    )
+    per_indiv_cutoff = df.groupby("individual_local_identifier")[
+        "time_since_last"
+    ].transform(lambda s: s.dropna().quantile(gap_q))
 
     df_filtered = df[
-        df['time_since_last'].notna() &
-        (df['time_since_last'] <= per_indiv_cutoff)
+        df["time_since_last"].notna() & (df["time_since_last"] <= per_indiv_cutoff)
     ].copy()
 
     # -------------------------------------------------------------------
     # 2) Compute and filter by step length (Haversine)
     # -------------------------------------------------------------------
 
-    zeros = df_filtered['location_lat'].values < 1.0
+    zeros = df_filtered["location_lat"].values < 1.0
     if zeros.any():
-        print('Possible 0 latitude problem with', df_filtered['individual_local_identifier'].values[zeros])
+        print(
+            "Possible 0 latitude problem with",
+            df_filtered["individual_local_identifier"].values[zeros],
+        )
 
-    lat_rad = np.radians(df_filtered['location_lat'])
-    lon_rad = np.radians(df_filtered['location_long'])
+    lat_rad = np.radians(df_filtered["location_lat"])
+    lon_rad = np.radians(df_filtered["location_long"])
 
-    lat_prev = lat_rad.groupby(df_filtered['individual_local_identifier']).shift()
-    lon_prev = lon_rad.groupby(df_filtered['individual_local_identifier']).shift()
+    lat_prev = lat_rad.groupby(df_filtered["individual_local_identifier"]).shift()
+    lon_prev = lon_rad.groupby(df_filtered["individual_local_identifier"]).shift()
 
     dlat = lat_rad - lat_prev
     dlon = lon_rad - lon_prev
 
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat_prev) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
+    a = (
+        np.sin(dlat / 2) ** 2
+        + np.cos(lat_prev) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
+    )
     c = 2 * np.arcsin(np.sqrt(a))
 
     R = 6371000  # meters
-    df_filtered['step_length'] = R * c
+    df_filtered["step_length"] = R * c
 
     step_q = 0.95
     step_multiplier = 2
 
-    q_vals = df_filtered.groupby('individual_local_identifier')['step_length'] \
-        .transform(lambda s: s.quantile(step_q))
+    q_vals = df_filtered.groupby("individual_local_identifier")[
+        "step_length"
+    ].transform(lambda s: s.quantile(step_q))
 
-    df_filtered2 = df_filtered[df_filtered['step_length'] <= step_multiplier * q_vals].copy()
+    df_filtered2 = df_filtered[
+        df_filtered["step_length"] <= step_multiplier * q_vals
+    ].copy()
 
     # -------------------------------------------------------------------
     # 3) Turn angles
     # -------------------------------------------------------------------
 
     df_filtered3 = df_filtered2.sort_values(
-        ['individual_local_identifier', 'timestamp']
+        ["individual_local_identifier", "timestamp"]
     ).copy()
 
-    lat_rad2 = np.radians(df_filtered3['location_lat'])
-    lon_rad2 = np.radians(df_filtered3['location_long'])
+    lat_rad2 = np.radians(df_filtered3["location_lat"])
+    lon_rad2 = np.radians(df_filtered3["location_long"])
 
-    lat_prev2 = lat_rad2.groupby(df_filtered3['individual_local_identifier']).shift()
-    lon_prev2 = lon_rad2.groupby(df_filtered3['individual_local_identifier']).shift()
+    lat_prev2 = lat_rad2.groupby(df_filtered3["individual_local_identifier"]).shift()
+    lon_prev2 = lon_rad2.groupby(df_filtered3["individual_local_identifier"]).shift()
 
     dlon2 = lon_rad2 - lon_prev2
     y = np.sin(dlon2) * np.cos(lat_rad2)
-    x = (np.cos(lat_prev2) * np.sin(lat_rad2) -
-         np.sin(lat_prev2) * np.cos(lat_rad2) * np.cos(dlon2))
+    x = np.cos(lat_prev2) * np.sin(lat_rad2) - np.sin(lat_prev2) * np.cos(
+        lat_rad2
+    ) * np.cos(dlon2)
 
     bearing = np.arctan2(y, x)
-    bearing_prev = bearing.groupby(df_filtered3['individual_local_identifier']).shift()
+    bearing_prev = bearing.groupby(df_filtered3["individual_local_identifier"]).shift()
     raw_turn = bearing - bearing_prev
 
-    df_filtered3['turn_angle'] = np.arctan2(
-        np.sin(raw_turn),
-        np.cos(raw_turn)
-    )
+    df_filtered3["turn_angle"] = np.arctan2(np.sin(raw_turn), np.cos(raw_turn))
 
-    df_filtered3 = df_filtered3[df_filtered3['turn_angle'].notna()].copy()
+    df_filtered3 = df_filtered3[df_filtered3["turn_angle"].notna()].copy()
 
     # -------------------------------------------------------------------
     # Prepare common pieces for plots
     # -------------------------------------------------------------------
 
-    step_lengths_filtered = df_filtered3['step_length']
-    turn_angles_filtered = df_filtered3['turn_angle']
+    step_lengths_filtered = df_filtered3["step_length"]
+    turn_angles_filtered = df_filtered3["turn_angle"]
 
     # Timeline prep
     df_timeline = df_filtered2.copy()
-    df_timeline = df_timeline.sort_values(['individual_local_identifier', 'timestamp'])
+    df_timeline = df_timeline.sort_values(["individual_local_identifier", "timestamp"])
     gap_threshold = pd.Timedelta(days=3)
 
-    span_time = (
-        df_timeline.groupby('individual_local_identifier')['timestamp']
-        .agg(start='min', end='max')
+    span_time = df_timeline.groupby("individual_local_identifier")["timestamp"].agg(
+        start="min", end="max"
     )
-    span_time['default_mid'] = span_time['start'] + (span_time['end'] - span_time['start']) / 2
+    span_time["default_mid"] = (
+        span_time["start"] + (span_time["end"] - span_time["start"]) / 2
+    )
 
     # Tracks & maps prep
     df_tracks = df_filtered2.copy()
-    df_tracks = df_tracks.sort_values(['individual_local_identifier', 'timestamp'])
+    df_tracks = df_tracks.sort_values(["individual_local_identifier", "timestamp"])
 
-    span_tracks = (
-        df_tracks.groupby('individual_local_identifier')['timestamp']
-        .agg(start='min', end='max')
+    span_tracks = df_tracks.groupby("individual_local_identifier")["timestamp"].agg(
+        start="min", end="max"
     )
-    span_tracks['default_mid'] = span_tracks['start'] + (span_tracks['end'] - span_tracks['start']) / 2
+    span_tracks["default_mid"] = (
+        span_tracks["start"] + (span_tracks["end"] - span_tracks["start"]) / 2
+    )
 
     # -------------------------------------------------------------------
     # Apply split overrides
     # -------------------------------------------------------------------
     # Default: use mid-time
-    split_time_series = span_time['default_mid'].copy()
-    split_time_tracks = span_tracks['default_mid'].copy()
+    split_time_series = span_time["default_mid"].copy()
+    split_time_tracks = span_tracks["default_mid"].copy()
 
     if split_times is not None:
         for indiv, ts in split_times.items():
             if indiv not in span_time.index:
                 continue
             # Clip to individual range (timeline)
-            start = span_time.loc[indiv, 'start']
-            end = span_time.loc[indiv, 'end']
+            start = span_time.loc[indiv, "start"]
+            end = span_time.loc[indiv, "end"]
             clipped = min(max(ts, start), end)
             split_time_series.loc[indiv] = clipped
 
             if indiv in span_tracks.index:
-                start_t = span_tracks.loc[indiv, 'start']
-                end_t = span_tracks.loc[indiv, 'end']
+                start_t = span_tracks.loc[indiv, "start"]
+                end_t = span_tracks.loc[indiv, "end"]
                 clipped_t = min(max(ts, start_t), end_t)
                 split_time_tracks.loc[indiv] = clipped_t
 
-    span_time['split'] = split_time_series
-    span_tracks['split'] = split_time_tracks
+    span_time["split"] = split_time_series
+    span_tracks["split"] = split_time_tracks
 
     individuals_timeline = span_time.index.tolist()
 
-    df_tracks['split_time'] = df_tracks['individual_local_identifier'].map(span_tracks['split'])
-    df_tracks['set'] = np.where(
-        df_tracks['timestamp'] <= df_tracks['split_time'],
-        'train',
-        'test'
+    df_tracks["split_time"] = df_tracks["individual_local_identifier"].map(
+        span_tracks["split"]
+    )
+    df_tracks["set"] = np.where(
+        df_tracks["timestamp"] <= df_tracks["split_time"], "train", "test"
     )
 
-    lat_min = df_tracks['location_lat'].min()
-    lat_max = df_tracks['location_lat'].max()
-    lon_min = df_tracks['location_long'].min()
-    lon_max = df_tracks['location_long'].max()
+    lat_min = df_tracks["location_lat"].min()
+    lat_max = df_tracks["location_lat"].max()
+    lon_min = df_tracks["location_long"].min()
+    lon_max = df_tracks["location_long"].max()
 
     lat_pad = (lat_max - lat_min) * 0.05 if lat_max > lat_min else 0.01
     lon_pad = (lon_max - lon_min) * 0.05 if lon_max > lon_min else 0.01
@@ -398,8 +415,8 @@ def build_figure_from_df(
     lon_min -= lon_pad
     lon_max += lon_pad
 
-    individuals_tracks = df_tracks['individual_local_identifier'].unique()
-    cmap = cm.get_cmap('tab20', len(individuals_tracks))
+    individuals_tracks = df_tracks["individual_local_identifier"].unique()
+    cmap = cm.get_cmap("tab20", len(individuals_tracks))
     color_map = {ind: cmap(i) for i, ind in enumerate(individuals_tracks)}
 
     proj = ccrs.PlateCarree()
@@ -417,17 +434,16 @@ def build_figure_from_df(
         raise RuntimeError("No individuals left after filtering; nothing to plot.")
 
     group_size = 20
-    map_groups = [indiv_list[i:i + group_size] for i in range(0, len(indiv_list), group_size)]
+    map_groups = [
+        indiv_list[i : i + group_size] for i in range(0, len(indiv_list), group_size)
+    ]
     n_map_groups = len(map_groups)
 
     total_rows = 2 + n_map_groups  # 1 hist row, 1 timeline row, rest maps
     height_ratios = [1.0, 1.0] + [1.4] * n_map_groups
 
     fig = plt.figure(figsize=(16, 8 + 6 * n_map_groups))
-    gs = fig.add_gridspec(
-        total_rows, 2,
-        height_ratios=height_ratios
-    )
+    gs = fig.add_gridspec(total_rows, 2, height_ratios=height_ratios)
 
     # Top row: histograms
     ax1 = fig.add_subplot(gs[0, 0])
@@ -440,45 +456,60 @@ def build_figure_from_df(
     # 1) Histograms (top row)
     # -------------------------------------------------------------------
 
-    ax1.hist(step_lengths_filtered, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
-    ax1.set_xlabel('Step Length (meters)')
-    ax1.set_ylabel('Frequency (log)')
-    ax1.set_title(f'Step Length Distribution (log y)\n{study_name}')
+    ax1.hist(
+        step_lengths_filtered, bins=50, alpha=0.7, color="skyblue", edgecolor="black"
+    )
+    ax1.set_xlabel("Step Length (meters)")
+    ax1.set_ylabel("Frequency (log)")
+    ax1.set_title(f"Step Length Distribution (log y)\n{study_name}")
     ax1.grid(True, alpha=0.3)
 
     mean_step = np.mean(step_lengths_filtered)
     median_step = np.median(step_lengths_filtered)
-    ax1.axvline(median_step, color='orange', linestyle='--', label=f'Median: {median_step:.1f}m')
-    ax1.axvline(q_vals.mean(), color='purple', linestyle=':', label=f'{step_q * 100:.0f}th percentile: {q_vals.mean():.1f}m')
+    ax1.axvline(
+        median_step, color="orange", linestyle="--", label=f"Median: {median_step:.1f}m"
+    )
+    ax1.axvline(
+        q_vals.mean(),
+        color="purple",
+        linestyle=":",
+        label=f"{step_q * 100:.0f}th percentile: {q_vals.mean():.1f}m",
+    )
     ax1.legend()
-    ax1.set_yscale('log')
+    ax1.set_yscale("log")
 
     turn_angles_filtered_deg = np.degrees(turn_angles_filtered)
-    ax2.hist(turn_angles_filtered_deg, bins=50, alpha=0.7, color='lightcoral', edgecolor='black')
-    ax2.set_xlabel('Turn Angle (degrees)')
-    ax2.set_ylabel('Frequency')
-    ax2.set_title(f'Turn Angle\n{study_name}')
+    ax2.hist(
+        turn_angles_filtered_deg,
+        bins=50,
+        alpha=0.7,
+        color="lightcoral",
+        edgecolor="black",
+    )
+    ax2.set_xlabel("Turn Angle (degrees)")
+    ax2.set_ylabel("Frequency")
+    ax2.set_title(f"Turn Angle\n{study_name}")
     ax2.grid(True, alpha=0.3)
 
     mean_turn = np.mean(turn_angles_filtered_deg)
-    ax2.axvline(mean_turn, color='red', linestyle='--', label=f'Mean: {mean_turn:.1f}°')
+    ax2.axvline(mean_turn, color="red", linestyle="--", label=f"Mean: {mean_turn:.1f}°")
     ax2.legend()
 
     # -------------------------------------------------------------------
     # 2) Timeline (middle row)
     # -------------------------------------------------------------------
 
-    train_color = 'skyblue'
-    test_color = 'lightcoral'
+    train_color = "skyblue"
+    test_color = "lightcoral"
     bar_height = 0.75
 
     for i, individual in enumerate(individuals_timeline):
-        ind = df_timeline[df_timeline['individual_local_identifier'] == individual]
-        ts = ind['timestamp'].sort_values()
+        ind = df_timeline[df_timeline["individual_local_identifier"] == individual]
+        ts = ind["timestamp"].sort_values()
 
-        start = span_time.loc[individual, 'start']
-        end = span_time.loc[individual, 'end']
-        split_time = span_time.loc[individual, 'split']
+        start = span_time.loc[individual, "start"]
+        end = span_time.loc[individual, "end"]
+        split_time = span_time.loc[individual, "split"]
 
         gaps = ts.diff() > gap_threshold
         segment_id = gaps.cumsum()
@@ -492,31 +523,45 @@ def build_figure_from_df(
             if seg_end <= split_time:
                 seg_color = train_color
                 ax_timeline.barh(
-                    i, seg_end - seg_start, left=seg_start,
-                    height=bar_height, color=seg_color,
-                    alpha=0.7, edgecolor='black'
+                    i,
+                    seg_end - seg_start,
+                    left=seg_start,
+                    height=bar_height,
+                    color=seg_color,
+                    alpha=0.7,
+                    edgecolor="black",
                 )
                 ax_timeline.text(
                     seg_start + (seg_end - seg_start) / 2,
                     i,
                     count_lbl,
-                    ha='center', va='center',
-                    color='black', fontsize=11, fontweight='bold'
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=11,
+                    fontweight="bold",
                 )
 
             elif seg_start >= split_time:
                 seg_color = test_color
                 ax_timeline.barh(
-                    i, seg_end - seg_start, left=seg_start,
-                    height=bar_height, color=seg_color,
-                    alpha=0.7, edgecolor='black'
+                    i,
+                    seg_end - seg_start,
+                    left=seg_start,
+                    height=bar_height,
+                    color=seg_color,
+                    alpha=0.7,
+                    edgecolor="black",
                 )
                 ax_timeline.text(
                     seg_start + (seg_end - seg_start) / 2,
                     i,
                     count_lbl,
-                    ha='center', va='center',
-                    color='black', fontsize=11, fontweight='bold'
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=11,
+                    fontweight="bold",
                 )
 
             else:
@@ -528,30 +573,44 @@ def build_figure_from_df(
 
                 # First part (train)
                 ax_timeline.barh(
-                    i, split_time - seg_start, left=seg_start,
-                    height=bar_height, color=train_color,
-                    alpha=0.7, edgecolor='black'
+                    i,
+                    split_time - seg_start,
+                    left=seg_start,
+                    height=bar_height,
+                    color=train_color,
+                    alpha=0.7,
+                    edgecolor="black",
                 )
                 ax_timeline.text(
                     seg_start + (split_time - seg_start) / 2,
                     i,
                     lbl_before,
-                    ha='center', va='center',
-                    color='black', fontsize=11, fontweight='bold'
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=11,
+                    fontweight="bold",
                 )
 
                 # Second part (test)
                 ax_timeline.barh(
-                    i, seg_end - split_time, left=split_time,
-                    height=bar_height, color=test_color,
-                    alpha=0.7, edgecolor='black'
+                    i,
+                    seg_end - split_time,
+                    left=split_time,
+                    height=bar_height,
+                    color=test_color,
+                    alpha=0.7,
+                    edgecolor="black",
                 )
                 ax_timeline.text(
                     split_time + (seg_end - split_time) / 2,
                     i,
                     lbl_after,
-                    ha='center', va='center',
-                    color='black', fontsize=11, fontweight='bold'
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=11,
+                    fontweight="bold",
                 )
 
         # Color-coded marker at the split time for each individual
@@ -559,8 +618,8 @@ def build_figure_from_df(
             split_time,
             i,
             s=40,
-            color=color_map.get(individual, 'black'),
-            edgecolor='black',
+            color=color_map.get(individual, "black"),
+            edgecolor="black",
             zorder=5,
         )
 
@@ -575,13 +634,23 @@ def build_figure_from_df(
     ax_timeline.set_xlabel("Time")
     ax_timeline.set_ylabel("Individual")
     ax_timeline.set_title(f"Data Availability and Split\n{study_name}")
-    ax_timeline.grid(True, axis='x', alpha=0.3)
+    ax_timeline.grid(True, axis="x", alpha=0.3)
 
     legend_patches_tl = [
-        Patch(facecolor=train_color, edgecolor='black', alpha=0.7, label='Train (before split)'),
-        Patch(facecolor=test_color, edgecolor='black', alpha=0.7, label='Test (after split)')
+        Patch(
+            facecolor=train_color,
+            edgecolor="black",
+            alpha=0.7,
+            label="Train (before split)",
+        ),
+        Patch(
+            facecolor=test_color,
+            edgecolor="black",
+            alpha=0.7,
+            label="Test (after split)",
+        ),
     ]
-    ax_timeline.legend(handles=legend_patches_tl, loc='lower right')
+    ax_timeline.legend(handles=legend_patches_tl, loc="lower right")
 
     # -------------------------------------------------------------------
     # 3) Maps (rows 2..)
@@ -589,16 +658,16 @@ def build_figure_from_df(
 
     def setup_map_axis(ax, title):
         ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
-        ax.add_feature(cfeature.LAND, facecolor='lightgray', zorder=0)
-        ax.add_feature(cfeature.OCEAN, facecolor='lightblue', zorder=0)
+        ax.add_feature(cfeature.LAND, facecolor="lightgray", zorder=0)
+        ax.add_feature(cfeature.OCEAN, facecolor="lightblue", zorder=0)
         ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
         ax.add_feature(cfeature.BORDERS, linewidth=0.3)
         ax.gridlines(draw_labels=True, linewidth=0.2, alpha=0.5)
         ax.set_title(f"{title}\n{study_name}", fontsize=12)
 
     def plot_tracks(ax, subset_df):
-        for indiv, ind_df in subset_df.groupby('individual_local_identifier'):
-            ind_df = ind_df.sort_values('timestamp')
+        for indiv, ind_df in subset_df.groupby("individual_local_identifier"):
+            ind_df = ind_df.sort_values("timestamp")
             if len(ind_df) < 2:
                 continue
 
@@ -606,49 +675,67 @@ def build_figure_from_df(
 
             # Black outline
             ax.plot(
-                ind_df['location_long'].values,
-                ind_df['location_lat'].values,
-                '-', linewidth=3, alpha=0.9,
-                color='black', transform=proj
+                ind_df["location_long"].values,
+                ind_df["location_lat"].values,
+                "-",
+                linewidth=3,
+                alpha=0.9,
+                color="black",
+                transform=proj,
             )
 
             # Colored track
             ax.plot(
-                ind_df['location_long'].values,
-                ind_df['location_lat'].values,
-                '-', linewidth=2.5, alpha=0.9,
-                color=col, transform=proj
+                ind_df["location_long"].values,
+                ind_df["location_lat"].values,
+                "-",
+                linewidth=2.5,
+                alpha=0.9,
+                color=col,
+                transform=proj,
             )
 
             # Start point
             ax.scatter(
-                ind_df['location_long'].iloc[0],
-                ind_df['location_lat'].iloc[0],
-                s=40, color=col, edgecolor='black',
-                transform=proj, zorder=3
+                ind_df["location_long"].iloc[0],
+                ind_df["location_lat"].iloc[0],
+                s=40,
+                color=col,
+                edgecolor="black",
+                transform=proj,
+                zorder=3,
             )
 
             # End point
             ax.scatter(
-                ind_df['location_long'].iloc[-1],
-                ind_df['location_lat'].iloc[-1],
-                s=60, facecolor=col, edgecolor='black',
-                transform=proj, zorder=3
+                ind_df["location_long"].iloc[-1],
+                ind_df["location_lat"].iloc[-1],
+                s=60,
+                facecolor=col,
+                edgecolor="black",
+                transform=proj,
+                zorder=3,
             )
 
-    train_df = df_tracks[df_tracks['set'] == 'train']
-    test_df = df_tracks[df_tracks['set'] == 'test']
+    train_df = df_tracks[df_tracks["set"] == "train"]
+    test_df = df_tracks[df_tracks["set"] == "test"]
 
     for group_idx, group_indivs in enumerate(map_groups):
         row = 2 + group_idx
         ax_train = fig.add_subplot(gs[row, 0], projection=proj)
         ax_test = fig.add_subplot(gs[row, 1], projection=proj)
 
-        setup_map_axis(ax_train, f"Train Tracks (individuals {group_idx + 1}/{n_map_groups})")
-        setup_map_axis(ax_test, f"Test Tracks (individuals {group_idx + 1}/{n_map_groups})")
+        setup_map_axis(
+            ax_train, f"Train Tracks (individuals {group_idx + 1}/{n_map_groups})"
+        )
+        setup_map_axis(
+            ax_test, f"Test Tracks (individuals {group_idx + 1}/{n_map_groups})"
+        )
 
-        subset_train = train_df[train_df['individual_local_identifier'].isin(group_indivs)]
-        subset_test = test_df[test_df['individual_local_identifier'].isin(group_indivs)]
+        subset_train = train_df[
+            train_df["individual_local_identifier"].isin(group_indivs)
+        ]
+        subset_test = test_df[test_df["individual_local_identifier"].isin(group_indivs)]
 
         plot_tracks(ax_train, subset_train)
         plot_tracks(ax_test, subset_test)
@@ -673,6 +760,7 @@ def build_figure_from_df(
 # Wrapper: create figure for current file (handles originals vs filtered)
 # -------------------------------------------------------------------
 
+
 def create_trajectory_figure(csv_path: str):
     """
     For a given CSV file:
@@ -695,10 +783,16 @@ def create_trajectory_figure(csv_path: str):
 
     # 2) Apply bad-individual filtering for the current view
     bad_indivs = _read_bad_individuals()
-    bad_here = [ ind for (fname, ind) in bad_indivs if fname == basename ]
-    print("Bad here?", bad_here, df_full[df_full['individual_local_identifier'].astype(str).isin(bad_here)])
+    bad_here = [ind for (fname, ind) in bad_indivs if fname == basename]
+    print(
+        "Bad here?",
+        bad_here,
+        df_full[df_full["individual_local_identifier"].astype(str).isin(bad_here)],
+    )
     if bad_here:
-        df_filtered = df_full[~df_full['individual_local_identifier'].astype(str).isin(bad_here)].copy()
+        df_filtered = df_full[
+            ~df_full["individual_local_identifier"].astype(str).isin(bad_here)
+        ].copy()
     else:
         df_filtered = df_full.copy()
 
@@ -729,6 +823,7 @@ def create_trajectory_figure(csv_path: str):
 # Streamlit app
 # -------------------------------------------------------------------
 
+
 def main():
     st.set_page_config(page_title="Trajectory Review", layout="wide")
 
@@ -758,7 +853,9 @@ def main():
     current_file = remaining_files[st.session_state.current_index]
     current_basename = os.path.basename(current_file)
 
-    st.subheader(f"Reviewing file {st.session_state.current_index + 1} of {len(remaining_files)}")
+    st.subheader(
+        f"Reviewing file {st.session_state.current_index + 1} of {len(remaining_files)}"
+    )
     st.code(current_basename)
 
     # Build figure and metadata for current file
@@ -774,7 +871,9 @@ def main():
             st.write(f"**{k}:** {v}")
 
     # Per-individual controls (bad flags + split overrides)
-    with st.expander("Individuals in this study (mark bad / override split)", expanded=False):
+    with st.expander(
+        "Individuals in this study (mark bad / override split)", expanded=False
+    ):
         bad_all = _read_bad_individuals()
         bad_here = {ind for (fname, ind) in bad_all if fname == current_basename}
 
@@ -791,7 +890,11 @@ def main():
 
         if split_here:
             st.write("Existing train/test split overrides in this file:")
-            st.write(", ".join(f"{ind} → {ts.date().isoformat()}" for ind, ts in split_here.items()))
+            st.write(
+                ", ".join(
+                    f"{ind} → {ts.date().isoformat()}" for ind, ts in split_here.items()
+                )
+            )
 
         st.write(
             "You can mark individuals as bad (excluded from this file), "
@@ -813,15 +916,14 @@ def main():
                 split_date = st.date_input(
                     "Split date",
                     value=default_date,
-                    key=f"split_{current_basename}_{indiv}"
+                    key=f"split_{current_basename}_{indiv}",
                 )
 
             # Buttons (save split / mark bad)
             with cols[3]:
                 # Save split override
                 if st.button(
-                    "Save split",
-                    key=f"save_split_{current_basename}_{indiv}"
+                    "Save split", key=f"save_split_{current_basename}_{indiv}"
                 ):
                     if split_date is not None:
                         _append_split_override(current_basename, str(indiv), split_date)
@@ -833,13 +935,10 @@ def main():
                     st.button(
                         "Marked bad",
                         key=f"bad_{current_basename}_{indiv}",
-                        disabled=True
+                        disabled=True,
                     )
                 else:
-                    if st.button(
-                        "Mark bad",
-                        key=f"bad_{current_basename}_{indiv}"
-                    ):
+                    if st.button("Mark bad", key=f"bad_{current_basename}_{indiv}"):
                         _append_bad_individual(current_basename, str(indiv))
                         _rerun()
 
@@ -863,15 +962,21 @@ def main():
 
     # Optional: navigation in remaining set (without changing lists)
     with st.expander("Navigation", expanded=False):
-        st.write("These controls only change which *unreviewed* file is shown; they do not mark files.")
+        st.write(
+            "These controls only change which *unreviewed* file is shown; they do not mark files."
+        )
         nav_col1, nav_col2 = st.columns(2)
         with nav_col1:
             if st.button("Previous unreviewed file"):
-                st.session_state.current_index = (st.session_state.current_index - 1) % len(remaining_files)
+                st.session_state.current_index = (
+                    st.session_state.current_index - 1
+                ) % len(remaining_files)
                 _rerun()
         with nav_col2:
             if st.button("Next unreviewed file"):
-                st.session_state.current_index = (st.session_state.current_index + 1) % len(remaining_files)
+                st.session_state.current_index = (
+                    st.session_state.current_index + 1
+                ) % len(remaining_files)
                 _rerun()
 
 

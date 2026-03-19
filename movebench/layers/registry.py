@@ -106,9 +106,8 @@ LAYERS: dict[str, LayerSpec] = {
         gee_collection="ECMWF/ERA5_LAND/DAILY_AGGR",
         temporal="daily",
     ),
-
     # MODIS
-    "modis_lst": LayerSpec( # replaced by landsat by default
+    "modis_lst": LayerSpec(  # replaced by landsat by default
         name="modis_lst",
         source="gee_chip",
         bands=["LST_Day_1km", "LST_Night_1km"],
@@ -117,7 +116,7 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="8day",
         scale_factor=0.02,
     ),
-    "modis_vi": LayerSpec( # replaced by landsat by default
+    "modis_vi": LayerSpec(  # replaced by landsat by default
         name="modis_vi",
         source="gee_chip",
         bands=["NDVI", "EVI"],
@@ -126,7 +125,7 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="16day",
         scale_factor=0.0001,
     ),
-    "modis_ndsi": LayerSpec( # replaced by landsat by default
+    "modis_ndsi": LayerSpec(  # replaced by landsat by default
         name="modis_ndsi",
         source="gee_chip",
         bands=["NDSI"],
@@ -134,7 +133,7 @@ LAYERS: dict[str, LayerSpec] = {
         gee_collection="MODIS/MCD43A4_006_NDSI",
         temporal="daily",
     ),
-    "modis_bai": LayerSpec( # replaced by landsat by default
+    "modis_bai": LayerSpec(  # replaced by landsat by default
         name="modis_bai",
         source="gee_chip",
         bands=["BAI"],
@@ -230,7 +229,6 @@ LAYERS: dict[str, LayerSpec] = {
         year_bounds=(2000, 2024),
         valid_range=(0.0, 100.0),
     ),
-
     # Landsat and derivatives
     "landsat": LayerSpec(
         name="landsat",
@@ -296,7 +294,6 @@ LAYERS: dict[str, LayerSpec] = {
     #     gee_collection="LANDSAT/COMPOSITES/C02/T1_L2_32DAY_NDWI",
     #     temporal="32day",
     # ),
-
     # Elevation and derivatives
     "dem": LayerSpec(
         name="dem",
@@ -346,7 +343,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="hourly",
         derived_from=["era5_land_hourly", "era5_hourly"],
     ),
-
     # Other GEE features
     "dist_water": LayerSpec(
         name="dist_water",
@@ -386,7 +382,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="annual",
         normalize=False,
     ),
-
     # Other non-GEE features -- must download locally first
     "hii": LayerSpec(
         name="hii",
@@ -405,7 +400,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="static",
         path_pattern="{bioclim}/wc2.1_30s_bio_{band_num}.tif",
     ),
-    
 }
 
 
@@ -428,12 +422,16 @@ class LayerRegistry:
         """Resolve a layers config into a concrete LayerPlan."""
         if len(cfg.layers) != len(set(cfg.layers)):
             dupes = [x for x in cfg.layers if cfg.layers.count(x) > 1]
-            raise ValueError(f"Duplicate layer(s) in config.layers: {sorted(set(dupes))}")
+            raise ValueError(
+                f"Duplicate layer(s) in config.layers: {sorted(set(dupes))}"
+            )
 
         for name in cfg.layers:
             _ = self.get(name)  # validate existence
 
-        required_layers, derived_dependencies = self._resolve_required_layers(cfg.layers)
+        required_layers, derived_dependencies = self._resolve_required_layers(
+            cfg.layers
+        )
 
         chip_groups_plan = self._validate_and_plan_chip_groups(cfg, required_layers)
 
@@ -460,7 +458,9 @@ class LayerRegistry:
             if name in visited:
                 return
             if name in visiting:
-                raise ValueError(f"Cycle detected in derived layer dependencies at {name!r}")
+                raise ValueError(
+                    f"Cycle detected in derived layer dependencies at {name!r}"
+                )
 
             spec = self.get(name)
             if spec.source != "derived":
@@ -503,7 +503,9 @@ class LayerRegistry:
                     )
                 chip_layer_to_group[layer] = group_name
 
-        required_chip_layers = {n for n in required_layers if self.get(n).source == "gee_chip"}
+        required_chip_layers = {
+            n for n in required_layers if self.get(n).source == "gee_chip"
+        }
         missing = sorted(required_chip_layers - set(chip_layer_to_group.keys()))
         if missing:
             raise ValueError(
@@ -512,7 +514,10 @@ class LayerRegistry:
             )
 
         return {
-            name: {"layers": list(g["layers"]), "target_scale_m": float(g["target_scale_m"])}
+            name: {
+                "layers": list(g["layers"]),
+                "target_scale_m": float(g["target_scale_m"]),
+            }
             for name, g in cfg.chip_groups.items()
         }
 
@@ -525,7 +530,9 @@ class LayerRegistry:
 
             if spec.categorical:
                 if spec.num_classes <= 0:
-                    raise ValueError(f"Categorical layer {layer_name!r} must set num_classes > 0")
+                    raise ValueError(
+                        f"Categorical layer {layer_name!r} must set num_classes > 0"
+                    )
                 for i in range(spec.num_classes):
                     band_id = f"{layer_name}.class_{i}"
                     if band_id in seen_band_ids:

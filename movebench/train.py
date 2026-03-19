@@ -60,7 +60,9 @@ def _deterministic_eval_subset(loader: Any, *, max_items: int | None, seed: int)
 _COLLATE_CHECKED = False
 
 
-def collate_step_select(batch: list[tuple[torch.Tensor, torch.Tensor, dict[str, Any], str]]) -> tuple[torch.Tensor, torch.Tensor]:
+def collate_step_select(
+    batch: list[tuple[torch.Tensor, torch.Tensor, dict[str, Any], str]],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Collate iSSF/SSF dataset items into batched tensors.
 
     Returns:
@@ -80,7 +82,9 @@ def collate_step_select(batch: list[tuple[torch.Tensor, torch.Tensor, dict[str, 
     if not _COLLATE_CHECKED:
         if not torch.isfinite(x).all().item():
             bad = (~torch.isfinite(x)).nonzero(as_tuple=False)
-            raise ValueError(f"Non-finite values found in step features at indices (first 10): {bad[:10].tolist()}")
+            raise ValueError(
+                f"Non-finite values found in step features at indices (first 10): {bad[:10].tolist()}"
+            )
         if (x[~valid] != 0).any().item():
             bad = (x[~valid] != 0).nonzero(as_tuple=False)
             raise ValueError(
@@ -123,7 +127,9 @@ def eval_step_select(
         x = x.to(device)
         logits = model(x)
         if logits.ndim != 2:
-            raise ValueError(f"Model must return logits with shape (B,P); got {tuple(logits.shape)}")
+            raise ValueError(
+                f"Model must return logits with shape (B,P); got {tuple(logits.shape)}"
+            )
         B, P = logits.shape
         loss = loss_step_select(logits)
         total_nll += float(loss.item()) * int(B)
@@ -144,6 +150,7 @@ def eval_step_select(
         "topk": {int(k): float(v) / float(total) for k, v in correct_topk.items()},
     }
 
+
 # deprecated
 def fit_step_select(
     model: torch.nn.Module,
@@ -163,10 +170,16 @@ def fit_step_select(
     """Step-based training with early stopping on validation NLL."""
     _seed_everything(seed)
     model.to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    opt = torch.optim.Adam(
+        model.parameters(), lr=float(lr), weight_decay=float(weight_decay)
+    )
 
-    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
-    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
+    eval_train_loader = _deterministic_eval_subset(
+        train_loader, max_items=max_eval_steps, seed=int(seed) + 0
+    )
+    eval_val_loader = _deterministic_eval_subset(
+        val_loader, max_items=max_eval_steps, seed=int(seed) + 1
+    )
 
     best_state: dict[str, torch.Tensor] | None = None
     best_val_nll = float("inf")
@@ -191,8 +204,12 @@ def fit_step_select(
         opt.step()
 
         if (step + 1) % int(eval_interval) == 0:
-            train_metrics = eval_step_select(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
-            val_metrics = eval_step_select(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
+            train_metrics = eval_step_select(
+                model, eval_train_loader, device, topk=(), max_items=max_eval_steps
+            )
+            val_metrics = eval_step_select(
+                model, eval_val_loader, device, topk=(), max_items=max_eval_steps
+            )
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
@@ -203,7 +220,9 @@ def fit_step_select(
             if va < best_val_nll:
                 best_val_nll = va
                 best_step = step
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -211,7 +230,9 @@ def fit_step_select(
                     break
 
     if best_state is None:
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_state = {
+            k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+        }
 
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
     final_train = eval_step_select(model, train_loader, device)
@@ -297,7 +318,9 @@ def eval_step_select_tensor(
             loss = loss_step_select(logits)
 
         if logits.ndim != 2:
-            raise ValueError(f"Model must return logits with shape (B,P); got {tuple(logits.shape)}")
+            raise ValueError(
+                f"Model must return logits with shape (B,P); got {tuple(logits.shape)}"
+            )
         B, P_logits = logits.shape
         if int(P_logits) != int(P):
             raise ValueError(f"Model returned P={P_logits}, expected P={P}")
@@ -344,12 +367,18 @@ def fit_step_select_tensor(
     """
     _seed_everything(seed)
     model.to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    opt = torch.optim.Adam(
+        model.parameters(), lr=float(lr), weight_decay=float(weight_decay)
+    )
 
     if x_train.ndim != 3 or x_val.ndim != 3:
-        raise ValueError(f"Expected x_train/x_val with shape (N,C,P); got train={tuple(x_train.shape)} val={tuple(x_val.shape)}")
+        raise ValueError(
+            f"Expected x_train/x_val with shape (N,C,P); got train={tuple(x_train.shape)} val={tuple(x_val.shape)}"
+        )
     if tuple(x_train.shape[1:]) != tuple(x_val.shape[1:]):
-        raise ValueError(f"x_train/x_val feature shapes must match (C,P). Got train={tuple(x_train.shape[1:])} val={tuple(x_val.shape[1:])}")
+        raise ValueError(
+            f"x_train/x_val feature shapes must match (C,P). Got train={tuple(x_train.shape[1:])} val={tuple(x_val.shape[1:])}"
+        )
 
     N_train = int(x_train.shape[0])
     N_val = int(x_val.shape[0])
@@ -372,7 +401,9 @@ def fit_step_select_tensor(
         k = min(int(max_eval_items), int(n))
         g = torch.Generator(device="cpu")
         g.manual_seed(int(seed) + int(seed_off))
-        return torch.randperm(int(n), generator=g)[:k].to(dtype=torch.long, device="cpu")
+        return torch.randperm(int(n), generator=g)[:k].to(
+            dtype=torch.long, device="cpu"
+        )
 
     eval_train_idxs = _eval_idxs(N_train, seed_off=0)
     eval_val_idxs = _eval_idxs(N_val, seed_off=1)
@@ -453,7 +484,9 @@ def fit_step_select_tensor(
             if va < best_val_nll:
                 best_val_nll = va
                 best_step = step
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -461,11 +494,17 @@ def fit_step_select_tensor(
                     break
 
     if best_state is None:
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_state = {
+            k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+        }
 
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
-    final_train = eval_step_select_tensor(model, x_train, device, batch_size=int(batch_size))
-    final_val = eval_step_select_tensor(model, x_val, device, batch_size=int(batch_size))
+    final_train = eval_step_select_tensor(
+        model, x_train, device, batch_size=int(batch_size)
+    )
+    final_val = eval_step_select_tensor(
+        model, x_val, device, batch_size=int(batch_size)
+    )
 
     return {
         "best_step": int(best_step),
@@ -530,7 +569,9 @@ def eval_deepssf(
 
         out = model((x1, x2, x3))
         if out.ndim != 4 or int(out.shape[-1]) != 2:
-            raise ValueError(f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}")
+            raise ValueError(
+                f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}"
+            )
 
         scores = out[..., 0] + out[..., 1]  # (B,H,W)
         B, H, W = scores.shape
@@ -553,10 +594,14 @@ def eval_deepssf(
             k = int(k)
             k_eff = min(k, int(logits.shape[1]))
             top_idx = torch.topk(logits, k=k_eff, dim=1).indices
-            correct_topk[k] += int((top_idx == true_idx.unsqueeze(1)).any(dim=1).sum().item())
+            correct_topk[k] += int(
+                (top_idx == true_idx.unsqueeze(1)).any(dim=1).sum().item()
+            )
 
     if total == 0:
-        raise ValueError("No valid deepSSF targets were found in the loader (all targets were out-of-bounds).")
+        raise ValueError(
+            "No valid deepSSF targets were found in the loader (all targets were out-of-bounds)."
+        )
 
     return {
         "nll": float(total_nll / float(total)),
@@ -567,7 +612,9 @@ def eval_deepssf(
 
 def fit_deepssf(
     model: torch.nn.Module,
-    train_loader: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    train_loader: Iterable[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ],
     val_loader: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     device: torch.device,
     *,
@@ -585,14 +632,24 @@ def fit_deepssf(
     _seed_everything(seed)
     model.to(device)
 
-    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
-    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
+    eval_train_loader = _deterministic_eval_subset(
+        train_loader, max_items=max_eval_steps, seed=int(seed) + 0
+    )
+    eval_val_loader = _deterministic_eval_subset(
+        val_loader, max_items=max_eval_steps, seed=int(seed) + 1
+    )
 
     if not hasattr(model, "parameter_groups"):
         raise TypeError("fit_deepssf expects a model with a parameter_groups() method")
     groups = model.parameter_groups()  # type: ignore[attr-defined]
-    if not isinstance(groups, dict) or "movement" not in groups or "habitat" not in groups:
-        raise TypeError("model.parameter_groups() must return a dict with keys {'movement','habitat'}")
+    if (
+        not isinstance(groups, dict)
+        or "movement" not in groups
+        or "habitat" not in groups
+    ):
+        raise TypeError(
+            "model.parameter_groups() must return a dict with keys {'movement','habitat'}"
+        )
 
     opt = torch.optim.Adam(
         [
@@ -624,7 +681,9 @@ def fit_deepssf(
 
         out = model((x1, x2, x3))
         if out.ndim != 4 or int(out.shape[-1]) != 2:
-            raise ValueError(f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}")
+            raise ValueError(
+                f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}"
+            )
 
         scores = out[..., 0] + out[..., 1]
         B, H, W = scores.shape
@@ -646,8 +705,12 @@ def fit_deepssf(
 
         PRINT = True
         if (step + 1) % int(eval_interval) == 0:
-            train_metrics = eval_deepssf(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
-            val_metrics = eval_deepssf(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
+            train_metrics = eval_deepssf(
+                model, eval_train_loader, device, topk=(), max_items=max_eval_steps
+            )
+            val_metrics = eval_deepssf(
+                model, eval_val_loader, device, topk=(), max_items=max_eval_steps
+            )
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
@@ -661,7 +724,9 @@ def fit_deepssf(
             if va < best_val_nll:
                 best_val_nll = va
                 best_step = step
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -669,7 +734,9 @@ def fit_deepssf(
                     break
 
     if best_state is None:
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_state = {
+            k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+        }
 
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
     final_train = eval_deepssf(model, train_loader, device)
@@ -685,7 +752,9 @@ def fit_deepssf(
 
 def collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
     """Collate MoveFormer segment dicts using upstream padding behavior."""
-    from movebench.lib.moveformer.geo_transformers.training_utils import collate_sequence_dicts
+    from movebench.lib.moveformer.geo_transformers.training_utils import (
+        collate_sequence_dicts,
+    )
 
     return collate_sequence_dicts(batch)
 
@@ -717,7 +786,9 @@ def eval_moveformer(
         features = {k: v.to(device) for k, v in batch.items()}
         logits, _loss, _metrics = model(features)
         if logits.ndim != 3:
-            raise ValueError(f"Expected logits with shape (B,L,P); got {tuple(logits.shape)}")
+            raise ValueError(
+                f"Expected logits with shape (B,L,P); got {tuple(logits.shape)}"
+            )
         B, L, P = logits.shape
         if P <= 0:
             raise ValueError(f"P must be > 0; got {P}")
@@ -749,7 +820,9 @@ def eval_moveformer(
     return {
         "nll": nll,
         "nce": float(nll / float(math.log(int(P)))),
-        "topk": {int(k): float(v) / float(total_tokens) for k, v in correct_topk.items()},
+        "topk": {
+            int(k): float(v) / float(total_tokens) for k, v in correct_topk.items()
+        },
         "num_items": int(total_items),
         "num_tokens": int(total_tokens),
     }
@@ -778,12 +851,18 @@ def fit_moveformer(
     _seed_everything(seed)
     model.to(device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    opt = torch.optim.Adam(
+        model.parameters(), lr=float(lr), weight_decay=float(weight_decay)
+    )
     lr_decay = torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=float(lr_gamma))
     lr_warmup = LinearWarmupLR(opt, warmup_steps=int(warmup_steps))
 
-    eval_train_loader = _deterministic_eval_subset(train_loader, max_items=max_eval_steps, seed=int(seed) + 0)
-    eval_val_loader = _deterministic_eval_subset(val_loader, max_items=max_eval_steps, seed=int(seed) + 1)
+    eval_train_loader = _deterministic_eval_subset(
+        train_loader, max_items=max_eval_steps, seed=int(seed) + 0
+    )
+    eval_val_loader = _deterministic_eval_subset(
+        val_loader, max_items=max_eval_steps, seed=int(seed) + 1
+    )
 
     best_state: dict[str, torch.Tensor] | None = None
     best_val_nll = float("inf")
@@ -818,7 +897,9 @@ def fit_moveformer(
         if var_len_training:
             split_idx = torch.randint(low=1, high=max_len + 1, size=(), device=device)
             if int(split_idx.item()) < seq_len:
-                attn_mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
+                attn_mask = torch.zeros(
+                    (seq_len, seq_len), dtype=torch.bool, device=device
+                )
                 attn_mask[: int(split_idx), : int(split_idx)] = True
                 attn_mask[int(split_idx) :, int(split_idx) :] = True
         elif var_len_training_v2:
@@ -845,8 +926,12 @@ def fit_moveformer(
             lr_decay.step()
 
         if (step + 1) % int(eval_interval) == 0:
-            train_metrics = eval_moveformer(model, eval_train_loader, device, topk=(), max_items=max_eval_steps)
-            val_metrics = eval_moveformer(model, eval_val_loader, device, topk=(), max_items=max_eval_steps)
+            train_metrics = eval_moveformer(
+                model, eval_train_loader, device, topk=(), max_items=max_eval_steps
+            )
+            val_metrics = eval_moveformer(
+                model, eval_val_loader, device, topk=(), max_items=max_eval_steps
+            )
             tr = float(train_metrics["nll"])
             va = float(val_metrics["nll"])
             history.append({"step": float(step), "train_nll": tr, "val_nll": va})
@@ -857,7 +942,9 @@ def fit_moveformer(
             if va < best_val_nll:
                 best_val_nll = va
                 best_step = step
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -865,7 +952,9 @@ def fit_moveformer(
                     break
 
     if best_state is None:
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_state = {
+            k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+        }
 
     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
     final_train = eval_moveformer(model, train_loader, device)

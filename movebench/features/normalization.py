@@ -8,15 +8,23 @@ from typing import Any
 import torch
 
 from movebench.features.manifest import read_manifest, utc_now_iso
-from movebench.features.points import point_store_dir, point_stores_dir, point_store_train_stats_path
+from movebench.features.points import (
+    point_store_dir,
+    point_stores_dir,
+    point_store_train_stats_path,
+)
 from movebench.layers.plan import LayerPlan
 
 
-def _resolve_sampler_hash(*, study_dir: Path, rasters_hash: str, sampler_hash: str | None) -> str:
+def _resolve_sampler_hash(
+    *, study_dir: Path, rasters_hash: str, sampler_hash: str | None
+) -> str:
     if sampler_hash is not None:
         return str(sampler_hash)
 
-    base_dir = point_stores_dir(study_dir=study_dir, split="train", rasters_hash=rasters_hash)
+    base_dir = point_stores_dir(
+        study_dir=study_dir, split="train", rasters_hash=rasters_hash
+    )
     if not base_dir.exists():
         raise FileNotFoundError(
             "Normalization stats not found. Run "
@@ -45,7 +53,11 @@ def load_points_normalization_mean_std(
     sampler_hash: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     study_dir = Path(study_dir)
-    sampler_hash = _resolve_sampler_hash(study_dir=study_dir, rasters_hash=str(plan.rasters_hash), sampler_hash=sampler_hash)
+    sampler_hash = _resolve_sampler_hash(
+        study_dir=study_dir,
+        rasters_hash=str(plan.rasters_hash),
+        sampler_hash=sampler_hash,
+    )
     stats_path = point_store_train_stats_path(
         study_dir=study_dir,
         rasters_hash=str(plan.rasters_hash),
@@ -71,7 +83,9 @@ def load_points_normalization_mean_std(
         band_id = band_ids[i]
         st = band_stats.get(band_id)
         if st is None:
-            raise ValueError(f"Missing normalization stats for band_id={band_id!r} in {stats_path}")
+            raise ValueError(
+                f"Missing normalization stats for band_id={band_id!r} in {stats_path}"
+            )
         mean[i] = float(st["mean"])
         s = float(st["std"])
         if not math.isfinite(s) or s < 1e-8:
@@ -93,7 +107,11 @@ def compute_points_normalization_stats(
     if split != "train":
         raise ValueError("Point normalization stats are stored only for split='train'")
 
-    sampler_hash = _resolve_sampler_hash(study_dir=study_dir, rasters_hash=str(plan.rasters_hash), sampler_hash=sampler_hash)
+    sampler_hash = _resolve_sampler_hash(
+        study_dir=study_dir,
+        rasters_hash=str(plan.rasters_hash),
+        sampler_hash=sampler_hash,
+    )
     store_dir = point_store_dir(
         study_dir=study_dir,
         split="train",
@@ -118,7 +136,9 @@ def compute_points_normalization_stats(
     if stats_path.exists():
         with open(stats_path, "r") as f:
             existing = json.load(f)
-        band_stats = {str(k): dict(v) for k, v in existing.get("band_stats", {}).items()}
+        band_stats = {
+            str(k): dict(v) for k, v in existing.get("band_stats", {}).items()
+        }
 
     normalize_band_ids = [ch.band_id for ch in plan.channels if ch.normalize]
     wanted = [band_id for band_id in normalize_band_ids if band_id in manifest.bands]

@@ -12,7 +12,11 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from movebench.lib.deepSSF.deepSSF_model import Conv2d_block_toFC, ConvJointModel, ModelParams
+from movebench.lib.deepSSF.deepSSF_model import (
+    Conv2d_block_toFC,
+    ConvJointModel,
+    ModelParams,
+)
 
 
 def _infer_dense_dim_in_all(
@@ -50,11 +54,15 @@ def _infer_dense_dim_in_all(
     )
 
     block = Conv2d_block_toFC(params).to(torch.device("cpu"))
-    x = torch.zeros((1, int(input_channels), int(image_dim), int(image_dim)), dtype=torch.float32)
+    x = torch.zeros(
+        (1, int(input_channels), int(image_dim), int(image_dim)), dtype=torch.float32
+    )
     with torch.no_grad():
         y = block(x)
     if y.ndim != 2 or int(y.shape[0]) != 1:
-        raise RuntimeError(f"Unexpected Conv2d_block_toFC output shape: {tuple(y.shape)}")
+        raise RuntimeError(
+            f"Unexpected Conv2d_block_toFC output shape: {tuple(y.shape)}"
+        )
     return int(y.shape[1])
 
 
@@ -137,7 +145,9 @@ class DeepSSF(nn.Module):
     def parameter_groups(self) -> dict[str, list[nn.Parameter]]:
         """Parameter groups for separate learning rates."""
         habitat = list(self.model.conv_habitat.parameters())
-        movement = list(self.model.conv_movement.parameters()) + list(self.model.fcn_movement_all.parameters())
+        movement = list(self.model.conv_movement.parameters()) + list(
+            self.model.fcn_movement_all.parameters()
+        )
         if not habitat:
             raise ValueError("deepSSF habitat parameter group is empty")
         if not movement:
@@ -156,14 +166,20 @@ class DeepSSF(nn.Module):
                     setattr(mgo, name, t.to(device))
 
         # Other submodules store a `.device` attribute; keep it consistent even if unused.
-        for sub_name in ("conv_habitat", "conv_movement", "fcn_movement_all", "scalar_grid_output"):
+        for sub_name in (
+            "conv_habitat",
+            "conv_movement",
+            "fcn_movement_all",
+            "scalar_grid_output",
+        ):
             sub = getattr(self.model, sub_name, None)
             if sub is not None and hasattr(sub, "device"):
                 sub.device = device
 
-    def forward(self, x: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self, x: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
         spatial, scalars_to_grid, bearing = x
         dev = spatial.device
         self._sync_internal_device(dev)
         return self.model((spatial, scalars_to_grid, bearing))
-

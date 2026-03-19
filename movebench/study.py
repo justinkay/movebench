@@ -84,7 +84,9 @@ class Study:
 
         train_df = df[df[SET_COL] == "train"]
         if len(train_df) == 0:
-            raise ValueError("No training data found (set=='train'); cannot compute buffer")
+            raise ValueError(
+                "No training data found (set=='train'); cannot compute buffer"
+            )
         buf = cfg.raster_params["buffer"]
         max_step_q = float(buf.get("max_step_q", 0.99))
         min_step_time_s = buf.get("min_step_time_s")
@@ -407,7 +409,9 @@ class Study:
     ) -> dict:
         """Compute and cache normalization statistics for environmental features."""
         if from_ != "points":
-            raise NotImplementedError(f"Unsupported from_={from_!r}. Only 'points' is implemented.")
+            raise NotImplementedError(
+                f"Unsupported from_={from_!r}. Only 'points' is implemented."
+            )
 
         plan = self.layer_plan(config)
 

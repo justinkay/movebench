@@ -75,24 +75,43 @@ def _parse_splits(val: str) -> list[str]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default_config = _REPO_ROOT / "configs" / "benchmarks" / "all.yaml"
 
-    p = argparse.ArgumentParser(description="Launch Slurm jobs to build deepSSF WebDataset caches per study.")
+    p = argparse.ArgumentParser(
+        description="Launch Slurm jobs to build deepSSF WebDataset caches per study."
+    )
     p.add_argument(
         "--config",
         type=str,
         default=str(default_config),
         help="Benchmark YAML config path (must include datasets.deepssf and datasets.issf.sampler).",
     )
-    p.add_argument("--study", type=str, default=None, help="Run worker mode for a single study id.")
+    p.add_argument(
+        "--study", type=str, default=None, help="Run worker mode for a single study id."
+    )
     p.add_argument(
         "--studies",
         type=str,
         default=None,
         help="Launcher override: 'all' or comma-separated study ids. If omitted, use config's `studies` or all available.",
     )
-    p.add_argument("--splits", type=_parse_splits, default="train,test", help="Comma-separated splits: train,test")
+    p.add_argument(
+        "--splits",
+        type=_parse_splits,
+        default="train,test",
+        help="Comma-separated splits: train,test",
+    )
 
-    p.add_argument("--max-concurrent-jobs", type=int, default=32, help="Maximum concurrent `srun` jobs.")
-    p.add_argument("--polling-interval", type=int, default=30, help="Seconds between job status checks.")
+    p.add_argument(
+        "--max-concurrent-jobs",
+        type=int,
+        default=32,
+        help="Maximum concurrent `srun` jobs.",
+    )
+    p.add_argument(
+        "--polling-interval",
+        type=int,
+        default=30,
+        help="Seconds between job status checks.",
+    )
     p.add_argument(
         "--log-dir",
         type=str,
@@ -101,11 +120,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     # Slurm defaults match scripts/slurm/extract.py except GPUs default to 0.
-    p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
-    p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
-    p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
-    p.add_argument("--time", type=str, default="7-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
-    p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
+    p.add_argument(
+        "--partition", type=str, default="vision-beery", help="Slurm partition (-p)."
+    )
+    p.add_argument(
+        "--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q)."
+    )
+    p.add_argument(
+        "--account", type=str, default="vision-beery", help="Slurm account (-A)."
+    )
+    p.add_argument(
+        "--time",
+        type=str,
+        default="7-00:00:00",
+        help="Slurm time limit (-t), e.g. '7-00:00:00'.",
+    )
+    p.add_argument(
+        "--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'."
+    )
     p.add_argument(
         "--cpus-per-task",
         type=int,
@@ -118,17 +150,39 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Slurm GPUs per node (--gpus-per-node). Only passed if > 0.",
     )
-    p.add_argument("--dry-run", action="store_true", help="Print actions/commands but do not submit jobs.")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions/commands but do not submit jobs.",
+    )
 
     # Cache build params (defaults filled after config load).
     p.add_argument("--samples-per-shard", type=int, default=None)
-    p.add_argument("--spatial-dtype", type=str, default=None, choices=("float16", "float32"))
-    p.add_argument("--target-dtype", type=str, default=None, choices=("uint8", "float16", "float32"))
+    p.add_argument(
+        "--spatial-dtype", type=str, default=None, choices=("float16", "float32")
+    )
+    p.add_argument(
+        "--target-dtype",
+        type=str,
+        default=None,
+        choices=("uint8", "float16", "float32"),
+    )
     p.add_argument("--compression", type=str, default=None, choices=("none", "gz"))
-    p.add_argument("--build-workers", type=int, default=None, help="DataLoader workers used while building the cache.")
+    p.add_argument(
+        "--build-workers",
+        type=int,
+        default=None,
+        help="DataLoader workers used while building the cache.",
+    )
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--overwrite", action="store_true", help="Overwrite existing caches.")
-    p.add_argument("--resume", action="store_true", help="Resume partially-built caches (missing manifest).")
+    p.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing caches."
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume partially-built caches (missing manifest).",
+    )
 
     return p.parse_args(argv)
 
@@ -203,10 +257,19 @@ def _select_parametric_train_store(*, study_dir: Path, plan, sampler: _SamplerPa
 
 
 def _norm_stats_path(*, study_dir: Path, config_hash: str, sampler_hash: str) -> Path:
-    return Path(study_dir) / "normalization" / "points" / str(config_hash) / str(sampler_hash) / "stats.json"
+    return (
+        Path(study_dir)
+        / "normalization"
+        / "points"
+        / str(config_hash)
+        / str(sampler_hash)
+        / "stats.json"
+    )
 
 
-def _resolve_cache_params(args: argparse.Namespace, cfg: dict[str, Any]) -> _CacheParams:
+def _resolve_cache_params(
+    args: argparse.Namespace, cfg: dict[str, Any]
+) -> _CacheParams:
     dcfg = cfg.get("datasets", {}).get("deepssf", {})
     if not isinstance(dcfg, dict):
         raise ValueError("Benchmark config datasets.deepssf must be a mapping/dict.")
@@ -265,7 +328,9 @@ def _deepssf_ds_kwargs(cfg: dict[str, Any], *, sampler_hash: str) -> dict[str, A
         v = dcfg[k]
         if k == "output_hw":
             if not (isinstance(v, (list, tuple)) and len(v) == 2):
-                raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+                raise ValueError(
+                    "datasets.deepssf.output_hw must be a 2-item sequence like [101,101]."
+                )
             v = (int(v[0]), int(v[1]))
         ds_kwargs[k] = v
     return ds_kwargs
@@ -285,12 +350,16 @@ def _expected_cache_manifest(
 
     output_hw = ds_kwargs.get("output_hw", (101, 101))
     if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
-        raise ValueError("datasets.deepssf.output_hw must be a 2-item sequence like [101,101].")
+        raise ValueError(
+            "datasets.deepssf.output_hw must be a 2-item sequence like [101,101]."
+        )
     output_hw = (int(output_hw[0]), int(output_hw[1]))
 
     normalize = bool(ds_kwargs.get("normalize", True))
     norm_hash_raw = ds_kwargs.get("normalization_sampler_hash", None)
-    norm_hash = str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+    norm_hash = (
+        str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+    )
 
     step_multiplier = float(ds_kwargs.get("step_multiplier", 2.0))
     step_q = float(ds_kwargs.get("step_q", 0.95))
@@ -312,7 +381,14 @@ def _expected_cache_manifest(
         compression=str(cache_params.compression),  # type: ignore[arg-type]
     )
 
-    cache_dir = Path(study_dir) / "cache" / "deepssf_wds" / str(split) / str(plan.config_hash) / str(cache_hash)
+    cache_dir = (
+        Path(study_dir)
+        / "cache"
+        / "deepssf_wds"
+        / str(split)
+        / str(plan.config_hash)
+        / str(cache_hash)
+    )
     return cache_dir / "manifest.json"
 
 
@@ -339,12 +415,18 @@ def _check_prereqs(
             return False, None, f"missing_rasters_root: {rasters_root}"
 
     try:
-        _train_dir, train_m = _select_parametric_train_store(study_dir=study.study_dir, plan=plan, sampler=issf_sampler)
+        _train_dir, train_m = _select_parametric_train_store(
+            study_dir=study.study_dir, plan=plan, sampler=issf_sampler
+        )
     except (FileNotFoundError, ValueError) as e:
         return False, None, f"missing_parametric_point_store_train: {e}"
 
     sampler_hash = str(train_m.sampler_hash)
-    stats_path = _norm_stats_path(study_dir=study.study_dir, config_hash=str(plan.config_hash), sampler_hash=sampler_hash)
+    stats_path = _norm_stats_path(
+        study_dir=study.study_dir,
+        config_hash=str(plan.config_hash),
+        sampler_hash=sampler_hash,
+    )
     if not stats_path.exists():
         return False, None, f"missing_points_normalization_stats: {stats_path}"
 
@@ -487,7 +569,11 @@ def _launcher(args: argparse.Namespace) -> int:
     cpus_per_task = (
         int(args.cpus_per_task)
         if args.cpus_per_task is not None
-        else (int(cache_params.build_workers) if int(cache_params.build_workers) > 0 else 16)
+        else (
+            int(cache_params.build_workers)
+            if int(cache_params.build_workers) > 0
+            else 16
+        )
     )
 
     if str(_REPO_ROOT) not in sys.path:
@@ -507,7 +593,11 @@ def _launcher(args: argparse.Namespace) -> int:
         studies = sorted(dict.fromkeys([str(s) for s in override_list]))
 
     config_stem = Path(str(args.config)).stem
-    log_dir = Path(args.log_dir) if args.log_dir else (_REPO_ROOT / "results" / "slurm" / "deepssf_wds" / config_stem)
+    log_dir = (
+        Path(args.log_dir)
+        if args.log_dir
+        else (_REPO_ROOT / "results" / "slurm" / "deepssf_wds" / config_stem)
+    )
     if not log_dir.is_absolute():
         log_dir = (_REPO_ROOT / log_dir).resolve()
 
@@ -516,7 +606,9 @@ def _launcher(args: argparse.Namespace) -> int:
     queue: list[str] = []
 
     for study_id in studies:
-        ok, sampler_hash, reason = _check_prereqs(study_id=str(study_id), cfg=cfg, plan=plan, issf_sampler=issf_sampler)
+        ok, sampler_hash, reason = _check_prereqs(
+            study_id=str(study_id), cfg=cfg, plan=plan, issf_sampler=issf_sampler
+        )
         if not ok or sampler_hash is None:
             blocked.append((str(study_id), reason))
             continue
@@ -553,7 +645,10 @@ def _launcher(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         if queue:
-            print(f"[wds] Dry-run: would launch {len(queue)} jobs (max_concurrent={args.max_concurrent_jobs}).", flush=True)
+            print(
+                f"[wds] Dry-run: would launch {len(queue)} jobs (max_concurrent={args.max_concurrent_jobs}).",
+                flush=True,
+            )
             for sid in queue[:10]:
                 cmd = _build_srun_cmd(
                     args=args,
@@ -566,7 +661,7 @@ def _launcher(args: argparse.Namespace) -> int:
                 )
                 print("[wds] ", shlex.join(cmd), flush=True)
             if len(queue) > 10:
-                print(f"[wds] ... ({len(queue)-10} more)", flush=True)
+                print(f"[wds] ... ({len(queue) - 10} more)", flush=True)
         return 2 if blocked else 0
 
     if not queue:
@@ -616,11 +711,17 @@ def _launcher(args: argparse.Namespace) -> int:
                 completed += 1
                 if int(rc) != 0:
                     failures.append(sid)
-                    print(f"[wds] FAILED study={sid} exit_code={rc}", file=sys.stderr, flush=True)
+                    print(
+                        f"[wds] FAILED study={sid} exit_code={rc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     print(f"[wds] DONE study={sid}", flush=True)
 
-            while queue_idx < len(queue) and len(running) < int(args.max_concurrent_jobs):
+            while queue_idx < len(queue) and len(running) < int(
+                args.max_concurrent_jobs
+            ):
                 sid = queue[queue_idx]
                 queue_idx += 1
                 _launch_one(sid)
@@ -635,13 +736,23 @@ def _launcher(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("[wds] Interrupted. Not launching new jobs.", file=sys.stderr, flush=True)
         if running:
-            print(f"[wds] Still running: {sorted(running.keys())}", file=sys.stderr, flush=True)
+            print(
+                f"[wds] Still running: {sorted(running.keys())}",
+                file=sys.stderr,
+                flush=True,
+            )
         return 130
 
     if failures or blocked:
-        print(f"[wds] Finished with failures={len(failures)} blocked={len(blocked)}", file=sys.stderr, flush=True)
+        print(
+            f"[wds] Finished with failures={len(failures)} blocked={len(blocked)}",
+            file=sys.stderr,
+            flush=True,
+        )
         if failures:
-            print(f"[wds] Failed studies: {sorted(failures)}", file=sys.stderr, flush=True)
+            print(
+                f"[wds] Failed studies: {sorted(failures)}", file=sys.stderr, flush=True
+            )
         return 2
 
     print("[wds] All jobs completed successfully.", flush=True)

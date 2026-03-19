@@ -77,7 +77,15 @@ def _dir_size_bytes(path: Path) -> int:
     return int(total)
 
 
-def _ensure_ready(*, study: Study, layers_config: str, setup_workers: int, step_multiplier: float, step_q: float, gap_q: float) -> str:
+def _ensure_ready(
+    *,
+    study: Study,
+    layers_config: str,
+    setup_workers: int,
+    step_multiplier: float,
+    step_q: float,
+    gap_q: float,
+) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
     from movebench.features.points import select_point_store_dir
 
@@ -163,7 +171,14 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize(device=device)
 
 
-def _bench_loader(loader: Any, *, device: torch.device, batches: int, warmup_batches: int, move_to_device: bool) -> dict[str, Any]:
+def _bench_loader(
+    loader: Any,
+    *,
+    device: torch.device,
+    batches: int,
+    warmup_batches: int,
+    move_to_device: bool,
+) -> dict[str, Any]:
     it = iter(loader)
     for _ in range(int(warmup_batches)):
         try:
@@ -200,7 +215,9 @@ def _bench_loader(loader: Any, *, device: torch.device, batches: int, warmup_bat
     }
 
 
-def _make_deepssf_optimizer(model: DeepSSF, *, lr_movement: float, lr_habitat: float, weight_decay: float):
+def _make_deepssf_optimizer(
+    model: DeepSSF, *, lr_movement: float, lr_habitat: float, weight_decay: float
+):
     groups = model.parameter_groups()
     return torch.optim.Adam(
         [
@@ -225,7 +242,10 @@ def _bench_train(
     model.to(device)
     model.train()
     opt = _make_deepssf_optimizer(
-        model, lr_movement=float(lr_movement), lr_habitat=float(lr_habitat), weight_decay=float(weight_decay)
+        model,
+        lr_movement=float(lr_movement),
+        lr_habitat=float(lr_habitat),
+        weight_decay=float(weight_decay),
     )
 
     def _one_update(batch) -> tuple[int, int]:
@@ -237,7 +257,9 @@ def _bench_train(
 
         out = model((x1, x2, x3))
         if out.ndim != 4 or int(out.shape[-1]) != 2:
-            raise ValueError(f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}")
+            raise ValueError(
+                f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}"
+            )
 
         scores = out[..., 0] + out[..., 1]
         B, H, W = scores.shape
@@ -436,14 +458,30 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     _b, c_env, h, w = x1.shape
     if int(h) != int(w):
         raise ValueError(f"deepSSF expects square chips. Got H={h}, W={w}.")
-    if int(h) != int(manifest["output_hw"][0]) or int(w) != int(manifest["output_hw"][1]):
-        raise ValueError(f"Cache output_hw mismatch. cache={manifest['output_hw']} loader={(h,w)}")
+    if int(h) != int(manifest["output_hw"][0]) or int(w) != int(
+        manifest["output_hw"][1]
+    ):
+        raise ValueError(
+            f"Cache output_hw mismatch. cache={manifest['output_hw']} loader={(h, w)}"
+        )
 
-    init_model = DeepSSF(int(c_env), image_dim=int(h), pixel_size_m=float(manifest["pixel_size_m"]), device=device)
-    init_state = {k: v.detach().cpu().clone() for k, v in init_model.state_dict().items()}
+    init_model = DeepSSF(
+        int(c_env),
+        image_dim=int(h),
+        pixel_size_m=float(manifest["pixel_size_m"]),
+        device=device,
+    )
+    init_state = {
+        k: v.detach().cpu().clone() for k, v in init_model.state_dict().items()
+    }
 
     def _clone_model() -> DeepSSF:
-        m = DeepSSF(int(c_env), image_dim=int(h), pixel_size_m=float(manifest["pixel_size_m"]), device=device)
+        m = DeepSSF(
+            int(c_env),
+            image_dim=int(h),
+            pixel_size_m=float(manifest["pixel_size_m"]),
+            device=device,
+        )
         m.load_state_dict({k: v.to(device) for k, v in init_state.items()})
         return m
 
@@ -464,10 +502,14 @@ def _cmd_bench(args: argparse.Namespace) -> None:
         "cache_dir": str(cache_dir),
         "cache_hash": str(manifest["cache_hash"]),
         "cache_bytes": int(cache_bytes),
-        "cache_bytes_per_sample": float(cache_bytes) / float(manifest["num_samples"]) if manifest["num_samples"] > 0 else None,
+        "cache_bytes_per_sample": float(cache_bytes) / float(manifest["num_samples"])
+        if manifest["num_samples"] > 0
+        else None,
         "rasters_dir": str(rasters_dir),
         "rasters_bytes": int(rasters_bytes),
-        "cache_vs_rasters_ratio": float(cache_bytes) / float(rasters_bytes) if rasters_bytes > 0 else None,
+        "cache_vs_rasters_ratio": float(cache_bytes) / float(rasters_bytes)
+        if rasters_bytes > 0
+        else None,
         "bench": {},
     }
 
@@ -549,8 +591,18 @@ def _cmd_bench(args: argparse.Namespace) -> None:
 
 
 def _add_common_dataset_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--config", type=str, default="configs/layers_all.yaml", help="Layer config YAML.")
-    p.add_argument("--output-hw", type=_parse_hw, default=(101, 101), help="Chip (H,W), e.g. 101,101.")
+    p.add_argument(
+        "--config",
+        type=str,
+        default="configs/layers_all.yaml",
+        help="Layer config YAML.",
+    )
+    p.add_argument(
+        "--output-hw",
+        type=_parse_hw,
+        default=(101, 101),
+        help="Chip (H,W), e.g. 101,101.",
+    )
     p.add_argument("--normalize", action="store_true", default=True)
     p.add_argument("--no-normalize", action="store_false", dest="normalize")
     p.add_argument("--step-multiplier", type=float, default=2.0)
@@ -559,21 +611,56 @@ def _add_common_dataset_args(p: argparse.ArgumentParser) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build/benchmark WebDataset caches for deepSSF.")
+    p = argparse.ArgumentParser(
+        description="Build/benchmark WebDataset caches for deepSSF."
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="Build deepSSF WebDataset caches.")
-    b.add_argument("--studies", type=str, default="all", help="Comma-separated study ids, or 'all' (default).")
-    b.add_argument("--splits", type=_parse_splits, default=["train", "test"], help="Comma list, e.g. train,test")
+    b.add_argument(
+        "--studies",
+        type=str,
+        default="all",
+        help="Comma-separated study ids, or 'all' (default).",
+    )
+    b.add_argument(
+        "--splits",
+        type=_parse_splits,
+        default=["train", "test"],
+        help="Comma list, e.g. train,test",
+    )
     _add_common_dataset_args(b)
-    b.add_argument("--setup-workers", type=int, default=16, help="Workers for raster download / point extraction.")
+    b.add_argument(
+        "--setup-workers",
+        type=int,
+        default=16,
+        help="Workers for raster download / point extraction.",
+    )
     b.add_argument("--samples-per-shard", type=int, default=256)
-    b.add_argument("--spatial-dtype", type=str, default="float16", choices=("float16", "float32"))
-    b.add_argument("--target-dtype", type=str, default="uint8", choices=("uint8", "float16", "float32"))
+    b.add_argument(
+        "--spatial-dtype", type=str, default="float16", choices=("float16", "float32")
+    )
+    b.add_argument(
+        "--target-dtype",
+        type=str,
+        default="uint8",
+        choices=("uint8", "float16", "float32"),
+    )
     b.add_argument("--compression", type=str, default="none", choices=("none", "gz"))
-    b.add_argument("--build-workers", type=int, default=0, help="DataLoader workers used while building the cache.")
-    b.add_argument("--overwrite", action="store_true", help="Overwrite existing caches.")
-    b.add_argument("--resume", action="store_true", help="Resume partially-built caches (missing manifest).")
+    b.add_argument(
+        "--build-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers used while building the cache.",
+    )
+    b.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing caches."
+    )
+    b.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume partially-built caches (missing manifest).",
+    )
     b.add_argument("--seed", type=int, default=0)
     b.set_defaults(func=_cmd_build)
 
@@ -583,11 +670,22 @@ def _parse_args() -> argparse.Namespace:
     _add_common_dataset_args(q)
     q.add_argument("--setup-workers", type=int, default=16)
     q.add_argument("--samples-per-shard", type=int, default=256)
-    q.add_argument("--spatial-dtype", type=str, default="float16", choices=("float16", "float32"))
-    q.add_argument("--target-dtype", type=str, default="uint8", choices=("uint8", "float16", "float32"))
+    q.add_argument(
+        "--spatial-dtype", type=str, default="float16", choices=("float16", "float32")
+    )
+    q.add_argument(
+        "--target-dtype",
+        type=str,
+        default="uint8",
+        choices=("uint8", "float16", "float32"),
+    )
     q.add_argument("--compression", type=str, default="none", choices=("none", "gz"))
     q.add_argument("--build-workers", type=int, default=0)
-    q.add_argument("--resume", action="store_true", help="Resume partially-built caches (missing manifest).")
+    q.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume partially-built caches (missing manifest).",
+    )
     q.add_argument("--device", type=str, default="cpu")
     q.add_argument("--batch-size", type=int, default=32)
     q.add_argument("--num-workers", type=int, default=0)

@@ -34,8 +34,17 @@ class Raster:
 def read_geotiff(path: str | Path) -> Raster:
     with rasterio.open(Path(path)) as ds:
         arr = ds.read()
-        bounds = (float(ds.bounds.left), float(ds.bounds.bottom), float(ds.bounds.right), float(ds.bounds.top))
-        band_ids = list(ds.descriptions) if ds.descriptions and any(ds.descriptions) else [f"band_{i+1}" for i in range(ds.count)]
+        bounds = (
+            float(ds.bounds.left),
+            float(ds.bounds.bottom),
+            float(ds.bounds.right),
+            float(ds.bounds.top),
+        )
+        band_ids = (
+            list(ds.descriptions)
+            if ds.descriptions and any(ds.descriptions)
+            else [f"band_{i + 1}" for i in range(ds.count)]
+        )
         return Raster(
             array=arr,
             transform=ds.transform,
@@ -46,7 +55,9 @@ def read_geotiff(path: str | Path) -> Raster:
         )
 
 
-def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, float, float]) -> Raster:
+def read_geotiff_window(
+    path: str | Path, bounds_latlon: tuple[float, float, float, float]
+) -> Raster:
     """Read a window from a GeoTIFF using an EPSG:4326 bounds box.
 
     If the dataset is not in EPSG:4326, the bounds are transformed into the
@@ -56,7 +67,9 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
 
     with rasterio.open(Path(path)) as ds:
         if ds.crs is not None and str(ds.crs) != WGS84_CRS:
-            left, bottom, right, top = transform_bounds(WGS84_CRS, ds.crs, min_lon, min_lat, max_lon, max_lat)
+            left, bottom, right, top = transform_bounds(
+                WGS84_CRS, ds.crs, min_lon, min_lat, max_lon, max_lat
+            )
             bounds_in_ds = (left, bottom, right, top)
         else:
             bounds_in_ds = (min_lon, min_lat, max_lon, max_lat)
@@ -78,7 +91,11 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
 
         fill_val = ds.nodata if ds.nodata is not None else np.nan
         arr = ds.read(window=window, boundless=True, fill_value=fill_val)
-        band_ids = list(ds.descriptions) if ds.descriptions and any(ds.descriptions) else [f"band_{i+1}" for i in range(ds.count)]
+        band_ids = (
+            list(ds.descriptions)
+            if ds.descriptions and any(ds.descriptions)
+            else [f"band_{i + 1}" for i in range(ds.count)]
+        )
 
         return Raster(
             array=arr,
@@ -90,7 +107,9 @@ def read_geotiff_window(path: str | Path, bounds_latlon: tuple[float, float, flo
         )
 
 
-def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float, float, float, float]) -> Raster:
+def merge_hdf_window(
+    subdataset_paths: Iterable[str], bounds_latlon: tuple[float, float, float, float]
+) -> Raster:
     """Load and merge multiple HDF subdatasets for an EPSG:4326 bounds box."""
     paths = list(subdataset_paths)
     if not paths:
@@ -100,16 +119,26 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
     try:
         crs = datasets[0].crs
         if crs is None:
-            raise ValueError("HDF subdataset has no CRS; cannot window by lat/lon bounds")
+            raise ValueError(
+                "HDF subdataset has no CRS; cannot window by lat/lon bounds"
+            )
 
         nodata_val = datasets[0].nodata
         if nodata_val is None:
             nodata_val = 255
 
         min_lon, min_lat, max_lon, max_lat = bounds_latlon
-        left, bottom, right, top = transform_bounds(WGS84_CRS, crs, min_lon, min_lat, max_lon, max_lat)
+        left, bottom, right, top = transform_bounds(
+            WGS84_CRS, crs, min_lon, min_lat, max_lon, max_lat
+        )
         # Snap to >=1-pixel integer bounds in the dataset CRS (avoids 0x0 merges).
-        win = from_bounds(float(left), float(bottom), float(right), float(top), transform=datasets[0].transform)
+        win = from_bounds(
+            float(left),
+            float(bottom),
+            float(right),
+            float(top),
+            transform=datasets[0].transform,
+        )
         col0 = int(math.floor(win.col_off))
         row0 = int(math.floor(win.row_off))
         col1 = int(math.ceil(win.col_off + win.width))
@@ -130,7 +159,11 @@ def merge_hdf_window(subdataset_paths: Iterable[str], bounds_latlon: tuple[float
         )
 
         descriptions = datasets[0].descriptions
-        band_ids = list(descriptions) if descriptions and any(descriptions) else [f"band_{i+1}" for i in range(mosaic.shape[0])]
+        band_ids = (
+            list(descriptions)
+            if descriptions and any(descriptions)
+            else [f"band_{i + 1}" for i in range(mosaic.shape[0])]
+        )
 
         # Ensure nodata uses a float NaN when appropriate for downstream math.
         if isinstance(nodata_val, (int, float)) and np.isfinite(nodata_val):
@@ -189,7 +222,9 @@ def reproject_to_meters(
         dst_width = int(dst_width)
         dst_height = int(dst_height)
         if dst_width <= 0 or dst_height <= 0:
-            raise ValueError(f"dst_width/dst_height must be positive, got {(dst_width, dst_height)}")
+            raise ValueError(
+                f"dst_width/dst_height must be positive, got {(dst_width, dst_height)}"
+            )
 
     _, H_ref, W_ref = ref.array.shape
 
@@ -229,12 +264,16 @@ def reproject_to_meters(
         src_nodata = layer.nodata
 
         # Preserve categorical nodata values when possible; otherwise use NaN.
-        if src_nodata is not None and not (isinstance(src_nodata, float) and np.isnan(src_nodata)):
+        if src_nodata is not None and not (
+            isinstance(src_nodata, float) and np.isnan(src_nodata)
+        ):
             dst_nodata = src_nodata
         else:
             dst_nodata = np.nan
 
-        dst = np.full((C, int(dst_height), int(dst_width)), dst_nodata, dtype=np.float32)
+        dst = np.full(
+            (C, int(dst_height), int(dst_width)), dst_nodata, dtype=np.float32
+        )
 
         reproject(
             source=layer.array,

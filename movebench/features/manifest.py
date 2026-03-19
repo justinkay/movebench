@@ -66,7 +66,14 @@ class PointFeatureManifest:
             raise ValueError("sampler.type is required")
         if self.sampler["type"] not in ("empirical", "parametric"):
             raise ValueError(f"Unknown sampler.type: {self.sampler['type']!r}")
-        for key in ("num_candidates", "random_seed", "step_multiplier", "step_q", "max_step_q", "gap_q"):
+        for key in (
+            "num_candidates",
+            "random_seed",
+            "step_multiplier",
+            "step_q",
+            "max_step_q",
+            "gap_q",
+        ):
             if key not in self.sampler:
                 raise ValueError(f"sampler.{key} is required")
         if "bounds_buffer_deg" not in self.extraction:
@@ -88,9 +95,13 @@ class PointFeatureManifest:
         for band_id, meta in self.bands.items():
             shape = list(meta.get("shape", []))
             if len(shape) != 2:
-                raise ValueError(f"Band {band_id!r} must have rank-2 shape [N,P], got {shape}")
+                raise ValueError(
+                    f"Band {band_id!r} must have rank-2 shape [N,P], got {shape}"
+                )
             if int(shape[0]) != n_steps or int(shape[1]) != points_per_step:
-                raise ValueError(f"Band {band_id!r} shape {shape} does not match shared shape [{n_steps},{points_per_step}]")
+                raise ValueError(
+                    f"Band {band_id!r} shape {shape} does not match shared shape [{n_steps},{points_per_step}]"
+                )
             if "path" not in meta:
                 raise ValueError(f"Band {band_id!r} missing path")
 
@@ -101,7 +112,9 @@ class PointFeatureManifest:
             for band_id, meta in self.bands.items():
                 band_path = root_dir / str(meta["path"])
                 if not band_path.exists():
-                    raise FileNotFoundError(f"Missing band file for {band_id!r}: {band_path}")
+                    raise FileNotFoundError(
+                        f"Missing band file for {band_id!r}: {band_path}"
+                    )
 
 
 def write_manifest(path: Path, manifest: PointFeatureManifest) -> None:

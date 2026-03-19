@@ -13,7 +13,9 @@ def _band_index(r: Raster, band_id: str) -> int:
     try:
         return r.band_ids.index(band_id)
     except ValueError as e:
-        raise KeyError(f"Raster missing required band_id {band_id!r}. Has: {r.band_ids}") from e
+        raise KeyError(
+            f"Raster missing required band_id {band_id!r}. Has: {r.band_ids}"
+        ) from e
 
 
 def _band_array(r: Raster, band_id: str) -> np.ndarray:
@@ -136,7 +138,9 @@ def compute_landsat_lst(*, landsat: Raster) -> np.ndarray:
     return thermal[np.newaxis]
 
 
-def compute_orographic_uplift_hourly(*, slope: Raster, aspect: Raster, era5_land_hourly: Raster) -> np.ndarray:
+def compute_orographic_uplift_hourly(
+    *, slope: Raster, aspect: Raster, era5_land_hourly: Raster
+) -> np.ndarray:
     slope_rad = np.radians(slope.array[0])
 
     sin_asp = aspect.array[0]
@@ -162,7 +166,9 @@ def compute_orographic_uplift_hourly(*, slope: Raster, aspect: Raster, era5_land
     return wo[np.newaxis]
 
 
-def compute_thermal_uplift_hourly(*, era5_land_hourly: Raster, era5_hourly: Raster) -> np.ndarray:
+def compute_thermal_uplift_hourly(
+    *, era5_land_hourly: Raster, era5_hourly: Raster
+) -> np.ndarray:
     t_i = _band_index(era5_land_hourly, "era5_land_hourly.temperature_2m")
     shf_i = _band_index(era5_land_hourly, "era5_land_hourly.surface_sensible_heat_flux")
     blh_i = _band_index(era5_hourly, "era5_hourly.boundary_layer_height")

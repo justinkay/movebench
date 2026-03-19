@@ -79,12 +79,15 @@ def _format_slug_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _truncate_key(base: str, *, payload: bytes, max_len: int = _MAX_ARTIFACT_KEY_LEN) -> str:
+def _truncate_key(
+    base: str, *, payload: bytes, max_len: int = _MAX_ARTIFACT_KEY_LEN
+) -> str:
     if len(base) <= max_len:
         return base
     suffix = hashlib.sha256(payload).hexdigest()[:8]
     keep = max_len - len("-k") - len(suffix)
     return f"{base[:keep].rstrip('-')}-k{suffix}"
+
 
 def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
     return {
@@ -95,12 +98,17 @@ def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
         for name, g in sorted(cfg.chip_groups.items(), key=lambda kv: kv[0])
     }
 
+
 def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
     rp = cfg.raster_params
     buffer = {
         "step_multiplier": float(rp["buffer"]["step_multiplier"]),
         "step_q": float(rp["buffer"]["step_q"]),
-        "max_step_q": float(rp["buffer"].get("max_step_q", DEFAULT_RASTER_PARAMS["buffer"]["max_step_q"])),
+        "max_step_q": float(
+            rp["buffer"].get(
+                "max_step_q", DEFAULT_RASTER_PARAMS["buffer"]["max_step_q"]
+            )
+        ),
         "gap_q": float(rp["buffer"]["gap_q"]),
     }
     if rp["buffer"].get("min_step_time_s") is not None:
@@ -122,6 +130,7 @@ def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
         },
     }
 
+
 def rasters_hash(cfg: LayersConfig) -> str:
     """Readable, bounded key for the on-disk rasters cache.
 
@@ -130,7 +139,9 @@ def rasters_hash(cfg: LayersConfig) -> str:
     superset config and a strict subset config).
     """
     raster_params = _canonical_raster_params(cfg)
-    payload = json.dumps(raster_params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = json.dumps(raster_params, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     buffer = raster_params["buffer"]
     parts = [
         f"sm{_format_slug_number(buffer['step_multiplier'])}",
@@ -162,7 +173,9 @@ def _parse_duration_seconds(raw: Any, *, field_name: str) -> int | None:
         raise ValueError(f"{field_name} must be a string duration like '1h' or null")
     match = _DURATION_RE.fullmatch(raw.strip())
     if match is None:
-        raise ValueError(f"{field_name} must match <int><unit> with unit in {{s,m,h,d}}, got {raw!r}")
+        raise ValueError(
+            f"{field_name} must match <int><unit> with unit in {{s,m,h,d}}, got {raw!r}"
+        )
 
     value = int(match.group("value"))
     if value <= 0:
@@ -172,6 +185,7 @@ def _parse_duration_seconds(raw: Any, *, field_name: str) -> int | None:
     multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
     return value * multiplier
 
+
 def _parse_raster_params(raw: Any) -> dict[str, Any]:
     if raw is None:
         raw = {}
@@ -179,7 +193,9 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
         raise ValueError("'raster_params' must be a mapping")
 
     if "region_multiplier" in raw:
-        raise ValueError("raster_params.region_multiplier has been removed; use max_step_time to control extent")
+        raise ValueError(
+            "raster_params.region_multiplier has been removed; use max_step_time to control extent"
+        )
 
     allowed_keys = {"buffer", "scale_clamp", "tiles"}
     unexpected_keys = sorted(str(k) for k in raw.keys() if k not in allowed_keys)
@@ -210,14 +226,24 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
         buf_raw.get("max_step_time"),
         field_name="raster_params.buffer.max_step_time",
     )
-    if min_step_time_s is not None and max_step_time_s is not None and min_step_time_s > max_step_time_s:
-        raise ValueError("raster_params.buffer.min_step_time must be <= raster_params.buffer.max_step_time")
+    if (
+        min_step_time_s is not None
+        and max_step_time_s is not None
+        and min_step_time_s > max_step_time_s
+    ):
+        raise ValueError(
+            "raster_params.buffer.min_step_time must be <= raster_params.buffer.max_step_time"
+        )
     if step_multiplier <= 0:
-        raise ValueError(f"raster_params.buffer.step_multiplier must be > 0, got {step_multiplier}")
+        raise ValueError(
+            f"raster_params.buffer.step_multiplier must be > 0, got {step_multiplier}"
+        )
     if not (0.0 <= step_q <= 1.0):
         raise ValueError(f"raster_params.buffer.step_q must be in [0,1], got {step_q}")
     if not (0.0 <= max_step_q <= 1.0):
-        raise ValueError(f"raster_params.buffer.max_step_q must be in [0,1], got {max_step_q}")
+        raise ValueError(
+            f"raster_params.buffer.max_step_q must be in [0,1], got {max_step_q}"
+        )
     if not (0.0 <= gap_q <= 1.0):
         raise ValueError(f"raster_params.buffer.gap_q must be in [0,1], got {gap_q}")
 
@@ -225,7 +251,9 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     min_pixels = int(clamp["min_pixels"])
     max_pixels = int(clamp["max_pixels"])
     if min_pixels <= 0:
-        raise ValueError(f"raster_params.scale_clamp.min_pixels must be >= 1, got {min_pixels}")
+        raise ValueError(
+            f"raster_params.scale_clamp.min_pixels must be >= 1, got {min_pixels}"
+        )
     if max_pixels < min_pixels:
         raise ValueError(
             f"raster_params.scale_clamp.max_pixels must be >= min_pixels ({min_pixels}), got {max_pixels}"
@@ -234,7 +262,9 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     tiles = {**DEFAULT_RASTER_PARAMS["tiles"], **_get_section("tiles")}
     px_per_side = int(tiles["px_per_side"])
     if px_per_side <= 0:
-        raise ValueError(f"raster_params.tiles.px_per_side must be >= 1, got {px_per_side}")
+        raise ValueError(
+            f"raster_params.tiles.px_per_side must be >= 1, got {px_per_side}"
+        )
 
     return {
         "buffer": {
@@ -272,13 +302,22 @@ def parse_layers_config(data: dict[str, Any]) -> LayersConfig:
         if "layers" not in g:
             raise ValueError(f"chip_groups.{name} missing required key: 'layers'")
         if "target_scale_m" not in g:
-            raise ValueError(f"chip_groups.{name} missing required key: 'target_scale_m'")
+            raise ValueError(
+                f"chip_groups.{name} missing required key: 'target_scale_m'"
+            )
         glayers = g["layers"]
-        if not isinstance(glayers, list) or not all(isinstance(x, str) for x in glayers):
+        if not isinstance(glayers, list) or not all(
+            isinstance(x, str) for x in glayers
+        ):
             raise ValueError(f"chip_groups.{name}.layers must be a list of strings")
-        chip_groups[name] = {"layers": glayers, "target_scale_m": float(g["target_scale_m"])}
+        chip_groups[name] = {
+            "layers": glayers,
+            "target_scale_m": float(g["target_scale_m"]),
+        }
 
-    return LayersConfig(layers=layers, chip_groups=chip_groups, raster_params=raster_params)
+    return LayersConfig(
+        layers=layers, chip_groups=chip_groups, raster_params=raster_params
+    )
 
 
 def load_layers_config(path: str | Path) -> LayersConfig:

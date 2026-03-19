@@ -114,7 +114,9 @@ def run(args: argparse.Namespace) -> int:
     all_names = Study.list_available()
 
     studies = args.studies
-    if studies is None or (len(studies) == 1 and str(studies[0]).strip().lower() == "all"):
+    if studies is None or (
+        len(studies) == 1 and str(studies[0]).strip().lower() == "all"
+    ):
         names = all_names
     else:
         names = [str(s) for s in studies]

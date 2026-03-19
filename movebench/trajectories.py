@@ -38,7 +38,10 @@ def haversine_distance_m(
 
     dlat = end_lat - start_lat
     dlon = end_lon - start_lon
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(start_lat) * np.cos(end_lat) * np.sin(dlon / 2.0) ** 2
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(start_lat) * np.cos(end_lat) * np.sin(dlon / 2.0) ** 2
+    )
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return 6371000.0 * c
 
@@ -55,7 +58,9 @@ def compute_step_length_extent_m(
 ) -> float:
     """Compute the extent cutoff from step lengths."""
     valid = np.asarray(step_lengths_m, dtype=np.float64)
-    base_extent_m = float(step_multiplier) * float(np.nanquantile(valid, q=float(step_q)))
+    base_extent_m = float(step_multiplier) * float(
+        np.nanquantile(valid, q=float(step_q))
+    )
     max_extent_m = float(np.nanquantile(valid, q=float(max_step_q)))
     return min(base_extent_m, max_extent_m)
 
@@ -109,7 +114,9 @@ def prepare_interval_step_starts(
 
     g = d.groupby(INDIVIDUAL_COL, sort=False)
     d["time_since_last"] = g[TIME_COL].diff()
-    per_indiv_cutoff = g["time_since_last"].transform(lambda s: s.dropna().quantile(gap_q))
+    per_indiv_cutoff = g["time_since_last"].transform(
+        lambda s: s.dropna().quantile(gap_q)
+    )
     d["within_time"] = d["time_since_last"] <= per_indiv_cutoff
     d["is_first_in_indiv"] = g.cumcount() == 0
     d["burst_start"] = d["is_first_in_indiv"] | (~d["within_time"])
@@ -119,7 +126,11 @@ def prepare_interval_step_starts(
     source_index = d["_source_index"].to_numpy(dtype=np.int64, copy=False)
     # Pandas may preserve lower-resolution datetime64 units (for example `us`)
     # after parsing; normalize to nanoseconds before raw integer arithmetic.
-    time_values = d[TIME_COL].to_numpy(dtype="datetime64[ns]", copy=False).astype(np.int64, copy=False)
+    time_values = (
+        d[TIME_COL]
+        .to_numpy(dtype="datetime64[ns]", copy=False)
+        .astype(np.int64, copy=False)
+    )
     end_index = np.full(n_rows, -1, dtype=np.int64)
     actual_step_time_s = np.full(n_rows, np.nan, dtype=np.float64)
     step_time_error_s = np.full(n_rows, np.nan, dtype=np.float64)
@@ -149,10 +160,18 @@ def prepare_interval_step_starts(
         choose_right = right_valid & ~left_valid
         both_valid = right_valid & left_valid
         if both_valid.any():
-            right_error = np.abs(burst_times[cand_right[both_valid]] - burst_targets[both_valid])
-            left_error = np.abs(burst_times[cand_left[both_valid]] - burst_targets[both_valid])
+            right_error = np.abs(
+                burst_times[cand_right[both_valid]] - burst_targets[both_valid]
+            )
+            left_error = np.abs(
+                burst_times[cand_left[both_valid]] - burst_targets[both_valid]
+            )
             right_is_better = (right_error < left_error) | (
-                (right_error == left_error) & (burst_times[cand_right[both_valid]] > burst_times[cand_left[both_valid]])
+                (right_error == left_error)
+                & (
+                    burst_times[cand_right[both_valid]]
+                    > burst_times[cand_left[both_valid]]
+                )
             )
             choose_right[both_valid] = right_is_better
 
@@ -190,7 +209,9 @@ def prepare_interval_step_starts(
         )
 
     d["step_target_time"] = d[TIME_COL] + pd.to_timedelta(step_time_s, unit="s")
-    d["step_end_index"] = pd.array([None if i < 0 else int(i) for i in end_index], dtype="Int64")
+    d["step_end_index"] = pd.array(
+        [None if i < 0 else int(i) for i in end_index], dtype="Int64"
+    )
     d["actual_step_time_s"] = actual_step_time_s
     d["step_time_error_s"] = step_time_error_s
     d["step_length_m"] = step_length_m
@@ -228,7 +249,9 @@ def compute_movement_features(
 
     # ---- time gaps per individual ----
     df["time_since_last"] = g[TIME_COL].diff()
-    per_indiv_cutoff = g["time_since_last"].transform(lambda s: s.dropna().quantile(gap_q))
+    per_indiv_cutoff = g["time_since_last"].transform(
+        lambda s: s.dropna().quantile(gap_q)
+    )
     df["within_time"] = df["time_since_last"] <= per_indiv_cutoff
 
     # ---- step length per individual ----
@@ -247,7 +270,9 @@ def compute_movement_features(
     dlon = df["lon_rad"] - df["lon_prev"]
 
     # Initial valid step mask (time + positive distance).
-    df["valid_step"] = df["within_time"] & df["step_length_m"].notna() & (df["step_length_m"] > 0)
+    df["valid_step"] = (
+        df["within_time"] & df["step_length_m"].notna() & (df["step_length_m"] > 0)
+    )
 
     # ---- step-length cutoff ----
     max_step_len = compute_step_length_extent_m(
@@ -261,7 +286,9 @@ def compute_movement_features(
 
     # ---- turn angles ----
     y = np.sin(dlon) * np.cos(df["lat_rad"])
-    x = np.cos(df["lat_prev"]) * np.sin(df["lat_rad"]) - np.sin(df["lat_prev"]) * np.cos(df["lat_rad"]) * np.cos(dlon)
+    x = np.cos(df["lat_prev"]) * np.sin(df["lat_rad"]) - np.sin(
+        df["lat_prev"]
+    ) * np.cos(df["lat_rad"]) * np.cos(dlon)
     df["bearing"] = np.arctan2(y, x)  # [-pi, pi], NaN at first row per individual
 
     df["bearing_prev"] = g["bearing"].shift()
@@ -270,7 +297,9 @@ def compute_movement_features(
     turn = df["bearing"] - df["bearing_prev"]
     turn = (turn + np.pi) % (2.0 * np.pi) - np.pi  # wrap
 
-    df["turn_angle_rad"] = np.where(df["valid_step"] & df["valid_step_prev"], turn, np.nan)
+    df["turn_angle_rad"] = np.where(
+        df["valid_step"] & df["valid_step_prev"], turn, np.nan
+    )
 
     # ---- bursts ----
     df["is_first_in_indiv"] = g.cumcount() == 0
@@ -284,7 +313,9 @@ def compute_movement_features(
     same_burst_next = df["burst_id"].eq(df["burst_id"].shift(-1))
     valid_step_next = df["valid_step"].shift(-1).fillna(False).astype(bool)
 
-    df["can_be_step_start"] = (~df["is_first_in_indiv"]) & same_indiv_next & same_burst_next & valid_step_next
+    df["can_be_step_start"] = (
+        (~df["is_first_in_indiv"]) & same_indiv_next & same_burst_next & valid_step_next
+    )
 
     df = df.drop(
         columns=[
@@ -354,7 +385,9 @@ def select_step_starts(
     starts = starts.reset_index(drop=True)
     ends = ends.reset_index(drop=True)
     if len(starts) != len(ends):
-        raise RuntimeError(f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})")
+        raise RuntimeError(
+            f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})"
+        )
 
     out = pd.DataFrame(
         {
@@ -369,6 +402,8 @@ def select_step_starts(
     )
 
     finite = np.isfinite(
-        out[["start_lon", "start_lat", "start_bearing", "end_lon", "end_lat"]].to_numpy(dtype=np.float64, copy=False)
+        out[["start_lon", "start_lat", "start_bearing", "end_lon", "end_lat"]].to_numpy(
+            dtype=np.float64, copy=False
+        )
     ).all(axis=1)
     return out.loc[finite].reset_index(drop=True)

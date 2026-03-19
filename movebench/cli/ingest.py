@@ -89,7 +89,9 @@ def _subsample_individuals(
     n_points_before = int(len(df))
     n_individuals_before = int(df[INDIVIDUAL_COL].nunique())
     if n_points_before == 0 or n_individuals_before == 0:
-        raise ValueError("No valid rows/individuals remaining after filtering timestamps/lat/lon/individual ids.")
+        raise ValueError(
+            "No valid rows/individuals remaining after filtering timestamps/lat/lon/individual ids."
+        )
 
     counts = df.groupby(INDIVIDUAL_COL).size()
     individual_ids = sorted(counts.index.tolist(), key=lambda x: str(x))
@@ -182,7 +184,9 @@ def _write_manifest(
     }
     if subsample is not None:
         manifest["subsample"] = dict(subsample)
-    (study_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    (study_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def _commit_staged_study_dir(*, staged_dir: Path, final_dir: Path, force: bool) -> None:
@@ -191,8 +195,12 @@ def _commit_staged_study_dir(*, staged_dir: Path, final_dir: Path, force: bool) 
 
     if final_dir.exists():
         if not force:
-            raise FileExistsError(f"Study directory already exists: {final_dir} (use --force to overwrite)")
-        backup = final_dir.with_name(f"{final_dir.name}.bak_ingest_{os.getpid()}_{uuid.uuid4().hex}")
+            raise FileExistsError(
+                f"Study directory already exists: {final_dir} (use --force to overwrite)"
+            )
+        backup = final_dir.with_name(
+            f"{final_dir.name}.bak_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        )
         final_dir.rename(backup)
         try:
             staged_dir.rename(final_dir)
@@ -265,19 +273,27 @@ def _ingest_one_csv(
             f"max_individuals={int(max_individuals)} max_points={int(max_points)} random_seed={int(random_seed)} "
             f"stop={subsample_info['stop_reason']}"
         )
-        print(f"{log_prefix}n_points:   {n_points} (from {int(subsample_info['n_points_before'])})")
-        print(f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})")
+        print(
+            f"{log_prefix}n_points:   {n_points} (from {int(subsample_info['n_points_before'])})"
+        )
+        print(
+            f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})"
+        )
         print(f"{log_prefix}split:      train={n_train} test={n_test}")
 
     if n_test == 0:
-        print(f"{log_prefix}WARNING: no test rows found after split assignment (all points are train).")
+        print(
+            f"{log_prefix}WARNING: no test rows found after split assignment (all points are train)."
+        )
 
     if dry_run:
         return
 
     if study_dir.exists():
         if not force:
-            raise FileExistsError(f"Study directory already exists: {study_dir} (use --force to overwrite)")
+            raise FileExistsError(
+                f"Study directory already exists: {study_dir} (use --force to overwrite)"
+            )
         shutil.rmtree(study_dir)
 
     study_dir.mkdir(parents=True, exist_ok=True)
@@ -302,10 +318,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         type=Path,
         help="Path to a Movebank-formatted CSV or a directory of CSVs.",
     )
-    parser.add_argument("--study-id", type=str, default=None, help="Study id (default: CSV stem).")
-    parser.add_argument("--data-root", type=Path, default=None, help="Override MOVEBENCH_DATA_ROOT for this run.")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing study directory.")
-    parser.add_argument("--dry-run", action="store_true", help="Print what would happen without writing.")
+    parser.add_argument(
+        "--study-id", type=str, default=None, help="Study id (default: CSV stem)."
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        help="Override MOVEBENCH_DATA_ROOT for this run.",
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Overwrite existing study directory."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would happen without writing.",
+    )
     parser.add_argument(
         "--max-individuals",
         type=_parse_int_with_underscores,
@@ -341,7 +370,9 @@ def run(args: argparse.Namespace) -> int:
 
     if source_path.is_dir():
         if args.study_id is not None:
-            parser.error("--study-id cannot be used when source_path is a directory (one study per CSV).")
+            parser.error(
+                "--study-id cannot be used when source_path is a directory (one study per CSV)."
+            )
 
         csv_paths = sorted(source_path.glob("*.csv"))
         if not csv_paths:
@@ -350,7 +381,9 @@ def run(args: argparse.Namespace) -> int:
         stem_counts = Counter([p.stem for p in csv_paths])
         dupes = sorted([s for s, c in stem_counts.items() if c > 1])
         if dupes:
-            parser.error(f"Duplicate CSV stems (study_id collisions) found in directory: {dupes}")
+            parser.error(
+                f"Duplicate CSV stems (study_id collisions) found in directory: {dupes}"
+            )
 
         print(f"dir_path:   {source_path}")
         print(f"csvs:       {len(csv_paths)}")
@@ -386,7 +419,9 @@ def run(args: argparse.Namespace) -> int:
                 )
             return 0
 
-        tmp_root = paths.studies_root() / f".tmp_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        tmp_root = (
+            paths.studies_root() / f".tmp_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        )
         tmp_root.mkdir(parents=True, exist_ok=False)
         try:
             for i, (csv_path, study_id, _) in enumerate(jobs, start=1):
@@ -406,7 +441,9 @@ def run(args: argparse.Namespace) -> int:
 
             for _, study_id, final_dir in jobs:
                 staged_dir = tmp_root / study_id
-                _commit_staged_study_dir(staged_dir=staged_dir, final_dir=final_dir, force=bool(args.force))
+                _commit_staged_study_dir(
+                    staged_dir=staged_dir, final_dir=final_dir, force=bool(args.force)
+                )
         except Exception:
             shutil.rmtree(tmp_root, ignore_errors=True)
             raise
@@ -431,4 +468,3 @@ def run(args: argparse.Namespace) -> int:
         log_prefix="",
     )
     return 0
-

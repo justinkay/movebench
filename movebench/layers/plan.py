@@ -120,7 +120,9 @@ class LayerPlan:
                 }
                 for name, cg in self.chip_groups.items()
             },
-            "derived_dependencies": {k: list(v) for k, v in self.derived_dependencies.items()},
+            "derived_dependencies": {
+                k: list(v) for k, v in self.derived_dependencies.items()
+            },
         }
 
     @classmethod
@@ -137,12 +139,17 @@ class LayerPlan:
 
         chip_groups: dict[str, dict[str, Any]] = {}
         for name, cgd in d.get("chip_groups", {}).items():
-            chip_groups[name] = {"layers": list(cgd["layers"]), "target_scale_m": float(cgd["target_scale_m"])}
+            chip_groups[name] = {
+                "layers": list(cgd["layers"]),
+                "target_scale_m": float(cgd["target_scale_m"]),
+            }
 
         return cls(
             rasters_hash=d["rasters_hash"],
             layers_in_order=list(d["layers_in_order"]),
             channels=channels,
             chip_groups=chip_groups,
-            derived_dependencies={k: list(v) for k, v in d.get("derived_dependencies", {}).items()},
+            derived_dependencies={
+                k: list(v) for k, v in d.get("derived_dependencies", {}).items()
+            },
         )

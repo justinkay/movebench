@@ -101,7 +101,11 @@ def maybe_wandb_run(
         return
 
     # Resolve defaults with environment overrides.
-    project = _as_str(cfg["project"]) if "project" in cfg else os.environ.get("WANDB_PROJECT", default_project)
+    project = (
+        _as_str(cfg["project"])
+        if "project" in cfg
+        else os.environ.get("WANDB_PROJECT", default_project)
+    )
     entity = None
     if "entity" in cfg and cfg["entity"] is not None:
         entity = _as_str(cfg["entity"])

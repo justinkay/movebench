@@ -18,7 +18,9 @@ def _insert_repo_root_on_path() -> None:
 
 
 def main(argv: list[str]) -> int:
-    p = argparse.ArgumentParser(description="Diagnose missing environmental data in downloaded studies.")
+    p = argparse.ArgumentParser(
+        description="Diagnose missing environmental data in downloaded studies."
+    )
     p.add_argument("--config", required=True, help="Path to a layers YAML config.")
     p.add_argument(
         "--studies",
@@ -44,7 +46,9 @@ def main(argv: list[str]) -> int:
         from movebench.study import Study
     except ModuleNotFoundError as e:
         print(f"Import failed: {e}")
-        print("Make sure movebench dependencies are installed (pandas, torch, rasterio, pyproj, tqdm).")
+        print(
+            "Make sure movebench dependencies are installed (pandas, torch, rasterio, pyproj, tqdm)."
+        )
         return 1
 
     cfg = load_layers_config(args.config)
@@ -61,7 +65,9 @@ def main(argv: list[str]) -> int:
         print("Skipping derived layers:", ", ".join(dropped))
 
     if not kept_layers:
-        raise ValueError("No non-derived layers remain after filtering config.layers; nothing to diagnose.")
+        raise ValueError(
+            "No non-derived layers remain after filtering config.layers; nothing to diagnose."
+        )
 
     if args.from_point_stores:
         # Keep the config as-is: feature store directories are keyed by config_hash.
@@ -89,7 +95,9 @@ def main(argv: list[str]) -> int:
             var_channel_idxs.append(i)
 
     if not var_names:
-        raise ValueError("No variables found to diagnose (after filtering derived layers).")
+        raise ValueError(
+            "No variables found to diagnose (after filtering derived layers)."
+        )
 
     var_idx_t = torch.tensor(var_channel_idxs, dtype=torch.long)
 
@@ -139,20 +147,32 @@ def main(argv: list[str]) -> int:
         print(f"\n=== {study.study_id} ===")
         if args.from_point_stores:
             print(f"config_hash: {plan.config_hash}")
-            from one_time_scripts.triage_missing_layers._common import compute_candidate_missingness_counts
+            from one_time_scripts.triage_missing_layers._common import (
+                compute_candidate_missingness_counts,
+            )
 
             for split in ("train", "test"):
-                base_dir = study.study_dir / "features" / "points" / split / str(plan.config_hash)
+                base_dir = (
+                    study.study_dir
+                    / "features"
+                    / "points"
+                    / split
+                    / str(plan.config_hash)
+                )
                 if not base_dir.exists():
                     continue
                 candidates = [
                     d
                     for d in base_dir.iterdir()
-                    if d.is_dir() and (d / "features.pt").exists() and (d / "manifest.json").exists()
+                    if d.is_dir()
+                    and (d / "features.pt").exists()
+                    and (d / "manifest.json").exists()
                 ]
                 if not candidates:
                     continue
-                store_dir = max(candidates, key=lambda d: (d / "manifest.json").stat().st_mtime)
+                store_dir = max(
+                    candidates, key=lambda d: (d / "manifest.json").stat().st_mtime
+                )
                 used_splits.append(split)
                 try:
                     d = torch.load(store_dir / "features.pt", map_location="cpu")
@@ -160,11 +180,17 @@ def main(argv: list[str]) -> int:
                     if valid is None:
                         raise ValueError("features.pt missing key: 'valid'")
                     if valid.ndim != 3:
-                        raise ValueError(f"Expected valid tensor rank-3 [N,C,P], got shape={tuple(valid.shape)}")
-                    out = compute_candidate_missingness_counts(valid, var_channel_idxs=var_idx_t)
+                        raise ValueError(
+                            f"Expected valid tensor rank-3 [N,C,P], got shape={tuple(valid.shape)}"
+                        )
+                    out = compute_candidate_missingness_counts(
+                        valid, var_channel_idxs=var_idx_t
+                    )
                     strict_missing += out["strict_missing_steps"].to(dtype=torch.int64)
                     true_missing += out["true_missing_steps"].to(dtype=torch.int64)
-                    per_cand_invalid += out["per_candidate_invalid"].to(dtype=torch.int64)
+                    per_cand_invalid += out["per_candidate_invalid"].to(
+                        dtype=torch.int64
+                    )
                     total += int(out["n_steps"])
                     total_candidates += int(out["n_total_candidates"])
                 except Exception as e:
@@ -200,7 +226,9 @@ def main(argv: list[str]) -> int:
                     continue
 
                 used_splits.append(split)
-                for i in tqdm(range(len(ds)), desc=f"{study.study_id}:{split}", unit="pt"):
+                for i in tqdm(
+                    range(len(ds)), desc=f"{study.study_id}:{split}", unit="pt"
+                ):
                     try:
                         _env, valid, _transform, _crs = ds[i]
                         channel_ok = valid.view(int(valid.shape[0]), -1).all(dim=1)
@@ -219,7 +247,9 @@ def main(argv: list[str]) -> int:
 
         if total == 0:
             if args.from_point_stores:
-                print("No point feature stores found for this config_hash under features/points/{train,test}/.")
+                print(
+                    "No point feature stores found for this config_hash under features/points/{train,test}/."
+                )
             else:
                 print("No points found (train/test missing or empty).")
             continue
@@ -228,14 +258,20 @@ def main(argv: list[str]) -> int:
         unit = "steps" if args.from_point_stores else "points"
         if args.from_point_stores:
             if total_candidates <= 0:
-                raise ValueError("Internal error: total_candidates must be > 0 in point-store mode")
+                raise ValueError(
+                    "Internal error: total_candidates must be > 0 in point-store mode"
+                )
             strict_pct = (strict_missing.to(torch.float64) / float(total)) * 100.0
             true_pct = (true_missing.to(torch.float64) / float(total)) * 100.0
-            per_cand_pct = (per_cand_invalid.to(torch.float64) / float(total_candidates)) * 100.0
+            per_cand_pct = (
+                per_cand_invalid.to(torch.float64) / float(total_candidates)
+            ) * 100.0
             order = torch.argsort(strict_pct, descending=True).tolist()
 
             print(f"{unit}: {total}  candidates: {total_candidates}  errors: {errors}")
-            print("strict%\ttrue%\tper_cand%\tstrict/steps\ttrue/steps\tinvalid/(steps*P)\tvar\thint")
+            print(
+                "strict%\ttrue%\tper_cand%\tstrict/steps\ttrue/steps\tinvalid/(steps*P)\tvar\thint"
+            )
 
             printed = False
             for j in order:

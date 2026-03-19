@@ -60,17 +60,36 @@ def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default_config = _REPO_ROOT / "configs" / "benchmarks" / "all.yaml"
 
-    p = argparse.ArgumentParser(description="Launch Slurm jobs to run MoveBench benchmarks per study.")
-    p.add_argument("--config", type=str, default=str(default_config), help="Benchmark YAML config path.")
-    p.add_argument("--study", type=str, default=None, help="Run worker mode for a single study id.")
+    p = argparse.ArgumentParser(
+        description="Launch Slurm jobs to run MoveBench benchmarks per study."
+    )
+    p.add_argument(
+        "--config",
+        type=str,
+        default=str(default_config),
+        help="Benchmark YAML config path.",
+    )
+    p.add_argument(
+        "--study", type=str, default=None, help="Run worker mode for a single study id."
+    )
     p.add_argument(
         "--studies",
         type=str,
         default=None,
         help="Launcher override: 'all' or comma-separated study ids. If omitted, use config's `studies` or all available.",
     )
-    p.add_argument("--max-concurrent-jobs", type=int, default=32, help="Maximum concurrent `srun` jobs.")
-    p.add_argument("--polling-interval", type=int, default=30, help="Seconds between job status checks.")
+    p.add_argument(
+        "--max-concurrent-jobs",
+        type=int,
+        default=32,
+        help="Maximum concurrent `srun` jobs.",
+    )
+    p.add_argument(
+        "--polling-interval",
+        type=int,
+        default=30,
+        help="Seconds between job status checks.",
+    )
     p.add_argument(
         "--log-dir",
         type=str,
@@ -88,15 +107,37 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional path to a text file containing your WANDB_API_KEY. The key is not printed.",
     )
-    p.add_argument("--dry-run", action="store_true", help="Print actions/commands but do not submit jobs.")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions/commands but do not submit jobs.",
+    )
 
     # Slurm defaults match scripts/slurm/extract.py.
-    p.add_argument("--partition", type=str, default="vision-beery", help="Slurm partition (-p).")
-    p.add_argument("--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q).")
-    p.add_argument("--account", type=str, default="vision-beery", help="Slurm account (-A).")
-    p.add_argument("--time", type=str, default="1-00:00:00", help="Slurm time limit (-t), e.g. '7-00:00:00'.")
-    p.add_argument("--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'.")
-    p.add_argument("--cpus-per-task", type=int, default=16, help="Slurm CPUs per task (--cpus-per-task).")
+    p.add_argument(
+        "--partition", type=str, default="vision-beery", help="Slurm partition (-p)."
+    )
+    p.add_argument(
+        "--qos", type=str, default="vision-beery-main", help="Slurm QoS (-q)."
+    )
+    p.add_argument(
+        "--account", type=str, default="vision-beery", help="Slurm account (-A)."
+    )
+    p.add_argument(
+        "--time",
+        type=str,
+        default="1-00:00:00",
+        help="Slurm time limit (-t), e.g. '7-00:00:00'.",
+    )
+    p.add_argument(
+        "--mem", type=str, default="64GB", help="Slurm memory request, e.g. '64GB'."
+    )
+    p.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=16,
+        help="Slurm CPUs per task (--cpus-per-task).",
+    )
     p.add_argument(
         "--gpus-per-node",
         type=int,
@@ -197,7 +238,14 @@ def _select_parametric_store(
 
 
 def _norm_stats_path(*, study_dir: Path, config_hash: str, sampler_hash: str) -> Path:
-    return Path(study_dir) / "normalization" / "points" / str(config_hash) / str(sampler_hash) / "stats.json"
+    return (
+        Path(study_dir)
+        / "normalization"
+        / "points"
+        / str(config_hash)
+        / str(sampler_hash)
+        / "stats.json"
+    )
 
 
 def _needs_points_normalization(cfg: dict[str, Any]) -> bool:
@@ -275,8 +323,12 @@ def _check_prereqs(
             return False, None, f"missing_rasters_root: {rasters_root}"
 
     try:
-        _train_dir, train_m = _select_parametric_store(study_dir=study.study_dir, plan=plan, split="train", sampler=sampler)
-        _select_parametric_store(study_dir=study.study_dir, plan=plan, split="test", sampler=sampler)
+        _train_dir, train_m = _select_parametric_store(
+            study_dir=study.study_dir, plan=plan, split="train", sampler=sampler
+        )
+        _select_parametric_store(
+            study_dir=study.study_dir, plan=plan, split="test", sampler=sampler
+        )
     except (FileNotFoundError, ValueError) as e:
         return False, None, f"missing_parametric_point_store: {e}"
 
@@ -438,7 +490,9 @@ def _worker(args: argparse.Namespace) -> int:
         method_name = str(method["name"])
         kind = str(method["kind"])
 
-        if _method_complete(study_results.get(method_name)) and not bool(args.overwrite):
+        if _method_complete(study_results.get(method_name)) and not bool(
+            args.overwrite
+        ):
             print(f"[{study.study_id}] {method_name} exists; skipping", flush=True)
             continue
 
@@ -525,7 +579,9 @@ def _launcher(args: argparse.Namespace) -> int:
     queue: list[str] = []
 
     # Determine completion based on per-study JSON files.
-    want_methods = [str(m["name"]) for m in cfg["methods"] if isinstance(m, dict) and "name" in m]
+    want_methods = [
+        str(m["name"]) for m in cfg["methods"] if isinstance(m, dict) and "name" in m
+    ]
     raw_results: dict[str, Any] = {}
     raw_results_path = out_dir / "raw_results.json"
     if not bool(args.overwrite) and raw_results_path.exists():
@@ -554,7 +610,9 @@ def _launcher(args: argparse.Namespace) -> int:
         pth = _study_results_path(out_dir, str(study_id))
         if not pth.exists():
             rr = raw_results.get(str(study_id))
-            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+            if isinstance(rr, dict) and all(
+                _method_complete(rr.get(m)) for m in want_methods
+            ):
                 skipped.append(str(study_id))
                 continue
             queue.append(str(study_id))
@@ -563,14 +621,18 @@ def _launcher(args: argparse.Namespace) -> int:
             d = _load_json(pth)
         except Exception:
             rr = raw_results.get(str(study_id))
-            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+            if isinstance(rr, dict) and all(
+                _method_complete(rr.get(m)) for m in want_methods
+            ):
                 skipped.append(str(study_id))
                 continue
             queue.append(str(study_id))
             continue
         if not isinstance(d, dict):
             rr = raw_results.get(str(study_id))
-            if isinstance(rr, dict) and all(_method_complete(rr.get(m)) for m in want_methods):
+            if isinstance(rr, dict) and all(
+                _method_complete(rr.get(m)) for m in want_methods
+            ):
                 skipped.append(str(study_id))
                 continue
             queue.append(str(study_id))
@@ -590,12 +652,20 @@ def _launcher(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         if queue:
-            print(f"[bench] Dry-run: would launch {len(queue)} jobs (max_concurrent={args.max_concurrent_jobs}).", flush=True)
+            print(
+                f"[bench] Dry-run: would launch {len(queue)} jobs (max_concurrent={args.max_concurrent_jobs}).",
+                flush=True,
+            )
             for sid in queue[:10]:
-                cmd = _build_srun_cmd(args=args, study_id=sid, config_path=str(args.config), log_dir=log_dir)
+                cmd = _build_srun_cmd(
+                    args=args,
+                    study_id=sid,
+                    config_path=str(args.config),
+                    log_dir=log_dir,
+                )
                 print("[bench] ", shlex.join(cmd), flush=True)
             if len(queue) > 10:
-                print(f"[bench] ... ({len(queue)-10} more)", flush=True)
+                print(f"[bench] ... ({len(queue) - 10} more)", flush=True)
         return 2 if blocked else 0
 
     if int(args.max_concurrent_jobs) <= 0:
@@ -620,7 +690,9 @@ def _launcher(args: argparse.Namespace) -> int:
     queue_idx = 0
 
     def _launch_one(study_id: str) -> None:
-        cmd = _build_srun_cmd(args=args, study_id=study_id, config_path=str(args.config), log_dir=log_dir)
+        cmd = _build_srun_cmd(
+            args=args, study_id=study_id, config_path=str(args.config), log_dir=log_dir
+        )
         print(f"[bench] Launching study={study_id}: {shlex.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd, cwd=str(_REPO_ROOT))
         running[study_id] = proc
@@ -642,11 +714,17 @@ def _launcher(args: argparse.Namespace) -> int:
                 completed += 1
                 if int(rc) != 0:
                     failures.append(sid)
-                    print(f"[bench] FAILED study={sid} exit_code={rc}", file=sys.stderr, flush=True)
+                    print(
+                        f"[bench] FAILED study={sid} exit_code={rc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     print(f"[bench] DONE study={sid}", flush=True)
 
-            while queue_idx < len(queue) and len(running) < int(args.max_concurrent_jobs):
+            while queue_idx < len(queue) and len(running) < int(
+                args.max_concurrent_jobs
+            ):
                 sid = queue[queue_idx]
                 queue_idx += 1
                 _launch_one(sid)
@@ -659,9 +737,15 @@ def _launcher(args: argparse.Namespace) -> int:
             if running:
                 print(f"[bench] Running: {sorted(running.keys())}", flush=True)
     except KeyboardInterrupt:
-        print("[bench] Interrupted. Not launching new jobs.", file=sys.stderr, flush=True)
+        print(
+            "[bench] Interrupted. Not launching new jobs.", file=sys.stderr, flush=True
+        )
         if running:
-            print(f"[bench] Still running: {sorted(running.keys())}", file=sys.stderr, flush=True)
+            print(
+                f"[bench] Still running: {sorted(running.keys())}",
+                file=sys.stderr,
+                flush=True,
+            )
         return 130
 
     # Merge per-study results into raw_results.json + CSV summaries.
@@ -671,9 +755,17 @@ def _launcher(args: argparse.Namespace) -> int:
         print(f"[bench] WARNING: failed to merge outputs: {e}", file=sys.stderr)
 
     if failures or blocked:
-        print(f"[bench] Finished with failures={len(failures)} blocked={len(blocked)}", file=sys.stderr, flush=True)
+        print(
+            f"[bench] Finished with failures={len(failures)} blocked={len(blocked)}",
+            file=sys.stderr,
+            flush=True,
+        )
         if failures:
-            print(f"[bench] Failed studies: {sorted(failures)}", file=sys.stderr, flush=True)
+            print(
+                f"[bench] Failed studies: {sorted(failures)}",
+                file=sys.stderr,
+                flush=True,
+            )
         return 2
 
     print("[bench] All jobs completed successfully.", flush=True)

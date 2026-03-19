@@ -36,7 +36,7 @@ from movebench.trajectories import (
 )
 
 
-TARGET_CRS = "EPSG:3857" # meters
+TARGET_CRS = "EPSG:3857"  # meters
 
 
 def _compute_valid_mask(values: torch.Tensor, nodata: Any) -> torch.Tensor:
@@ -101,7 +101,9 @@ class ChipDataset(Dataset):
         try:
             oh, ow = output_hw
         except Exception as e:
-            raise ValueError(f"output_hw must be a (H,W) tuple, got {output_hw!r}") from e
+            raise ValueError(
+                f"output_hw must be a (H,W) tuple, got {output_hw!r}"
+            ) from e
         oh_i, ow_i = int(oh), int(ow)
         if oh_i <= 0 or ow_i <= 0:
             raise ValueError(f"output_hw must be positive, got {(oh_i, ow_i)}")
@@ -119,9 +121,13 @@ class ChipDataset(Dataset):
         if not (0.0 <= self.gap_q <= 1.0):
             raise ValueError(f"gap_q must be in [0,1], got {self.gap_q}")
         if self.step_multiplier <= 0:
-            raise ValueError(f"step_multiplier must be positive, got {self.step_multiplier}")
+            raise ValueError(
+                f"step_multiplier must be positive, got {self.step_multiplier}"
+            )
 
-        self.io = LayerIO(study_dir=self.study_dir, plan=self.plan, registry=self.registry)
+        self.io = LayerIO(
+            study_dir=self.study_dir, plan=self.plan, registry=self.registry
+        )
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
@@ -135,13 +141,19 @@ class ChipDataset(Dataset):
         df_all = load_trajectories_csv(str(self.trajectories_path))
         df = df_all[df_all[SET_COL] == self.split].copy()
         if len(df) == 0:
-            raise ValueError(f"No rows found for split={split!r} in {self.trajectories_path}")
+            raise ValueError(
+                f"No rows found for split={split!r} in {self.trajectories_path}"
+            )
         self.df = df
 
         if POINT_ID_COL not in df.columns:
-            raise ValueError(f"trajectories.csv missing required column: {POINT_ID_COL!r}")
+            raise ValueError(
+                f"trajectories.csv missing required column: {POINT_ID_COL!r}"
+            )
         if LON_COL not in df.columns or LAT_COL not in df.columns:
-            raise ValueError(f"trajectories.csv missing required columns: {LON_COL!r}, {LAT_COL!r}")
+            raise ValueError(
+                f"trajectories.csv missing required columns: {LON_COL!r}, {LAT_COL!r}"
+            )
         if TIME_COL not in df.columns:
             raise ValueError(f"trajectories.csv missing required column: {TIME_COL!r}")
 
@@ -170,7 +182,9 @@ class ChipDataset(Dataset):
                 gap_q=self.gap_q,
             )
             if len(steps) == 0:
-                raise ValueError(f"No valid step starts found for split={split!r} in {self.trajectories_path}")
+                raise ValueError(
+                    f"No valid step starts found for split={split!r} in {self.trajectories_path}"
+                )
             self._step_starts_df = steps.copy()
             self._rows: list[_Row | _StepRow] = [
                 _StepRow(
@@ -185,7 +199,9 @@ class ChipDataset(Dataset):
             ]
             from pyproj import Transformer
 
-            self._to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
+            self._to_target = Transformer.from_crs(
+                WGS84_CRS, TARGET_CRS, always_xy=True
+            )
 
             df_train = df_all[df_all[SET_COL] == "train"].copy()
             if len(df_train) == 0:
@@ -208,7 +224,9 @@ class ChipDataset(Dataset):
                     "This usually means there are no valid steps after filtering."
                 ) from exc
             if not np.isfinite(buffer_m) or buffer_m <= 0:
-                raise ValueError(f"Computed invalid step_buffer_m={buffer_m} from train split.")
+                raise ValueError(
+                    f"Computed invalid step_buffer_m={buffer_m} from train split."
+                )
             self._step_buffer_m = buffer_m
         else:
             self._rows = [
@@ -247,9 +265,13 @@ class ChipDataset(Dataset):
             raise AttributeError("pixel_size_m is only available when mode='steps'")
         H, W = self.output_hw
         if H != W:
-            raise ValueError(f"pixel_size_m requires square output_hw; got {self.output_hw}.")
+            raise ValueError(
+                f"pixel_size_m requires square output_hw; got {self.output_hw}."
+            )
         if W < 2:
-            raise ValueError(f"pixel_size_m requires W>=2; got output_hw={self.output_hw}.")
+            raise ValueError(
+                f"pixel_size_m requires W>=2; got output_hw={self.output_hw}."
+            )
         return (2.0 * float(self.step_buffer_m)) / (float(W) - 1.0)
 
     def _select_reference_layer(self) -> str:
@@ -258,7 +280,11 @@ class ChipDataset(Dataset):
             if self.registry.get(layer).source == "gee_chip":
                 return layer
         # Otherwise fall back to a tile layer (e.g. dem/dist_water). Prefer dem when present.
-        tile_layers = [layer for layer in self.plan.layers_in_order if self.registry.get(layer).source == "gee_tile"]
+        tile_layers = [
+            layer
+            for layer in self.plan.layers_in_order
+            if self.registry.get(layer).source == "gee_tile"
+        ]
         if not tile_layers:
             raise ValueError(
                 "ChipDataset requires at least one gee_chip or gee_tile layer in the LayerPlan to define bounds."
@@ -267,14 +293,24 @@ class ChipDataset(Dataset):
             return "dem"
         return tile_layers[0]
 
-    def _tile_bounds_for_point(self, layer: str, *, lon: float, lat: float) -> tuple[float, float, float, float]:
+    def _tile_bounds_for_point(
+        self, layer: str, *, lon: float, lat: float
+    ) -> tuple[float, float, float, float]:
         """Return the downloaded tile bounds (EPSG:4326) that contain a point."""
         import json
 
-        tile_dir = self.study_dir / "rasters" / str(self.plan.rasters_hash) / "tiles" / str(layer)
+        tile_dir = (
+            self.study_dir
+            / "rasters"
+            / str(self.plan.rasters_hash)
+            / "tiles"
+            / str(layer)
+        )
         index_path = tile_dir / "index.json"
         if not index_path.exists():
-            raise FileNotFoundError(f"Tile index.json not found for layer={layer!r}: {index_path}")
+            raise FileNotFoundError(
+                f"Tile index.json not found for layer={layer!r}: {index_path}"
+            )
 
         with open(index_path, "r") as f:
             d = json.load(f)
@@ -288,7 +324,9 @@ class ChipDataset(Dataset):
             if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat):
                 return (min_lon, min_lat, max_lon, max_lat)
 
-        raise FileNotFoundError(f"No downloaded tile for layer={layer!r} contains lon/lat=({lon},{lat})")
+        raise FileNotFoundError(
+            f"No downloaded tile for layer={layer!r} contains lon/lat=({lon},{lat})"
+        )
 
     def _build_chip_group_layer_slices(self) -> dict[str, dict[str, tuple[int, int]]]:
         out: dict[str, dict[str, tuple[int, int]]] = {}
@@ -314,9 +352,13 @@ class ChipDataset(Dataset):
         fixed_dst_transform = None
         if self.mode == "steps":
             if not isinstance(row, _StepRow):
-                raise RuntimeError("Internal error: expected _StepRow rows when mode='steps'.")
+                raise RuntimeError(
+                    "Internal error: expected _StepRow rows when mode='steps'."
+                )
             if self._to_target is None or self._step_buffer_m is None:
-                raise RuntimeError("Internal error: missing coordinate transformer/buffer for mode='steps'.")
+                raise RuntimeError(
+                    "Internal error: missing coordinate transformer/buffer for mode='steps'."
+                )
 
             H_out, W_out = self.output_hw
             buffer_m = float(self._step_buffer_m)
@@ -326,13 +368,17 @@ class ChipDataset(Dataset):
             right = float(x0) + buffer_m + 0.5 * px
             bottom = float(y0) - buffer_m - 0.5 * px
             top = float(y0) + buffer_m + 0.5 * px
-            fixed_dst_transform = from_bounds(left, bottom, right, top, int(W_out), int(H_out))
+            fixed_dst_transform = from_bounds(
+                left, bottom, right, top, int(W_out), int(H_out)
+            )
 
         ref_spec = self.registry.get(self._ref_layer)
         if ref_spec.source == "gee_chip":
             ref_group = self.plan.chip_group_for_layer(self._ref_layer)
             if ref_group is None:
-                raise ValueError(f"Reference layer {self._ref_layer!r} is not in any chip group")
+                raise ValueError(
+                    f"Reference layer {self._ref_layer!r} is not in any chip group"
+                )
 
             # Reference chip group defines bounds for tile/local layers and the
             # output grid for metric reprojection.
@@ -340,9 +386,13 @@ class ChipDataset(Dataset):
             bounds_latlon = ref_raster.bounds
         else:
             # No per-point chip groups: use the downloaded tile that contains the point.
-            bounds_latlon = self._tile_bounds_for_point(self._ref_layer, lon=float(row.lon), lat=float(row.lat))
+            bounds_latlon = self._tile_bounds_for_point(
+                self._ref_layer, lon=float(row.lon), lat=float(row.lat)
+            )
             ref_group = None
-            ref_raster = self.io.load_layer(self._ref_layer, bounds_latlon=bounds_latlon, timestamp=timestamp)
+            ref_raster = self.io.load_layer(
+                self._ref_layer, bounds_latlon=bounds_latlon, timestamp=timestamp
+            )
 
         cache: dict[str, Raster] = {}
         if ref_group is None:
@@ -364,14 +414,22 @@ class ChipDataset(Dataset):
                 continue
             g = self.plan.chip_group_for_layer(layer)
             if g is None:
-                raise ValueError(f"gee_chip layer {layer!r} is not listed in any chip group")
+                raise ValueError(
+                    f"gee_chip layer {layer!r} is not listed in any chip group"
+                )
             if g not in needed_chip_groups:
                 needed_chip_groups.append(g)
 
-        chip_groups: dict[str, Raster] = {g: self.io.load_chip_group(g, point_id=point_id) for g in needed_chip_groups}
+        chip_groups: dict[str, Raster] = {
+            g: self.io.load_chip_group(g, point_id=point_id) for g in needed_chip_groups
+        }
 
         # Build the set of non-chip output layers to load/compute once.
-        non_chip_layers = [layer for layer in self.plan.layers_in_order if self.registry.get(layer).source != "gee_chip"]
+        non_chip_layers = [
+            layer
+            for layer in self.plan.layers_in_order
+            if self.registry.get(layer).source != "gee_chip"
+        ]
         non_chip_rasters = [get_raster(layer) for layer in non_chip_layers]
 
         # Warp: reference raster first, then other chip groups, then non-chip layers.
@@ -446,7 +504,9 @@ class ChipDataset(Dataset):
             # invalid pixels as zeros. Warn once so users know coverage can vary.
             ref_arr = aligned_arrays[0]
             ref_nodata = warp_rasters[0].nodata
-            v = _compute_valid_mask(torch.from_numpy(ref_arr.astype(np.float32, copy=False)), ref_nodata)
+            v = _compute_valid_mask(
+                torch.from_numpy(ref_arr.astype(np.float32, copy=False)), ref_nodata
+            )
             if not bool(v.all()):
                 # TODO: This is annoying, and expected -- layers often have NaN values
                 # warnings.warn(
@@ -469,10 +529,14 @@ class ChipDataset(Dataset):
             if spec.source == "gee_chip":
                 group = self.plan.chip_group_for_layer(layer)
                 if group is None:
-                    raise ValueError(f"gee_chip layer {layer!r} is not listed in any chip group")
+                    raise ValueError(
+                        f"gee_chip layer {layer!r} is not listed in any chip group"
+                    )
                 gs = self._chip_group_layer_slices.get(group)
                 if gs is None or layer not in gs:
-                    raise ValueError(f"Layer {layer!r} missing chip-group slice mapping for group {group!r}")
+                    raise ValueError(
+                        f"Layer {layer!r} missing chip-group slice mapping for group {group!r}"
+                    )
                 gstart, gend = gs[layer]
                 arr = aligned_chip_groups[group][gstart:gend]
                 nodata = nodata_by_name[("chip_group", group)]
@@ -486,11 +550,17 @@ class ChipDataset(Dataset):
             if spec.categorical:
                 # Expect a single band with integer class labels.
                 if vals.shape[0] != 1:
-                    raise ValueError(f"Categorical layer {layer!r} must have 1 band, got {vals.shape[0]}")
+                    raise ValueError(
+                        f"Categorical layer {layer!r} must have 1 band, got {vals.shape[0]}"
+                    )
 
                 class_vals = vals[0].to(torch.int64)
                 class_vals = torch.clamp(class_vals, 0, int(spec.num_classes) - 1)
-                one_hot = F.one_hot(class_vals, int(spec.num_classes)).permute(2, 0, 1).to(torch.float32)
+                one_hot = (
+                    F.one_hot(class_vals, int(spec.num_classes))
+                    .permute(2, 0, 1)
+                    .to(torch.float32)
+                )
 
                 vexp = vmask[0].unsqueeze(0).expand(int(spec.num_classes), -1, -1)
                 env[start:end] = one_hot * vexp.to(one_hot.dtype)
@@ -513,9 +583,13 @@ class ChipDataset(Dataset):
 
         if self.mode == "steps":
             if not isinstance(row, _StepRow):
-                raise RuntimeError("Internal error: expected _StepRow rows when mode='steps'")
+                raise RuntimeError(
+                    "Internal error: expected _StepRow rows when mode='steps'"
+                )
             if self._to_target is None:
-                raise RuntimeError("Internal error: missing coordinate transformer for mode='steps'")
+                raise RuntimeError(
+                    "Internal error: missing coordinate transformer for mode='steps'"
+                )
             x_m, y_m = self._to_target.transform(float(row.end_lon), float(row.end_lat))
             rr, cc = rowcol(final_transform, x_m, y_m)
             y = torch.zeros((int(H), int(W)), dtype=torch.float32)

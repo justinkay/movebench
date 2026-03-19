@@ -13,7 +13,9 @@ from pathlib import Path
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run MoveBench benchmarks from a YAML config.")
+    p = argparse.ArgumentParser(
+        description="Run MoveBench benchmarks from a YAML config."
+    )
     p.add_argument(
         "--config",
         type=str,
@@ -38,7 +40,9 @@ def main() -> None:
 
     from movebench import benchmark as mb_benchmark
 
-    mb_benchmark.main(config_path=str(args.config), overrides=None, resume=bool(args.resume))
+    mb_benchmark.main(
+        config_path=str(args.config), overrides=None, resume=bool(args.resume)
+    )
 
 
 if __name__ == "__main__":
