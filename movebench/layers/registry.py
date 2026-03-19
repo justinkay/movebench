@@ -18,7 +18,6 @@ from typing import Literal
 from movebench.layers.config import LayersConfig, rasters_hash
 from movebench.layers.plan import Channel, LayerPlan
 
-
 LayerSource = Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff", "derived"]
 
 

@@ -11,6 +11,16 @@ from typing import Any
 
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from movebench import paths
+from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
+from movebench.layers.config import config_hash as _config_hash
+from movebench.layers.config import load_layers_config, parse_layers_config
+from movebench.layers.registry import REGISTRY
+
 
 def _stable_hash_dict(d: dict[str, Any]) -> str:
     payload = json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
@@ -226,19 +236,10 @@ def main(argv: list[str]) -> int:
     if args.paths_config:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-
     config_path = Path(args.config)
     raw = _load_yaml_mapping(config_path)
     raw_legacy = _remove_alphaearth_layer(raw)
     old_hash = _legacy_rasters_hash_from_yaml_dict(raw_legacy)
-
-    from movebench.layers.config import load_layers_config
-    from movebench.layers.config import config_hash as _config_hash
-    from movebench.layers.config import parse_layers_config
-    from movebench.layers.registry import REGISTRY
-    from movebench import paths
 
     cfg = load_layers_config(config_path)
     plan = REGISTRY.resolve(cfg)
@@ -254,7 +255,7 @@ def main(argv: list[str]) -> int:
         chips_meta = _compute_chips_meta(plan, registry=REGISTRY)
 
     migrate_wds = not bool(args.skip_deepssf_wds_cache)
-    deepssf_bench_cfg_path = repo_root / "configs" / "benchmarks" / "deepssf.yaml"
+    deepssf_bench_cfg_path = REPO_ROOT / "configs" / "benchmarks" / "deepssf.yaml"
     dcfg: dict[str, Any]
     cache_cfg: dict[str, Any]
     if migrate_wds:
@@ -367,8 +368,6 @@ def main(argv: list[str]) -> int:
                 print(f"{prefix}: WROTE chips_meta.json")
 
         if migrate_wds:
-            from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
-
             normalize = bool(dcfg.get("normalize", True))
             sampler_hashes = list(deepssf_sampler_hashes_cli)
             if not sampler_hashes and normalize:

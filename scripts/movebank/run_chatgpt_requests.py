@@ -18,17 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
-try:
-    from openai import OpenAI
-except ImportError as exc:  # pragma: no cover - import error message
-    raise SystemExit(
-        "The `openai` package is required. Install it with `pip install openai`."
-    ) from exc
-
-try:  # pragma: no cover - exception imports differ between SDK versions
-    from openai import APIError, APIStatusError, APITimeoutError, RateLimitError
-except ImportError:  # pragma: no cover
-    APIError = APIStatusError = APITimeoutError = RateLimitError = Exception  # type: ignore
+from openai import APIError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
 LOGGER = logging.getLogger("run_chatgpt_requests")
 

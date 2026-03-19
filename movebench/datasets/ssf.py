@@ -29,7 +29,6 @@ from movebench.features.points import (
 from movebench.layers.plan import Channel, LayerPlan
 from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, load_trajectories_csv
 
-
 TARGET_CRS = "EPSG:3857"  # meters
 
 

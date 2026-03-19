@@ -15,6 +15,12 @@ import os
 from pathlib import Path
 import json
 
+import rasterio
+import base64
+import io
+from PIL import Image
+import matplotlib.cm as cm
+
 
 # If the user hasn't configured MOVEBENCH_DATA_ROOT, default to the repo-local
 # data path so Study.list_available() works out-of-the-box for this checkout.
@@ -128,7 +134,6 @@ def _load_tile_index(index_path: str) -> dict:
 @st.cache_data(show_spinner=False)
 def _compute_global_vmin_vmax(tile_paths: tuple[str, ...]) -> tuple[float, float]:
     # Approximate robust range using a stride sample to keep it lightweight.
-    import rasterio  # heavy import; keep local
 
     samples: list[np.ndarray] = []
     for p in tile_paths:
@@ -184,11 +189,7 @@ def _tile_png_data_url(
     vmax: float | None,
     max_px: int,
 ) -> str:
-    import base64
-    import io
 
-    import rasterio  # heavy import; keep local
-    from PIL import Image
 
     with rasterio.open(tile_path) as ds:
         a = ds.read(1, masked=True).filled(np.nan).astype(np.float32, copy=False)
@@ -220,7 +221,6 @@ def _tile_png_data_url(
             rgb = (norm * 255.0).round().astype(np.uint8)
             rgba = np.stack([rgb, rgb, rgb, (mask * PATH_ALPHA).astype(np.uint8)], axis=-1)
         elif style_norm == "terrain colormap":
-            import matplotlib.cm as cm
 
             cmap = cm.get_cmap("terrain")
             rgba_f = cmap(norm)  # float RGBA in [0, 1]

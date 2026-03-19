@@ -3,9 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from movebench.cli import download
-from movebench.cli import extract
-from movebench.cli import ingest
+from movebench.cli import download, extract, ingest
 
 
 def build_parser() -> argparse.ArgumentParser:

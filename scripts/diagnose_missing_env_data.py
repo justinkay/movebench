@@ -4,17 +4,17 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import replace
-from pathlib import Path
 
+import torch
+from tqdm.auto import tqdm
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _insert_repo_root_on_path() -> None:
-    root = _repo_root()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+from movebench.datasets.chips import ChipDataset
+from movebench.layers.config import load_layers_config
+from movebench.layers.registry import REGISTRY
+from movebench.study import Study
+from one_time_scripts.triage_missing_layers._common import (
+    compute_candidate_missingness_counts,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -34,22 +34,6 @@ def main(argv: list[str]) -> int:
         help="Diagnose missingness from pre-extracted point feature stores instead of ChipDataset (much faster).",
     )
     args = p.parse_args(argv[1:])
-
-    _insert_repo_root_on_path()
-
-    try:
-        import torch
-        from tqdm.auto import tqdm
-
-        from movebench.layers.config import load_layers_config
-        from movebench.layers.registry import REGISTRY
-        from movebench.study import Study
-    except ModuleNotFoundError as e:
-        print(f"Import failed: {e}")
-        print(
-            "Make sure movebench dependencies are installed (pandas, torch, rasterio, pyproj, tqdm)."
-        )
-        return 1
 
     cfg = load_layers_config(args.config)
 
@@ -147,10 +131,6 @@ def main(argv: list[str]) -> int:
         print(f"\n=== {study.study_id} ===")
         if args.from_point_stores:
             print(f"config_hash: {plan.config_hash}")
-            from one_time_scripts.triage_missing_layers._common import (
-                compute_candidate_missingness_counts,
-            )
-
             for split in ("train", "test"):
                 base_dir = (
                     study.study_dir
@@ -203,13 +183,6 @@ def main(argv: list[str]) -> int:
                         pass
         else:
             print(f"rasters_hash: {plan.rasters_hash}")
-            try:
-                from movebench.datasets.chips import ChipDataset
-            except ModuleNotFoundError as e:
-                print(f"Import failed: {e}")
-                print("ChipDataset mode requires rasterio and pyproj installed.")
-                return 1
-
             for split in ("train", "test"):
                 try:
                     ds = ChipDataset(

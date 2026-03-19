@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-import yaml
 from pathlib import Path
+
+import yaml
 
 
 def repo_root() -> Path:

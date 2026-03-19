@@ -22,15 +22,35 @@ import yaml
 
 from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
 
+from movebench.train import collate_deepssf
+import torch
+from movebench import Study, paths
+from movebench.features.points import resolve_sampler_hash
+from torch.utils.data import DataLoader
+from movebench.models.ssf import (
+    LinearStepSelect,
+    MLPStepSelect,
+    random_baseline_metrics,
+)
+from movebench.train import fit_step_select_tensor
+from movebench.models.deepssf import DeepSSF
+from movebench.train import (
+    eval_deepssf,
+    fit_deepssf,
+    random_grid_baseline_metrics,
+)
+from movebench.datasets.deepssf_wds_cache import (
+    make_deepssf_wds_train_test_loaders,
+)
+from movebench.models.moveformer import build_moveformer_selection_model
+from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
 
 TOP_K_VALUES = (1, 5, 10, 25, 50)
 
 
 def _collate_deepssf_subset(batch, *, subset_idxs: Sequence[int]):
-    from movebench.train import collate_deepssf
 
     x1, x2, x3, y = collate_deepssf(batch)
-    import torch
 
     idx = torch.as_tensor(list(subset_idxs), dtype=torch.long)
     return x1.index_select(1, idx), x2, x3, y
@@ -215,8 +235,6 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 
 def resolve_studies(cfg: dict[str, Any]) -> list[str]:
-    from movebench import Study
-    from movebench import paths
 
     studies_val = cfg.get("studies", None)
     if studies_val is None or (
@@ -240,7 +258,6 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
 
 def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
-    from movebench.features.points import resolve_sampler_hash
 
     layers_config = str(cfg["layers_config"])
     setup_workers = int(cfg["runtime"]["setup_workers"])
@@ -309,7 +326,6 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
 def _make_loaders(
     *, ds_train, ds_test, collate_fn, batch_size: int | None, num_workers: int | None
 ):
-    from torch.utils.data import DataLoader
 
     kwargs: dict[str, Any] = {"collate_fn": collate_fn, "drop_last": False}
     if batch_size is not None:
@@ -404,12 +420,6 @@ def _run_issf(
     model_kind: str,
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
-    from movebench.models.ssf import (
-        LinearStepSelect,
-        MLPStepSelect,
-        random_baseline_metrics,
-    )
-    from movebench.train import fit_step_select_tensor
 
     issf = cfg["datasets"]["issf"]
     sampler = issf["sampler"]
@@ -437,8 +447,6 @@ def _run_issf(
 
     train_ds = study.issf_dataset(split="train", **ds_kwargs)
     test_ds = study.issf_dataset(split="test", **ds_kwargs)
-
-    import torch
 
     batch_size = int(issf.get("batch_size", None) or 1)
     steps_per_epoch = int(math.ceil(float(len(train_ds)) / float(batch_size)))
@@ -573,13 +581,6 @@ def run_deepssf(
     device,
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
-    from movebench.models.deepssf import DeepSSF
-    from movebench.train import (
-        collate_deepssf,
-        eval_deepssf,
-        fit_deepssf,
-        random_grid_baseline_metrics,
-    )
 
     dcfg = cfg["datasets"]["deepssf"]
     subset_idxs = None
@@ -626,10 +627,6 @@ def run_deepssf(
         use_cache = bool(cache_cfg.get("enabled", False))
 
     if use_cache:
-        from movebench.datasets.deepssf_wds_cache import (
-            make_deepssf_wds_train_test_loaders,
-        )
-
         assert isinstance(cache_cfg, dict)
         batch_size = dcfg.get("batch_size", None)
         bs = int(batch_size) if batch_size is not None else 1
@@ -729,7 +726,6 @@ def run_deepssf(
     )
 
     # Save the best checkpoint (fit_deepssf restores the best weights before returning).
-    import torch
 
     out_dir = Path(str(cfg["output_dir"]))
     ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
@@ -781,9 +777,6 @@ def run_moveformer(
     device,
     log_callback: Any | None = None,
 ) -> dict[str, Any]:
-    from movebench.models.moveformer import build_moveformer_selection_model
-    from movebench.models.ssf import random_baseline_metrics
-    from movebench.train import collate_moveformer, eval_moveformer, fit_moveformer
 
     dcfg = cfg["datasets"]["moveformer"]
     issf = cfg["datasets"]["issf"]
@@ -857,7 +850,6 @@ def run_moveformer(
     )
 
     # Save the best checkpoint (fit_moveformer restores the best weights before returning).
-    import torch
 
     out_dir = Path(str(cfg["output_dir"]))
     ckpt_dir = out_dir / "checkpoints" / str(study.study_id)
@@ -1027,9 +1019,6 @@ def main(
     overrides: dict[str, Any] | None = None,
     resume: bool = False,
 ) -> None:
-    import torch
-
-    from movebench import Study
 
     cfg = load_config(config_path)
     if overrides:

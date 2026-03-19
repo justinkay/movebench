@@ -7,11 +7,11 @@ This integration reuses:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -39,10 +39,15 @@ from movebench.trajectories import (
     load_trajectories_csv,
 )
 
+from pyproj import Transformer
+from movebench.datasets.ssf import _compute_movement_stats
+from movebench.lib.moveformer.geo_transformers.trajectory import (
+    SimpleTrajectoryProcessor,
+)
+
 
 @lru_cache(maxsize=1)
 def _crs_transformers():
-    from pyproj import Transformer
 
     to_3857 = Transformer.from_crs(WGS84_CRS, "EPSG:3857", always_xy=True)
     to_4326 = Transformer.from_crs("EPSG:3857", WGS84_CRS, always_xy=True)
@@ -249,8 +254,6 @@ class MoveFormerPointStoreDataset(Dataset):
             dtype=torch.long,
         )
 
-        from movebench.datasets.ssf import _compute_movement_stats
-
         if self.split == "train":
             stats = _compute_movement_stats(self.step_length_m, self.turn_angle_rad)
         else:
@@ -371,10 +374,6 @@ class MoveFormerPointStoreDataset(Dataset):
             raise ValueError(
                 f"No segments found for split={self.split!r} (min_len={self.min_len}, max_len={self.max_len})"
             )
-
-        from movebench.lib.moveformer.geo_transformers.trajectory import (
-            SimpleTrajectoryProcessor,
-        )
 
         self._processor = SimpleTrajectoryProcessor(
             use_target=True,

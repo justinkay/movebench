@@ -12,6 +12,8 @@ from typing import Optional
 
 import pandas as pd
 
+from movebench.metadata import extract_doi_url
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 import sys
 
@@ -138,7 +140,6 @@ def main() -> None:
             if not doi:
                 citation = metadata.get("citation")
                 if citation:
-                    from movebench.metadata import extract_doi_url  # imported lazily
 
                     doi = extract_doi_url(citation)
             if doi:

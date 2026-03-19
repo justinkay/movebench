@@ -31,22 +31,19 @@ Features
 - Only shows files not already in ok_files/not_ok_files
 """
 
-import os
 import glob
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.dates as mdates
-from matplotlib.patches import Patch
-from matplotlib.lines import Line2D
+import os
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-
+import matplotlib.cm as cm
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import streamlit as st
-
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 # -------------------------------------------------------------------
 # Configuration: directories and list files
@@ -464,7 +461,6 @@ def build_figure_from_df(
     ax1.set_title(f"Step Length Distribution (log y)\n{study_name}")
     ax1.grid(True, alpha=0.3)
 
-    mean_step = np.mean(step_lengths_filtered)
     median_step = np.median(step_lengths_filtered)
     ax1.axvline(
         median_step, color="orange", linestyle="--", label=f"Median: {median_step:.1f}m"

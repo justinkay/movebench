@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
-from typing import TYPE_CHECKING
 
 from movebench.layers.constants import METERS_PER_DEG_LAT, METERS_PER_DEG_LON_EQUATOR
-
-if TYPE_CHECKING:
-    from movebench.rasters import Raster
+from movebench.rasters import Raster
 
 
 def _band_index(r: Raster, band_id: str) -> int:

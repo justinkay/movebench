@@ -10,8 +10,8 @@ import torch
 from movebench.features.manifest import read_manifest, utc_now_iso
 from movebench.features.points import (
     point_store_dir,
-    point_stores_dir,
     point_store_train_stats_path,
+    point_stores_dir,
 )
 from movebench.layers.plan import LayerPlan
 

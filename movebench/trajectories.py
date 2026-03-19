@@ -13,7 +13,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-
 # Movebank / trajectories.csv schema
 LON_COL = "location-long"
 LAT_COL = "location-lat"

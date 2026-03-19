@@ -31,8 +31,8 @@ from movebench.features.manifest import (
     utc_now_iso,
     write_manifest,
 )
-from movebench.layers.constants import WGS84_CRS
 from movebench.layers.config import _format_slug_number, _truncate_key
+from movebench.layers.constants import WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.rasters import Raster
@@ -41,6 +41,13 @@ from movebench.trajectories import (
     compute_movement_features,
     select_step_starts,
 )
+
+from pyproj import (
+    Transformer,
+)
+from scipy import stats
+import movebench.layers.derived as derived
+from movebench.layers.io import LayerIO
 
 TARGET_CRS = "EPSG:3857"  # meters
 SamplerType = Literal["empirical", "parametric"]
@@ -56,9 +63,6 @@ DEFAULT_BOUNDS_BUFFER_DEG = 0.01
 @lru_cache(maxsize=1)
 def _transformers():
     """Construct cached CRS transformers lazily (pyproj is an optional dependency for readers)."""
-    from pyproj import (
-        Transformer,
-    )  # imported lazily to avoid requiring pyproj for point-store readers
 
     to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
     to_4326 = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
@@ -316,8 +320,6 @@ def build_train_sampler(
         vonmises_params = None
 
         try:
-            from scipy import stats  # type: ignore
-
             try:
                 gamma_params = stats.gamma.fit(valid_lengths, floc=0)
                 gamma_used = True
@@ -381,9 +383,6 @@ def _sample_from_raster(
     bilinear: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample raster at point locations (EPSG:4326) in raster's native CRS."""
-    from pyproj import (
-        Transformer,
-    )  # imported lazily to avoid requiring pyproj for point-store readers
 
     arr = raster.array
     transform = raster.transform
@@ -497,8 +496,6 @@ def _sample_pseudo_steps(
     pseudo_turns: np.ndarray
 
     if state.get("gamma_used", False) and state.get("gamma_params") is not None:
-        from scipy import stats  # type: ignore
-
         pseudo_lens = stats.gamma.rvs(
             *state["gamma_params"], size=n, random_state=rng
         ).astype(np.float64, copy=False)
@@ -508,8 +505,6 @@ def _sample_pseudo_steps(
         )
 
     if state.get("vonmises_used", False) and state.get("vonmises_params") is not None:
-        from scipy import stats  # type: ignore
-
         pseudo_turns = stats.vonmises.rvs(
             *state["vonmises_params"], size=n, random_state=rng
         ).astype(np.float64, copy=False)
@@ -624,7 +619,6 @@ def _extract_one_step(
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
             parents = {p: get_raster(p) for p in spec.derived_from}
-            import movebench.layers.derived as derived
 
             fn = getattr(derived, f"compute_{layer}", None)
             if fn is None:
@@ -633,7 +627,6 @@ def _extract_one_step(
                 )
             arr = fn(**parents)
             base = parents[spec.derived_from[0]]
-            from movebench.rasters import Raster
 
             r = Raster(
                 array=arr,
@@ -707,8 +700,6 @@ _W_BOUNDS_BUFFER_DEG = None
 
 def _worker_init(ctx: dict[str, Any]) -> None:
     global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE, _W_BOUNDS_BUFFER_DEG
-
-    from movebench.layers.io import LayerIO
 
     _W_PLAN = LayerPlan.from_dict(ctx["plan_dict"])
     _W_LAYER_SLICES = {k: tuple(v) for k, v in ctx["layer_slices"].items()}
@@ -811,8 +802,6 @@ def _extract_env_block(
     layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
     if n_workers <= 1:
-        from movebench.layers.io import LayerIO
-
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
         for i, req in enumerate(
             tqdm(reqs, total=n_steps, desc=f"{study_id}:{plan.rasters_hash} steps")

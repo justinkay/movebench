@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 GEE_NODATA_SENTINEL = -9999.0
 
 WGS84_CRS = "EPSG:4326"

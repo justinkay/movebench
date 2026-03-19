@@ -22,7 +22,7 @@ from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.layers.constants import WGS84_CRS
 from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
-from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.layers.registry import REGISTRY, LayerRegistry
 from movebench.rasters import Raster, reproject_to_meters
 from movebench.trajectories import (
     LAT_COL,
@@ -35,6 +35,8 @@ from movebench.trajectories import (
     select_step_starts,
 )
 
+from pyproj import Transformer
+import json
 
 TARGET_CRS = "EPSG:3857"  # meters
 
@@ -197,7 +199,6 @@ class ChipDataset(Dataset):
                 )
                 for r in steps.itertuples(index=False)
             ]
-            from pyproj import Transformer
 
             self._to_target = Transformer.from_crs(
                 WGS84_CRS, TARGET_CRS, always_xy=True
@@ -297,7 +298,6 @@ class ChipDataset(Dataset):
         self, layer: str, *, lon: float, lat: float
     ) -> tuple[float, float, float, float]:
         """Return the downloaded tile bounds (EPSG:4326) that contain a point."""
-        import json
 
         tile_dir = (
             self.study_dir

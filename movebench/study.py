@@ -9,6 +9,17 @@ from movebench.layers.config import load_layers_config
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import SET_COL, TIME_COL
 
+from movebench.layers.io import LayerIO
+import pandas as pd
+from movebench.layers import download as mb2dl
+from movebench.features.points import extract_point_feature_stores
+from movebench.datasets.chips import ChipDataset
+from movebench.datasets.deepssf import DeepSSFDataset
+from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+from movebench.datasets.ssf import SSFDataset
+from movebench.datasets.ssf import iSSFDataset
+from movebench.features.normalization import compute_points_normalization_stats
+
 
 @dataclass(frozen=True)
 class Study:
@@ -54,7 +65,6 @@ class Study:
         plan = self.layer_plan(config)
 
         # Imported lazily to keep `Study` lightweight and avoid import cycles.
-        from movebench.layers.io import LayerIO
 
         return LayerIO(study_dir=self.study_dir, plan=plan)
 
@@ -74,9 +84,6 @@ class Study:
         plan = REGISTRY.resolve(cfg)
 
         # Imported lazily: heavy deps (pandas, EE, rasterio, requests).
-        from movebench.layers import download as mb2dl
-
-        import pandas as pd
 
         df = pd.read_csv(self.trajectories_path)
         df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
@@ -184,7 +191,6 @@ class Study:
         plan = self.layer_plan(config)
 
         # Imported lazily: heavy deps (numpy/pandas/torch/scipy).
-        from movebench.features.points import extract_point_feature_stores
 
         return extract_point_feature_stores(
             study_id=self.study_id,
@@ -224,7 +230,6 @@ class Study:
         plan = self.layer_plan(config)
 
         # Imported lazily to avoid torch/rasterio imports when unused.
-        from movebench.datasets.chips import ChipDataset
 
         return ChipDataset(
             study_dir=self.study_dir,
@@ -269,8 +274,6 @@ class Study:
             gap_q=gap_q,
         )
 
-        from movebench.datasets.deepssf import DeepSSFDataset
-
         return DeepSSFDataset(chips)
 
     def moveformer_dataset(
@@ -293,8 +296,6 @@ class Study:
     ):
         """Create a MoveFormer dataset backed by extracted iSSF point stores."""
         plan = self.layer_plan(config)
-
-        from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 
         return MoveFormerPointStoreDataset(
             study_dir=self.study_dir,
@@ -333,8 +334,6 @@ class Study:
     ):
         """Create an SSFDataset (empirical sampling) from extracted point features."""
         plan = self.layer_plan(config)
-
-        from movebench.datasets.ssf import SSFDataset
 
         return SSFDataset(
             study_dir=self.study_dir,
@@ -375,8 +374,6 @@ class Study:
         """Create an iSSFDataset (parametric sampling) from extracted point features."""
         plan = self.layer_plan(config)
 
-        from movebench.datasets.ssf import iSSFDataset
-
         return iSSFDataset(
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
@@ -414,8 +411,6 @@ class Study:
             )
 
         plan = self.layer_plan(config)
-
-        from movebench.features.normalization import compute_points_normalization_stats
 
         return compute_points_normalization_stats(
             study_dir=self.study_dir,

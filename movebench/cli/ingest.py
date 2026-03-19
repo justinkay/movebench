@@ -16,6 +16,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from movebench.trajectories import (
+    INDIVIDUAL_COL,
+    LAT_COL,
+    LON_COL,
+    TIME_COL,
+)
+from movebench.trajectories import SET_COL
+from movebench.trajectories import POINT_ID_COL
+from movebench.features.manifest import utc_now_iso
+from movebench import paths
+
 
 def _parse_int_with_underscores(value: str) -> int:
     s = str(value).strip()
@@ -33,12 +44,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench.trajectories import (
-        INDIVIDUAL_COL,
-        LAT_COL,
-        LON_COL,
-        TIME_COL,
-    )
 
     df = df.copy()
 
@@ -61,7 +66,6 @@ def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench.trajectories import LAT_COL, LON_COL, TIME_COL
 
     df = df.copy()
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
@@ -76,7 +80,6 @@ def _subsample_individuals(
     max_points: int,
     random_seed: int,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    from movebench.trajectories import INDIVIDUAL_COL
 
     if max_individuals <= 0:
         raise ValueError(f"max_individuals must be > 0, got {max_individuals}")
@@ -128,7 +131,6 @@ def _subsample_individuals(
 
 
 def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench.trajectories import INDIVIDUAL_COL, SET_COL, TIME_COL
 
     df = df.copy()
 
@@ -146,7 +148,6 @@ def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sort_and_assign_point_id(df: pd.DataFrame) -> pd.DataFrame:
-    from movebench.trajectories import INDIVIDUAL_COL, POINT_ID_COL, TIME_COL
 
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL]).reset_index(drop=True)
     df[POINT_ID_COL] = df.index.astype(int)
@@ -161,8 +162,6 @@ def _write_manifest(
     df: pd.DataFrame,
     subsample: dict[str, object] | None = None,
 ) -> None:
-    from movebench.features.manifest import utc_now_iso
-    from movebench.trajectories import INDIVIDUAL_COL, SET_COL
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
@@ -228,7 +227,6 @@ def _ingest_one_csv(
     compact_logs: bool = False,
     log_prefix: str = "",
 ) -> None:
-    from movebench.trajectories import INDIVIDUAL_COL, SET_COL
 
     df = pd.read_csv(csv_path, low_memory=False)
     df = _normalize_columns(df)
@@ -361,8 +359,6 @@ def run(args: argparse.Namespace) -> int:
 
     if args.data_root is not None:
         os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
-
-    from movebench import paths
 
     source_path = args.source_path.expanduser().resolve()
     if not source_path.exists():

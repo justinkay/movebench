@@ -19,6 +19,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import _bootstrap as bootstrap
 import hashlib
 import json
 import math
@@ -27,12 +28,41 @@ import shlex
 import subprocess
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
+from pyproj import Transformer
+import torch
+from torch.utils.data import DataLoader, Subset
+from tqdm.auto import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+import movebench.features.points as mb_points
+from movebench import Study
+from movebench.benchmark import load_config
+from movebench.benchmark import resolve_studies
+from movebench.datasets.deepssf import DeepSSFDataset
+from movebench.features.normalization import load_points_normalization_mean_std
+from movebench.features.points import select_point_store_dir
+from movebench.layers.config import load_layers_config
+from movebench.layers.registry import REGISTRY
+from movebench.models.deepssf import DeepSSF
+from movebench.models.moveformer import build_moveformer_selection_model
+from movebench.models.ssf import LinearStepSelect, MLPStepSelect
+from movebench.train import collate_deepssf, collate_moveformer
+from movebench.trajectories import (
+    POINT_ID_COL,
+    SET_COL,
+    TIME_COL,
+    compute_movement_features,
+    select_step_starts,
+)
+
+_REPO_ROOT = bootstrap.REPO_ROOT
 
 
 @dataclass(frozen=True)
@@ -184,7 +214,6 @@ def _seed(*parts: object) -> int:
 def _load_cfg(config_path: str) -> dict[str, Any]:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.benchmark import load_config
 
     p = Path(config_path).expanduser()
     if not p.is_absolute():
@@ -195,8 +224,6 @@ def _load_cfg(config_path: str) -> dict[str, Any]:
 def _resolve_layer_plan(layers_config: str):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.layers.config import load_layers_config
-    from movebench.layers.registry import REGISTRY
 
     cfg = load_layers_config(layers_config)
     return REGISTRY.resolve(cfg)
@@ -205,7 +232,6 @@ def _resolve_layer_plan(layers_config: str):
 def _uses_gee_layers(plan) -> bool:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.layers.registry import REGISTRY
 
     required = set(str(x) for x in plan.layers_in_order)
     for parents in (plan.derived_dependencies or {}).values():
@@ -235,7 +261,6 @@ def _select_parametric_store(
 ):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.features.points import select_point_store_dir
 
     return select_point_store_dir(
         study_dir=Path(study_dir),
@@ -297,7 +322,6 @@ def _check_prereqs(
     """Return (ok, sampler_hash, reason)."""
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench import Study
 
     try:
         study = Study(str(study_id))
@@ -406,7 +430,6 @@ def _build_srun_cmd(
 def _movement_stats_from_train_store(
     *, study_dir: Path, plan_config_hash: str, sampler_hash: str
 ) -> dict[str, float]:
-    import torch
 
     pt = (
         Path(study_dir)
@@ -453,8 +476,6 @@ def _issf_step_x(
     std: Any,
     issf_cfg: dict[str, Any],
 ):
-    import pandas as pd
-    import torch
 
     if bool(issf_cfg.get("include_individual_id", False)):
         raise ValueError(
@@ -518,32 +539,6 @@ def _issf_step_x(
 def _worker(args: argparse.Namespace) -> int:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-
-    try:
-        import numpy as np
-        import pandas as pd
-        import torch
-        from pyproj import Transformer
-        from tqdm.auto import tqdm
-        from torch.utils.data import DataLoader, Subset
-    except Exception as e:
-        print(f"[compare_outputs] ERROR importing dependencies: {e}", file=sys.stderr)
-        return 2
-
-    from movebench import Study
-    from movebench.datasets.deepssf import DeepSSFDataset
-    from movebench.features.normalization import load_points_normalization_mean_std
-    from movebench.models.deepssf import DeepSSF
-    from movebench.models.ssf import LinearStepSelect, MLPStepSelect
-    from movebench.trajectories import (
-        SET_COL,
-        TIME_COL,
-        POINT_ID_COL,
-        compute_movement_features,
-        select_step_starts,
-    )
-    from movebench.train import collate_deepssf, collate_moveformer
-    import movebench.features.points as mb_points
 
     cfg = _load_cfg(str(args.config))
     out_dir = Path(str(cfg["output_dir"]))
@@ -631,8 +626,6 @@ def _worker(args: argparse.Namespace) -> int:
                 device=device,
             )
         elif kind == "moveformer":
-            from movebench.models.moveformer import build_moveformer_selection_model
-
             cd = int(cov_dim or meta.get("cov_dim", 0) or 0)
             if cd <= 0:
                 raise ValueError("Need cov_dim to load moveformer")
@@ -774,9 +767,6 @@ def _worker(args: argparse.Namespace) -> int:
 
     # --- iSSF surface sampling (threaded extract + score + sample) ---
     if ("issf_linear" in models) or ("issf_mlp" in models):
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         tls = threading.local()
         layer_slices = {
             layer: plan.layer_slice(layer) for layer in plan.layers_in_order
@@ -1169,7 +1159,6 @@ def _worker(args: argparse.Namespace) -> int:
 
 
 def _merge_outputs(*, out_dir: Path) -> None:
-    import pandas as pd
 
     sdir = _study_results_dir(out_dir)
     if not sdir.exists():
@@ -1241,7 +1230,6 @@ def _launcher(args: argparse.Namespace) -> int:
 
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.benchmark import resolve_studies
 
     override_kind, override_list = _parse_studies_override(args.studies)
     if override_kind == "config_default":

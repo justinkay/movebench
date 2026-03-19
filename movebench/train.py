@@ -10,6 +10,12 @@ from typing import Any, Protocol
 import torch
 import torch.nn.functional as F
 
+from torch.utils.data import DataLoader, Subset
+from movebench.lib.moveformer.geo_transformers.training_utils import (
+    collate_sequence_dicts,
+)
+from movebench.lib.moveformer.geo_transformers.training_utils import LinearWarmupLR
+
 
 class LogCallback(Protocol):
     def __call__(self, metrics: dict[str, float], *, step: int) -> None: ...
@@ -34,8 +40,6 @@ def _deterministic_eval_subset(loader: Any, *, max_items: int | None, seed: int)
     max_items = int(max_items)
 
     try:
-        from torch.utils.data import DataLoader, Subset
-
         ds = loader.dataset
         n = int(len(ds))
         k = min(int(max_items), int(n))
@@ -752,9 +756,6 @@ def fit_deepssf(
 
 def collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
     """Collate MoveFormer segment dicts using upstream padding behavior."""
-    from movebench.lib.moveformer.geo_transformers.training_utils import (
-        collate_sequence_dicts,
-    )
 
     return collate_sequence_dicts(batch)
 
@@ -846,7 +847,6 @@ def fit_moveformer(
     log_callback: LogCallback | None = None,
 ) -> dict:
     """Step-based training with early stopping on validation NLL."""
-    from movebench.lib.moveformer.geo_transformers.training_utils import LinearWarmupLR
 
     _seed_everything(seed)
     model.to(device)

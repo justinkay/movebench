@@ -10,10 +10,10 @@ It can:
 from __future__ import annotations
 
 import argparse
+import _bootstrap as bootstrap
 import json
 import math
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -22,10 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+from movebench.features.points import select_point_store_dir
 from movebench import Study
 from movebench.datasets.deepssf_wds_cache import (
     ensure_deepssf_wds_cache_split,
@@ -34,6 +31,7 @@ from movebench.datasets.deepssf_wds_cache import (
 from movebench.models.deepssf import DeepSSF
 from movebench.train import collate_deepssf
 
+_REPO_ROOT = bootstrap.REPO_ROOT
 
 # Match configs/benchmarks/all.yaml iSSF sampler settings (used for normalization stats).
 NUM_CANDIDATES = 100
@@ -87,7 +85,6 @@ def _ensure_ready(
     gap_q: float,
 ) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
-    from movebench.features.points import select_point_store_dir
 
     plan = study.layer_plan(layers_config)
     try:

@@ -4,16 +4,22 @@ import glob
 import json
 import os
 import warnings
-import numpy as np
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import rasterio
+from rasterio.errors import RasterioIOError
+from rasterio.merge import merge
+from rasterio.transform import from_bounds
+
 from movebench import paths
+import movebench.layers.derived as derived
 from movebench.layers.constants import GEE_NODATA_SENTINEL, WGS84_CRS
 from movebench.layers.plan import LayerPlan
-from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.layers.registry import REGISTRY, LayerRegistry
 from movebench.rasters import (
     Raster,
     merge_hdf_window,
@@ -229,8 +235,6 @@ class LayerIO:
                 timestamp=timestamp,
             )
 
-        import movebench.layers.derived as derived
-
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)
         if fn is None:
@@ -401,8 +405,6 @@ class LayerIO:
             )
 
         def _missing_raster() -> Raster:
-            from rasterio.transform import from_bounds
-
             min_lon, min_lat, max_lon, max_lat = bounds_latlon
             # Some derived layers (e.g. slope/aspect) require >=2 pixels to run
             # numerical gradients without crashing.
@@ -437,9 +439,6 @@ class LayerIO:
             if len(matches) == 1:
                 base = read_geotiff_window(matches[0], bounds_latlon)
             else:
-                import rasterio
-                from rasterio.merge import merge
-
                 datasets = [rasterio.open(p) for p in matches]
                 try:
                     mosaic, out_transform = merge(
@@ -457,13 +456,7 @@ class LayerIO:
                     for ds in datasets:
                         ds.close()
         except Exception as exc:
-            try:
-                from rasterio.errors import RasterioIOError
-            except Exception:
-                RasterioIOError = None  # type: ignore[assignment]
-            if isinstance(exc, FileNotFoundError) or (
-                RasterioIOError is not None and isinstance(exc, RasterioIOError)
-            ):
+            if isinstance(exc, FileNotFoundError) or (isinstance(exc, RasterioIOError)):
                 _warn_missing("io_error")
                 return _missing_raster()
             raise
@@ -569,8 +562,6 @@ class LayerIO:
             raise ValueError(f"local_hdf layer {layer!r} missing spec.hdf_path_suffix")
 
         def _missing_raster() -> Raster:
-            from rasterio.transform import from_bounds
-
             min_lon, min_lat, max_lon, max_lat = bounds_latlon
             transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 2, 2)
             arr = np.full((len(spec.bands), 2, 2), np.nan, dtype=np.float32)
@@ -641,8 +632,6 @@ class LayerIO:
                 bounds_latlon=bounds_latlon,
                 timestamp=timestamp,
             )
-
-        import movebench.layers.derived as derived
 
         fn_name = f"compute_{layer}"
         fn = getattr(derived, fn_name, None)

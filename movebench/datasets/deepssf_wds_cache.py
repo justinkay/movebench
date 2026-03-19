@@ -30,12 +30,15 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 import torch
+import webdataset as wds
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-import webdataset as wds
 import movebench.paths as paths
 
+import shutil
+from movebench.layers.plan import LayerPlan
+from torch.utils.data import Subset
 
 Compression = Literal["none", "gz"]
 SpatialDType = Literal["float16", "float32"]
@@ -147,7 +150,6 @@ def build_deepssf_wds_cache(
             raise FileExistsError(
                 f"Output dir exists (pass overwrite=True to replace, or resume=True to continue): {out_dir}"
             )
-        import shutil
 
         if overwrite:
             shutil.rmtree(out_dir)
@@ -164,7 +166,6 @@ def build_deepssf_wds_cache(
         )
     chips = dataset.chips
     plan = getattr(chips, "plan", None)
-    from movebench.layers.plan import LayerPlan
 
     if not isinstance(plan, LayerPlan):
         raise TypeError("dataset.chips.plan must be a LayerPlan")
@@ -276,8 +277,6 @@ def build_deepssf_wds_cache(
         raise RuntimeError(
             "No remaining samples to write (resume offset consumed dataset)."
         )
-
-    from torch.utils.data import Subset
 
     subset = Subset(dataset, remaining)
     loader = DataLoader(

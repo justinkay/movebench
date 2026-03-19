@@ -20,6 +20,7 @@ from statistics import median
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
+import taxoniq  # type: ignore
 import zipfile
 from functools import lru_cache
 
@@ -67,12 +68,6 @@ COMMON_NAME_MAPPING = {
     "Grus grus": "Common Crane",
     "Chelonia mydas": "Green Sea Turtle",
 }
-
-try:
-    import taxoniq  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    taxoniq = None
-
 
 class MetadataExtractionError(RuntimeError):
     """Base exception for metadata processing failures."""

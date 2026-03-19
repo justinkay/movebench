@@ -11,6 +11,8 @@ from movebench.lib.moveformer.geo_transformers.models.any_horizon_forecast_trans
     SelectionHead,
 )
 
+from x_transformers.x_transformers import AttentionLayers
+
 
 def build_moveformer_selection_model(*, cov_dim: int) -> AnyHorizonForecastTransformer:
     """Instantiate MoveFormer VarCtx-style selection model over generic covariates.
@@ -22,8 +24,6 @@ def build_moveformer_selection_model(*, cov_dim: int) -> AnyHorizonForecastTrans
     """
     if int(cov_dim) <= 0:
         raise ValueError(f"cov_dim must be > 0; got {cov_dim}")
-
-    from x_transformers.x_transformers import AttentionLayers
 
     emb_dim = 128
 

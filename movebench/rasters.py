@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import math
-import rasterio
-import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+import numpy as np
+import rasterio
 from rasterio.enums import Resampling
 from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, transform_bounds
-from rasterio.windows import Window, bounds as window_bounds, from_bounds
+from rasterio.windows import Window, from_bounds
+from rasterio.windows import bounds as window_bounds
 
 from movebench.layers.constants import WGS84_CRS
 

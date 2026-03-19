@@ -15,6 +15,7 @@ This script NEVER downloads rasters and NEVER runs point extraction. It expects:
 from __future__ import annotations
 
 import argparse
+import _bootstrap as bootstrap
 import os
 import shlex
 import subprocess
@@ -24,8 +25,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from movebench.benchmark import load_config
+from movebench.benchmark import resolve_studies
+from movebench import Study, paths
+from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
+from movebench.datasets.deepssf_wds_cache import ensure_deepssf_wds_cache_split
+from movebench.features.points import select_point_store_dir
+from movebench.layers.config import load_layers_config
+from movebench.layers.registry import REGISTRY
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = bootstrap.REPO_ROOT
 
 
 @dataclass(frozen=True)
@@ -190,7 +199,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _load_cfg(config_path: str) -> dict[str, Any]:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.benchmark import load_config
 
     return load_config(config_path)
 
@@ -198,8 +206,6 @@ def _load_cfg(config_path: str) -> dict[str, Any]:
 def _resolve_layer_plan(layers_config: str):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.layers.config import load_layers_config
-    from movebench.layers.registry import REGISTRY
 
     cfg = load_layers_config(layers_config)
     return REGISTRY.resolve(cfg)
@@ -220,7 +226,6 @@ def _issf_sampler_params(cfg: dict[str, Any]) -> _SamplerParams:
 def _uses_gee_layers(plan) -> bool:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.layers.registry import REGISTRY
 
     required = set(str(x) for x in plan.layers_in_order)
     for parents in (plan.derived_dependencies or {}).values():
@@ -240,7 +245,6 @@ def _rasters_root_for(plan, *, study_dir: Path) -> Path:
 def _select_parametric_train_store(*, study_dir: Path, plan, sampler: _SamplerParams):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.features.points import select_point_store_dir
 
     return select_point_store_dir(
         study_dir=Path(study_dir),
@@ -346,7 +350,6 @@ def _expected_cache_manifest(
 ) -> Path:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
 
     output_hw = ds_kwargs.get("output_hw", (101, 101))
     if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
@@ -402,7 +405,6 @@ def _check_prereqs(
     """Return (ok, sampler_hash, reason)."""
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench import Study, paths
 
     try:
         study = Study(str(study_id))
@@ -527,8 +529,6 @@ def _worker(args: argparse.Namespace) -> int:
 
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench import Study
-    from movebench.datasets.deepssf_wds_cache import ensure_deepssf_wds_cache_split
 
     ds_kwargs = _deepssf_ds_kwargs(cfg, sampler_hash=str(sampler_hash))
     study = Study(str(args.study))
@@ -578,8 +578,6 @@ def _launcher(args: argparse.Namespace) -> int:
 
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from movebench import paths
-    from movebench.benchmark import resolve_studies
 
     override_kind, override_list = _parse_studies_override(args.studies)
     if override_kind == "config_default":

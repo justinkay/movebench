@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import _bootstrap as bootstrap
 import csv
 import json
 import math
@@ -14,22 +15,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _insert_repo_root_on_path() -> None:
-    root = _repo_root()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+from movebench.layers.config import load_layers_config
+from movebench.layers.download import (
+    LAT_COL,
+    LON_COL,
+    POINT_ID_COL,
+    SET_COL,
+    TIME_COL,
+    compute_group_scale,
+    get_buffer_m_for_study,
+)
+from movebench.layers.registry import REGISTRY
+from movebench.study import Study
+from movebench.trajectories import (
+    compute_step_length_extent_m,
+    prepare_interval_step_starts,
+)
 
 
 def _default_config_path() -> str:
-    ae = _repo_root() / "configs" / "layers_all_ae.yaml"
+    ae = bootstrap.REPO_ROOT / "configs" / "layers_all_ae.yaml"
     if ae.exists():
         return str(ae)
-    return str(_repo_root() / "configs" / "layers_all.yaml")
+    return str(bootstrap.REPO_ROOT / "configs" / "layers_all.yaml")
 
 
 def _format_bytes(n: int | float | None) -> str:
@@ -260,15 +271,6 @@ def compute_dynamic_extent_buffers_km(
     time_col: str = "timestamp",
     window_s: int = 30 * 86400,
 ):
-    import numpy as np
-    import pandas as pd
-
-    _insert_repo_root_on_path()
-    from movebench.trajectories import (
-        compute_step_length_extent_m,
-        prepare_interval_step_starts,
-    )
-
     min_extent_buffer_m = float(min_extent_buffer_m)
     max_extent_buffer_m = float(max_extent_buffer_m)
     if min_extent_buffer_m <= 0.0:
@@ -380,9 +382,6 @@ def estimate_tile_count(
 
     IMPORTANT: grid origin is (0° lon, 0° lat). Empirically this matches on-disk tile bounds.
     """
-    import numpy as np
-    import pandas as pd
-
     lon = df[lon_col].astype(float)
     lat = df[lat_col].astype(float)
     if lon.isna().any() or lat.isna().any():
@@ -637,31 +636,6 @@ def main(argv: list[str]) -> int:
     if args.paths_config:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
-    _insert_repo_root_on_path()
-
-    try:
-        import numpy as np
-        import pandas as pd
-
-        from movebench.layers.config import load_layers_config
-        from movebench.layers.download import (
-            LAT_COL,
-            LON_COL,
-            POINT_ID_COL,
-            SET_COL,
-            TIME_COL,
-            compute_group_scale,
-            get_buffer_m_for_study,
-        )
-        from movebench.layers.registry import REGISTRY
-        from movebench.study import Study
-    except ModuleNotFoundError as e:
-        print(f"Import failed: {e}")
-        print(
-            "Make sure movebench dependencies are installed (notably pandas and numpy)."
-        )
-        return 1
-
     extent_mode = (
         "rolling_window"
         if str(args.extent_mode) == "rolling_month"
@@ -686,7 +660,9 @@ def main(argv: list[str]) -> int:
 
     chip_groups = list(plan.chip_groups.keys())
     tile_layers = [
-        l for l in plan.layers_in_order if REGISTRY.get(l).source == "gee_tile"
+        layer_name
+        for layer_name in plan.layers_in_order
+        if REGISTRY.get(layer_name).source == "gee_tile"
     ]
 
     clamp = cfg.raster_params["scale_clamp"]
@@ -936,7 +912,9 @@ def main(argv: list[str]) -> int:
         for g in chip_groups:
             group = plan.chip_groups[g]
             layers = list(group["layers"])
-            band_count = int(sum(len(REGISTRY.get(l).bands) for l in layers))
+            band_count = int(
+                sum(len(REGISTRY.get(layer_name).bands) for layer_name in layers)
+            )
             target_scale_m = float(group["target_scale_m"])
             scale = float(
                 compute_group_scale(

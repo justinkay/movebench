@@ -8,8 +8,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
+
+from movebench import benchmark as mb_benchmark
 
 
 def _parse_args() -> argparse.Namespace:
@@ -32,13 +32,6 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-
-    repo_root = Path(__file__).resolve().parent
-    if str(repo_root) not in sys.path:
-        # Allow running without installing as a package.
-        sys.path.insert(0, str(repo_root))
-
-    from movebench import benchmark as mb_benchmark
 
     mb_benchmark.main(
         config_path=str(args.config), overrides=None, resume=bool(args.resume)

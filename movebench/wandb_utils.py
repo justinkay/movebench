@@ -14,12 +14,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
+import wandb
+
 
 class LogCallback(Protocol):
     def __call__(self, metrics: dict[str, float], *, step: int) -> None: ...
-
-
-_WARNED_IMPORT = False
 
 
 def _as_str(val: Any) -> str:
@@ -38,16 +37,7 @@ def _dedupe(seq: Sequence[str]) -> list[str]:
 
 
 def _try_import_wandb() -> Any | None:
-    global _WARNED_IMPORT
-    try:
-        import wandb  # type: ignore[import-not-found]
-
-        return wandb
-    except Exception as e:
-        if not _WARNED_IMPORT:
-            _WARNED_IMPORT = True
-            print(f"[wandb] Disabled (import failed): {e}")
-        return None
+    return wandb
 
 
 def _compact_dict(d: dict[str, Any]) -> dict[str, Any]:

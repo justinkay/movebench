@@ -13,12 +13,11 @@ All masked pixels are materialized as the numeric sentinel `-9999` in GeoTIFFs.
 
 from __future__ import annotations
 
-import os
-import json
 import hashlib
+import json
 import math
 import multiprocessing as mp
-import requests
+import os
 import tempfile
 import time
 from dataclasses import dataclass
@@ -26,10 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import ee
 import numpy as np
 import pandas as pd
-import ee
 import rasterio
+import requests
 from rasterio.enums import ColorInterp
 from rasterio.merge import merge as rasterio_merge
 from tqdm import tqdm
@@ -45,7 +45,7 @@ from movebench.layers.constants import (
     WGS84_MIN_LON,
 )
 from movebench.layers.plan import LayerPlan
-from movebench.layers.registry import LayerRegistry, REGISTRY
+from movebench.layers.registry import REGISTRY, LayerRegistry
 from movebench.trajectories import (
     INDIVIDUAL_COL,
     LAT_COL,
@@ -57,7 +57,6 @@ from movebench.trajectories import (
     haversine_distance_m,
     prepare_interval_step_starts,
 )
-
 
 _ee_initialized = False
 

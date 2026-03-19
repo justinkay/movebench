@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from movebench.study import Study
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
@@ -103,13 +105,6 @@ def run(args: argparse.Namespace) -> int:
         os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
     if args.paths_config:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
-
-    try:
-        from movebench.study import Study
-    except ModuleNotFoundError as e:
-        print(f"Import failed: {e}")
-        print("Make sure movebench dependencies are installed in your environment.")
-        return 1
 
     all_names = Study.list_available()
 
