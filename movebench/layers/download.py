@@ -166,142 +166,16 @@ def square_region_for_point(lon: float, lat: float, buffer_m: float):
     ensure_ee_initialized()
     pt = ee.Geometry.Point([lon, lat])
     return pt.buffer(float(buffer_m)).bounds()
-
-
-def union_regions(regions: list):
-    ensure_ee_initialized()
-    return ee.Geometry.MultiPolygon(regions)
-
-
-def _wrap_lon_to_wgs84(lon: float) -> float:
-    wrapped = ((float(lon) + 180.0) % 360.0) - 180.0
-    if wrapped == -180.0 and float(lon) > 0.0:
-        return 180.0
-    return wrapped
-
-
 def _clamp_tile_bounds_latlon(
     bounds_latlon: tuple[float, float, float, float],
 ) -> tuple[float, float, float, float]:
-    """Clamp tile bounds to a valid EPSG:4326 lon/lat range.
-
-    Earth Engine can snap coveringGrid cells slightly beyond [-180,180] near the dateline. Since all
-    downstream readers expect lon in [-180,180], clamp bounds here to avoid invalid requests.
-    """
+    """Clamp tile bounds to a valid EPSG:4326 lon/lat range."""
     min_lon, min_lat, max_lon, max_lat = (float(x) for x in bounds_latlon)
     min_lon = max(min_lon, WGS84_MIN_LON)
     max_lon = min(max_lon, WGS84_MAX_LON)
     min_lat = max(min_lat, WGS84_MIN_LAT)
     max_lat = min(max_lat, WGS84_MAX_LAT)
     return (min_lon, min_lat, max_lon, max_lat)
-
-
-def _bounds_from_ee_feature_info(
-    feature_info: Any,
-) -> tuple[float, float, float, float]:
-    """Extract (min_lon, min_lat, max_lon, max_lat) from an EE Feature `getInfo()` dict."""
-    if not isinstance(feature_info, dict):
-        raise TypeError(f"Expected feature_info dict, got {type(feature_info)!r}")
-
-    geom = feature_info.get("geometry")
-    if isinstance(geom, dict) and "coordinates" in geom:
-        coords = geom.get("coordinates")
-    elif "coordinates" in feature_info:
-        # Some callers may pass a geometry dict directly.
-        coords = feature_info.get("coordinates")
-    else:
-        raise KeyError("Feature info missing geometry coordinates")
-
-    if not isinstance(coords, list) or not coords:
-        raise ValueError("Invalid geometry coordinates (expected non-empty list)")
-
-    ring = coords[0]
-    if not isinstance(ring, list) or not ring:
-        raise ValueError("Invalid geometry coordinates (expected polygon ring)")
-
-    min_lon = min(float(c[0]) for c in ring)
-    max_lon = max(float(c[0]) for c in ring)
-    min_lat = min(float(c[1]) for c in ring)
-    max_lat = max(float(c[1]) for c in ring)
-    return (min_lon, min_lat, max_lon, max_lat)
-
-
-def _enumerate_covering_grid_tile_bounds(
-    filtered_fc: Any,
-    *,
-    n_tiles_reported: int,
-    page_size: int = 250,
-) -> tuple[
-    list[tuple[float, float, float, float]], list[int], list[dict[str, Any]], int
-]:
-    """Enumerate tile bounds from a coveringGrid FeatureCollection.
-
-    This intentionally avoids per-index `toList(1, i)` calls, which have proven unstable for some
-    computed FeatureCollections; instead it pages `toList(limit, offset)` and parses client-side.
-    """
-    n_tiles_reported_i = int(n_tiles_reported)
-    page_size_i = max(int(page_size), 1)
-
-    tile_bounds_latlon: list[tuple[float, float, float, float]] = []
-    tile_indices: list[int] = []
-    geometry_errors: list[dict[str, Any]] = []
-    n_tiles_effective = int(n_tiles_reported_i)
-
-    for offset in range(0, n_tiles_reported_i, page_size_i):
-        expected = min(int(page_size_i), int(n_tiles_reported_i) - int(offset))
-        if expected <= 0:
-            break
-
-        try:
-            page = filtered_fc.toList(int(expected), int(offset)).getInfo()
-        except Exception as e:
-            geometry_errors.append(
-                {
-                    "tile_index": int(offset),
-                    "error": f"tile_page_failed: {type(e).__name__}: {e}",
-                }
-            )
-            n_tiles_effective = int(offset)
-            break
-
-        if not isinstance(page, list):
-            geometry_errors.append(
-                {
-                    "tile_index": int(offset),
-                    "error": f"tile_page_invalid: expected list, got {type(page).__name__}",
-                }
-            )
-            n_tiles_effective = int(offset)
-            break
-
-        if len(page) < int(expected):
-            n_tiles_effective = int(offset) + int(len(page))
-
-        if not page:
-            break
-
-        for j, feat in enumerate(page):
-            i = int(offset) + int(j)
-            try:
-                bounds = _bounds_from_ee_feature_info(feat)
-                bounds = _clamp_tile_bounds_latlon(bounds)
-                if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
-                    raise ValueError(f"degenerate_bounds: {bounds}")
-            except Exception as e:
-                geometry_errors.append(
-                    {
-                        "tile_index": int(i),
-                        "error": f"tile_geometry_failed: {type(e).__name__}: {e}",
-                    }
-                )
-                continue
-            tile_bounds_latlon.append(bounds)
-            tile_indices.append(int(i))
-
-        if len(page) < int(expected):
-            break
-
-    return tile_bounds_latlon, tile_indices, geometry_errors, int(n_tiles_effective)
 
 
 def _bounds_intersect_latlon(
@@ -316,21 +190,77 @@ def _bounds_intersect_latlon(
     )
 
 
-def _filter_tile_bounds_latlon(
-    tile_bounds_latlon: list[tuple[float, float, float, float]],
-    tile_indices: list[int],
+def _grid_cell_size_deg(grid_size_m: float) -> float:
+    cell_size_deg = float(grid_size_m) / METERS_PER_DEG_LAT
+    if cell_size_deg <= 0.0:
+        raise ValueError(f"grid_size_m must be > 0, got {grid_size_m}")
+    return float(cell_size_deg)
+
+
+def _grid_index_range_for_bounds(
+    min_coord: float,
+    max_coord: float,
     *,
+    cell_size_deg: float,
+) -> range:
+    min_coord_f = float(min_coord)
+    max_coord_f = float(max_coord)
+    if max_coord_f <= min_coord_f:
+        return range(0)
+    start = math.floor(min_coord_f / float(cell_size_deg))
+    # Use a half-open range [min, max) so rectangles that end exactly on a grid line
+    # do not synthesize an extra out-of-world tile at +180 / +90.
+    stop = (
+        math.floor(math.nextafter(max_coord_f, -math.inf) / float(cell_size_deg)) + 1
+    )
+    return range(int(start), int(stop))
+
+
+def _tile_bounds_from_grid_key(
+    tile_key: tuple[int, int],
+    *,
+    cell_size_deg: float,
+) -> tuple[float, float, float, float]:
+    ix, iy = (int(x) for x in tile_key)
+    bounds = _clamp_tile_bounds_latlon(
+        (
+            float(ix) * float(cell_size_deg),
+            float(iy) * float(cell_size_deg),
+            float(ix + 1) * float(cell_size_deg),
+            float(iy + 1) * float(cell_size_deg),
+        )
+    )
+    if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+        raise ValueError(f"degenerate_bounds: {bounds}")
+    return bounds
+
+
+def _plan_tile_bounds_latlon(
     rect_bounds: list[tuple[float, float, float, float]],
-) -> tuple[list[tuple[float, float, float, float]], list[int]]:
-    filtered_bounds: list[tuple[float, float, float, float]] = []
-    filtered_indices: list[int] = []
-    for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon):
-        if any(
-            _bounds_intersect_latlon(bounds_latlon, rect) for rect in rect_bounds
-        ):
-            filtered_bounds.append(bounds_latlon)
-            filtered_indices.append(int(tile_index))
-    return filtered_bounds, filtered_indices
+    *,
+    grid_size_m: float,
+) -> list[tuple[float, float, float, float]]:
+    cell_size_deg = _grid_cell_size_deg(grid_size_m)
+    tile_keys: set[tuple[int, int]] = set()
+
+    for rect in rect_bounds:
+        min_lon, min_lat, max_lon, max_lat = (float(x) for x in rect)
+        lon_range = _grid_index_range_for_bounds(
+            min_lon, max_lon, cell_size_deg=cell_size_deg
+        )
+        lat_range = _grid_index_range_for_bounds(
+            min_lat, max_lat, cell_size_deg=cell_size_deg
+        )
+        for ix in lon_range:
+            for iy in lat_range:
+                tile_keys.add((int(ix), int(iy)))
+
+    tile_bounds_latlon: list[tuple[float, float, float, float]] = []
+    for tile_key in sorted(tile_keys, key=lambda key: (int(key[0]), int(key[1]))):
+        bounds = _tile_bounds_from_grid_key(tile_key, cell_size_deg=cell_size_deg)
+        if any(_bounds_intersect_latlon(bounds, rect) for rect in rect_bounds):
+            tile_bounds_latlon.append(bounds)
+    return tile_bounds_latlon
 
 
 def _tile_plan_errors(
@@ -1717,8 +1647,8 @@ def download_tile_layer(
     crs = WGS84_CRS
     grid_size_m = float(layer_scale) * float(px_per_side)
 
-    # Avoid building a huge Earth Engine union geometry from per-point buffers:
-    # bucket points into coarse spatial bins and build one conservative rectangle per bucket.
+    # Bucket points into coarse spatial bins and build one conservative rectangle per bucket.
+    # Tile layout is then computed entirely on the client from those buffered rectangles.
     lon = df[LON_COL].astype(float)
     lat = df[LAT_COL].astype(float)
     if lon.isna().any() or lat.isna().any():
@@ -1783,7 +1713,6 @@ def download_tile_layer(
             .reset_index()
         )
 
-    rect_geoms = []
     rect_bounds: list[tuple[float, float, float, float]] = []
 
     for _, r in grouped.iterrows():
@@ -1829,45 +1758,22 @@ def download_tile_layer(
             if a >= c or b >= d:
                 continue
             rect_bounds.append((a, b, c, d))
-            rect_geoms.append(
-                ee.Geometry.Rectangle([a, b, c, d], proj=crs, geodesic=False)
-            )
 
-    if not rect_geoms:
+    if not rect_bounds:
         raise RuntimeError("No bucket rectangles were constructed for tiling")
-
-    min_rect_lon = min(b[0] for b in rect_bounds)
-    min_rect_lat = min(b[1] for b in rect_bounds)
-    max_rect_lon = max(b[2] for b in rect_bounds)
-    max_rect_lat = max(b[3] for b in rect_bounds)
-
-    bounds_rect = ee.Geometry.Rectangle(
-        [min_rect_lon, min_rect_lat, max_rect_lon, max_rect_lat],
-        proj=crs,
-        geodesic=False,
-    )
-    grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m).sort("system:index")
-    n_grid_reported = int(grid.size().getInfo())
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
-    all_tile_bounds_latlon, all_tile_indices, geometry_errors, n_grid_effective = (
-        _enumerate_covering_grid_tile_bounds(
-            grid,
-            n_tiles_reported=int(n_grid_reported),
-            page_size=250,
-        )
+    tile_bounds_latlon = _plan_tile_bounds_latlon(
+        rect_bounds,
+        grid_size_m=float(grid_size_m),
     )
-    tile_bounds_latlon, tile_indices = _filter_tile_bounds_latlon(
-        all_tile_bounds_latlon,
-        all_tile_indices,
-        rect_bounds=rect_bounds,
-    )
-    geometry_errors = geometry_errors + _tile_plan_errors(
+    tile_indices = list(range(len(tile_bounds_latlon)))
+    geometry_errors = _tile_plan_errors(
         df,
         tile_bounds_latlon=tile_bounds_latlon,
-        grid_tiles_reported=n_grid_reported,
-        grid_tiles_effective=n_grid_effective,
+        grid_tiles_reported=len(tile_bounds_latlon),
+        grid_tiles_effective=len(tile_bounds_latlon),
     )
     n_tiles_reported = len(tile_indices)
     n_tiles_effective = len(tile_indices)
