@@ -306,6 +306,99 @@ def _enumerate_covering_grid_tile_bounds(
     return tile_bounds_latlon, tile_indices, geometry_errors, int(n_tiles_effective)
 
 
+def _bounds_intersect_latlon(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> bool:
+    return (
+        float(bounds_a[0]) <= float(bounds_b[2])
+        and float(bounds_a[2]) >= float(bounds_b[0])
+        and float(bounds_a[1]) <= float(bounds_b[3])
+        and float(bounds_a[3]) >= float(bounds_b[1])
+    )
+
+
+def _filter_tile_bounds_latlon(
+    tile_bounds_latlon: list[tuple[float, float, float, float]],
+    tile_indices: list[int],
+    *,
+    rect_bounds: list[tuple[float, float, float, float]],
+) -> tuple[list[tuple[float, float, float, float]], list[int]]:
+    filtered_bounds: list[tuple[float, float, float, float]] = []
+    filtered_indices: list[int] = []
+    for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon):
+        if any(
+            _bounds_intersect_latlon(bounds_latlon, rect) for rect in rect_bounds
+        ):
+            filtered_bounds.append(bounds_latlon)
+            filtered_indices.append(int(tile_index))
+    return filtered_bounds, filtered_indices
+
+
+def _tile_plan_errors(
+    df: pd.DataFrame,
+    *,
+    tile_bounds_latlon: list[tuple[float, float, float, float]],
+    grid_tiles_reported: int,
+    grid_tiles_effective: int,
+    max_examples: int = 5,
+) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+
+    if int(grid_tiles_effective) != int(grid_tiles_reported):
+        errors.append(
+            {
+                "stage": "plan",
+                "error": (
+                    "tile_grid_incomplete: "
+                    f"reported={int(grid_tiles_reported)} "
+                    f"effective={int(grid_tiles_effective)}"
+                ),
+            }
+        )
+
+    uncovered_points: list[dict[str, Any]] = []
+    cols = [POINT_ID_COL, LON_COL, LAT_COL, SET_COL]
+    for _, row in df[cols].iterrows():
+        lon = float(row[LON_COL])
+        lat = float(row[LAT_COL])
+        covered = any(
+            min_lon <= lon <= max_lon and min_lat <= lat <= max_lat
+            for min_lon, min_lat, max_lon, max_lat in tile_bounds_latlon
+        )
+        if covered:
+            continue
+        uncovered_points.append(
+            {
+                "point_id": int(row[POINT_ID_COL]),
+                "split": str(row[SET_COL]),
+                "lon": lon,
+                "lat": lat,
+            }
+        )
+
+    if uncovered_points:
+        sample = uncovered_points[: max(int(max_examples), 0)]
+        sample_text = ", ".join(
+            f"{item['point_id']}[{item['split']}]@({item['lon']:.4f},{item['lat']:.4f})"
+            for item in sample
+        )
+        errors.append(
+            {
+                "stage": "plan",
+                "error": (
+                    "tile_coverage_incomplete: "
+                    f"uncovered_points={len(uncovered_points)} "
+                    f"sample={sample_text}"
+                ),
+                "uncovered_points": int(len(uncovered_points)),
+                "sample_points": sample,
+            }
+        )
+
+    return errors
+
+
 def _fully_masked_image(bands: list[str]):
     ensure_ee_initialized()
     base = ee.Image.constant([0] * len(bands)).rename(bands).toFloat()
@@ -826,7 +919,11 @@ def _tile_index_is_complete(tile_dir: Path, idx_path: Path) -> tuple[bool, int]:
         existing = json.load(f)
     tiles = existing.get("tiles", [])
     errors = existing.get("errors", [])
+    n_tiles_reported = existing.get("n_tiles_reported")
+    n_tiles_effective = existing.get("n_tiles_effective", len(tiles))
     if not tiles or errors or any(("error" in t) for t in tiles):
+        return (False, len(tiles))
+    if n_tiles_reported is not None and int(n_tiles_effective) != int(n_tiles_reported):
         return (False, len(tiles))
     if not all((tile_dir / t["file"]).exists() for t in tiles):
         return (False, len(tiles))
@@ -856,14 +953,22 @@ def _build_geometry_errors(
     *,
     year: int | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "tile_index": int(e["tile_index"]),
-            "file": _tile_filename(int(e["tile_index"]), year=year),
-            "error": str(e["error"]),
-        }
-        for e in geometry_errors
-    ]
+    out: list[dict[str, Any]] = []
+    for e in geometry_errors:
+        if "tile_index" in e:
+            out.append(
+                {
+                    "tile_index": int(e["tile_index"]),
+                    "file": _tile_filename(int(e["tile_index"]), year=year),
+                    "error": str(e["error"]),
+                }
+            )
+            continue
+        item = {str(k): v for k, v in e.items()}
+        if "error" in item:
+            item["error"] = str(item["error"])
+        out.append(item)
+    return out
 
 
 def _empty_tile_stats(
@@ -1108,8 +1213,8 @@ def _build_tile_index_result(
     return stats
 
 
-def _write_compat_index_if_missing(index_path: Path, source_index_path: Path) -> None:
-    if index_path.exists() or (not source_index_path.exists()):
+def _write_compat_index(index_path: Path, source_index_path: Path) -> None:
+    if not source_index_path.exists():
         return
     with open(source_index_path, "r") as f:
         payload = json.load(f)
@@ -1594,12 +1699,8 @@ def download_tile_layer(
                 years_out[int(y)]["existing"] = int(n)
 
             if all_complete:
-                if not index_path.exists():
-                    src = tile_dir / f"index_{int(resolved_years[0])}.json"
-                    with open(src, "r") as f:
-                        payload = json.load(f)
-                    with open(index_path, "w") as f:
-                        json.dump(payload, f, indent=2)
+                src = tile_dir / f"index_{int(resolved_years[0])}.json"
+                _write_compat_index(index_path, src)
                 return {
                     "temporal": "annual",
                     "years": years_out,
@@ -1747,24 +1848,31 @@ def download_tile_layer(
         proj=crs,
         geodesic=False,
     )
-    union_region = union_regions(rect_geoms)
-
-    grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m)
-    filtered = grid.filter(ee.Filter.intersects(".geo", union_region)).sort(
-        "system:index"
-    )
-
-    n_tiles_reported = int(filtered.size().getInfo())
+    grid = bounds_rect.coveringGrid(proj=crs, scale=grid_size_m).sort("system:index")
+    n_grid_reported = int(grid.size().getInfo())
 
     tile_dir.mkdir(parents=True, exist_ok=True)
 
-    tile_bounds_latlon, tile_indices, geometry_errors, n_tiles_effective = (
+    all_tile_bounds_latlon, all_tile_indices, geometry_errors, n_grid_effective = (
         _enumerate_covering_grid_tile_bounds(
-            filtered,
-            n_tiles_reported=int(n_tiles_reported),
+            grid,
+            n_tiles_reported=int(n_grid_reported),
             page_size=250,
         )
     )
+    tile_bounds_latlon, tile_indices = _filter_tile_bounds_latlon(
+        all_tile_bounds_latlon,
+        all_tile_indices,
+        rect_bounds=rect_bounds,
+    )
+    geometry_errors = geometry_errors + _tile_plan_errors(
+        df,
+        tile_bounds_latlon=tile_bounds_latlon,
+        grid_tiles_reported=n_grid_reported,
+        grid_tiles_effective=n_grid_effective,
+    )
+    n_tiles_reported = len(tile_indices)
+    n_tiles_effective = len(tile_indices)
 
     if is_annual:
         years_out: dict[int, dict[str, Any]] = {}
@@ -1837,7 +1945,7 @@ def download_tile_layer(
 
         # Compatibility index.json used for bounds-only lookups.
         if resolved_years:
-            _write_compat_index_if_missing(
+            _write_compat_index(
                 index_path, tile_dir / f"index_{int(resolved_years[0])}.json"
             )
 

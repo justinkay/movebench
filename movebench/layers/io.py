@@ -381,6 +381,19 @@ class LayerIO:
             raise ValueError(
                 f"Invalid tile index.json for layer {layer!r}: {index_path}"
             )
+        n_tiles_reported = d.get("n_tiles_reported")
+        n_tiles_effective = d.get("n_tiles_effective", len(d.get("tiles", [])))
+        if n_tiles_reported is not None and int(n_tiles_effective) != int(
+            n_tiles_reported
+        ):
+            warnings.warn(
+                (
+                    f"Incomplete GEE tile index for layer={layer!r}: "
+                    f"reported={int(n_tiles_reported)} effective={int(n_tiles_effective)} "
+                    f"at {index_path}. Rerun downloads for this study."
+                ),
+                RuntimeWarning,
+            )
         self._tile_index_cache[cache_key] = d
         return d
 
