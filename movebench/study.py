@@ -14,8 +14,6 @@ import pandas as pd
 from movebench.layers import download as mb2dl
 from movebench.features.points import extract_point_feature_stores
 from movebench.datasets.chips import ChipDataset
-from movebench.datasets.deepssf import DeepSSFDataset
-from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 from movebench.datasets.ssf import SSFDataset
 from movebench.datasets.ssf import iSSFDataset
 from movebench.features.normalization import compute_points_normalization_stats
@@ -307,6 +305,8 @@ class Study:
         This wraps `ChipDataset(mode="steps")` to provide deepSSF inputs:
         `(spatial, scalars_to_grid, bearing, target)`.
         """
+        from movebench.datasets.deepssf import DeepSSFDataset
+
         chips = self.chip_dataset(
             split=split,
             config=config,
@@ -339,6 +339,8 @@ class Study:
         gap_q: float | None = None,
         bounds_buffer_deg: float | None = None,
     ):
+        from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+        
         """Create a MoveFormer dataset backed by extracted iSSF point stores."""
         plan = self.layer_plan(config)
 

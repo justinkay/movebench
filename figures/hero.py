@@ -31,7 +31,8 @@ OUTPUT_PATH = REPO_ROOT / "pngs" / "hero_atlas_blue_log.png"
 OUTPUT_PATH.parent.mkdir(exist_ok=True)
 CACHE_DIR = REPO_ROOT / ".cache" / "hero"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_VERSION = "v6"
+COUNTRY_POINTS_CACHE_VERSION = "v1"
+TRAJECTORY_OVERLAY_CACHE_VERSION = "v8"
 
 MARINE_SPECIES = {
     "Chelonia mydas",
@@ -55,14 +56,15 @@ def _strip_inline_comment(value: str) -> str:
     return value.split("#", 1)[0].strip()
 
 
-def _cache_digest(*parts: object) -> str:
-    raw = "|".join([CACHE_VERSION, *(str(part) for part in parts)])
+def _cache_digest(namespace: str, version: str, *parts: object) -> str:
+    raw = "|".join([namespace, version, *(str(part) for part in parts)])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _country_points_cache_path(studies_root: Path, point_round_decimals: int) -> Path:
     return CACHE_DIR / (
-        f"country_gps_points_{_cache_digest(studies_root.resolve(), point_round_decimals)}.pkl"
+        "country_gps_points_"
+        f"{_cache_digest('country_points', COUNTRY_POINTS_CACHE_VERSION, studies_root.resolve(), point_round_decimals)}.pkl"
     )
 
 
@@ -71,7 +73,8 @@ def _trajectory_overlay_cache_path(
     outlier_q: float,
 ) -> Path:
     return CACHE_DIR / (
-        f"trajectory_overlay_{_cache_digest(studies_root.resolve(), outlier_q)}.pkl"
+        "trajectory_overlay_"
+        f"{_cache_digest('trajectory_overlay', TRAJECTORY_OVERLAY_CACHE_VERSION, studies_root.resolve(), outlier_q)}.pkl"
     )
 
 
@@ -124,6 +127,14 @@ def _hide_geo_outline(ax: plt.Axes) -> None:
     geo_spine = ax.spines.get("geo")
     if geo_spine is not None:
         geo_spine.set_visible(False)
+
+
+def _in_ipython_session() -> bool:
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+    return get_ipython() is not None
 
 
 def _parse_timestamp(raw: str) -> datetime | None:
@@ -185,6 +196,91 @@ def _haversine_distance_m(
     )
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
     return 6_371_000.0 * c
+
+
+def _clamp_vector_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-12 or norm <= max_norm:
+        return vector
+    return vector * (max_norm / norm)
+
+
+def _build_smooth_gap_bridge(
+    points: list[tuple[float, float, float]],
+    idx: int,
+    *,
+    gap_cutoff_s: float,
+    step_cutoff_m: float,
+    speed_cutoff_mps: float,
+) -> np.ndarray | None:
+    if idx < 1 or idx >= len(points):
+        return None
+
+    prev_time, prev_lon, prev_lat = points[idx - 1]
+    cur_time, cur_lon, cur_lat = points[idx]
+    prev_prev_point = points[idx - 2] if idx >= 2 else None
+    next_point = points[idx + 1] if idx + 1 < len(points) else None
+
+    if abs(cur_lon - prev_lon) > 180.0:
+        return None
+    if prev_prev_point is not None and abs(prev_lon - prev_prev_point[1]) > 180.0:
+        return None
+    if next_point is not None and abs(next_point[1] - cur_lon) > 180.0:
+        return None
+
+    gap_s = cur_time - prev_time
+    if gap_s <= gap_cutoff_s or gap_s > gap_cutoff_s * 20.0:
+        return None
+
+    bridge_step_m = _haversine_distance_m(prev_lat, prev_lon, cur_lat, cur_lon)
+    if not math.isfinite(bridge_step_m) or bridge_step_m <= 0.0:
+        return None
+
+    bridge_speed_mps = bridge_step_m / gap_s
+    typical_speed_mps = max(speed_cutoff_mps, step_cutoff_m / max(gap_cutoff_s, 1.0))
+    if bridge_speed_mps > typical_speed_mps * 2.6:
+        return None
+    if bridge_step_m > max(step_cutoff_m * 12.0, typical_speed_mps * gap_s * 2.75):
+        return None
+
+    start = np.asarray([prev_lon, prev_lat], dtype=float)
+    end = np.asarray([cur_lon, cur_lat], dtype=float)
+
+    segment_length = float(np.linalg.norm(end - start))
+    if segment_length <= 1e-9:
+        return None
+
+    chord = end - start
+    tangent_start = 0.45 * chord
+    tangent_end = 0.45 * chord
+
+    if prev_prev_point is not None:
+        before = np.asarray([prev_prev_point[1], prev_prev_point[2]], dtype=float)
+        tangent_start = 0.5 * (end - before)
+    elif next_point is not None:
+        after = np.asarray([next_point[1], next_point[2]], dtype=float)
+        tangent_start = 0.35 * (after - start)
+
+    if next_point is not None:
+        after = np.asarray([next_point[1], next_point[2]], dtype=float)
+        tangent_end = 0.5 * (after - start)
+    elif prev_prev_point is not None:
+        before = np.asarray([prev_prev_point[1], prev_prev_point[2]], dtype=float)
+        tangent_end = 0.35 * (end - before)
+
+    max_tangent_norm = segment_length * 1.35
+    tangent_start = _clamp_vector_norm(tangent_start, max_tangent_norm)
+    tangent_end = _clamp_vector_norm(tangent_end, max_tangent_norm)
+
+    interior_count = max(4, min(18, int(math.ceil(gap_s / gap_cutoff_s)) + 3))
+    t_values = np.linspace(0.0, 1.0, interior_count + 2, dtype=float)[1:-1]
+    t = t_values[:, None]
+    h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+    h10 = t**3 - 2.0 * t**2 + t
+    h01 = -2.0 * t**3 + 3.0 * t**2
+    h11 = t**3 - t**2
+    bridge_points = h00 * start + h10 * tangent_start + h01 * end + h11 * tangent_end
+    return bridge_points.astype(float)
 
 
 def _read_study_species_name(study_dir: Path) -> str | None:
@@ -469,6 +565,7 @@ def load_trajectory_overlay_data(
 
             gaps_s: list[float] = []
             step_lengths_m: list[float] = []
+            step_speeds_mps: list[float] = []
 
             for idx in range(1, len(points)):
                 prev_time, prev_lon, prev_lat = points[idx - 1]
@@ -481,10 +578,12 @@ def load_trajectory_overlay_data(
                     continue
                 gaps_s.append(gap_s)
                 step_lengths_m.append(step_length_m)
+                step_speeds_mps.append(step_length_m / gap_s)
 
             gap_cutoff_s = _quantile(gaps_s, outlier_q)
             step_cutoff_m = _quantile(step_lengths_m, outlier_q)
-            if gap_cutoff_s is None or step_cutoff_m is None:
+            speed_cutoff_mps = _quantile(step_speeds_mps, outlier_q)
+            if gap_cutoff_s is None or step_cutoff_m is None or speed_cutoff_mps is None:
                 continue
 
             valid_point_mask = [True] * len(points)
@@ -537,6 +636,20 @@ def load_trajectory_overlay_data(
                     and gap_s < gap_cutoff_s
                 )
                 if not keep_edge:
+                    bridge_points = _build_smooth_gap_bridge(
+                        filtered_points,
+                        idx,
+                        gap_cutoff_s=gap_cutoff_s,
+                        step_cutoff_m=step_cutoff_m,
+                        speed_cutoff_mps=speed_cutoff_mps,
+                    )
+                    if bridge_points is not None:
+                        current_segment.extend(
+                            [tuple(point) for point in bridge_points]
+                        )
+                        current_segment.append((cur_lon, cur_lat))
+                        continue
+
                     if len(current_segment) >= 2:
                         line_segments.append(np.asarray(current_segment, dtype=float))
                         kept_segment_count += 1
@@ -618,35 +731,39 @@ def plot_hero_with_spaghetti(
 # ## Load Cached Country GPS Point Counts
 
 # %%
-country_gps_point_counts = load_country_gps_point_counts()
-country_gps_point_counts.head(12)
+if _in_ipython_session():
+    country_gps_point_counts = load_country_gps_point_counts()
+    country_gps_point_counts.head(12)
 
 
 # %% [markdown]
 # ## Atlas Blue Log Hero Map
 
 # %%
-fig, ax = plot_hero_map(country_gps_point_counts)
-plt.show()
+if _in_ipython_session():
+    fig, ax = plot_hero_map(country_gps_point_counts)
+    plt.show()
 
 
 # %% [markdown]
 # ## Load Cached Trajectory Overlays
 
 # %%
-trajectory_overlay_data = load_trajectory_overlay_data()
-trajectory_overlay_data["kept_segment_count"]
+if _in_ipython_session():
+    trajectory_overlay_data = load_trajectory_overlay_data()
+    trajectory_overlay_data["kept_segment_count"]
 
 
 # %% [markdown]
 # ## Cleaned Spaghetti Lines
 
 # %%
-fig, ax = plot_hero_with_spaghetti(
-    country_summary=country_gps_point_counts,
-    overlay_data=trajectory_overlay_data,
-)
-plt.show()
+if _in_ipython_session():
+    fig, ax = plot_hero_with_spaghetti(
+        country_summary=country_gps_point_counts,
+        overlay_data=trajectory_overlay_data,
+    )
+    plt.show()
 
 
 if __name__ == "__main__":
