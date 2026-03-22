@@ -158,9 +158,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         description="Download rasters for all available studies.",
     )
     parser.add_argument(
-        "--config",
-        default="configs/layers_all.yaml",
-        help="Path to a layers YAML config (default: configs/layers_all.yaml).",
+        "--layers-config",
+        default="configs/layers/all.yaml",
+        help="Path to a layers YAML config (default: configs/layers/all.yaml).",
     )
     parser.add_argument(
         "--splits",
@@ -208,10 +208,10 @@ def run(args: argparse.Namespace) -> int:
     names = args.studies if args.studies else all_names
 
     print(f"Studies to download: {len(names)}")
-    if args.config:
-        print(f"Config: {args.config}")
+    if args.layers_config:
+        print(f"Layers config: {args.layers_config}")
         print(
-            f"Rasters hash: {REGISTRY.resolve(load_layers_config(args.config)).rasters_hash}"
+            f"Rasters hash: {REGISTRY.resolve(load_layers_config(args.layers_config)).rasters_hash}"
         )
     if args.splits:
         print(f"Splits: {args.splits}")
@@ -227,7 +227,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             study = Study(name)
             result = study.download_rasters(
-                config=args.config,
+                layers_config=args.layers_config,
                 splits=args.splits,
                 n_workers=args.n_workers,
                 skip_existing=not args.no_skip_existing,

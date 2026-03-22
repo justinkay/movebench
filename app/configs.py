@@ -2,16 +2,16 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LAYER_CONFIG = "configs/layers_all_ae_1d_1d.yaml"
+DEFAULT_LAYER_CONFIG = "configs/layers/all_ae_1d_1d.yaml"
 
 
 def list_layer_configs(repo_root: Path = REPO_ROOT) -> list[dict[str, str]]:
-    config_dir = repo_root / "configs"
+    config_dir = repo_root / "configs" / "layers"
     if not config_dir.exists():
         return []
     return [
         {"path": str(path.relative_to(repo_root)), "label": path.name}
-        for path in sorted(config_dir.glob("layers*.yaml"))
+        for path in sorted(config_dir.glob("*.yaml"))
     ]
 
 
@@ -32,7 +32,7 @@ def resolve_layer_config(
     configs = list_layer_configs(repo_root)
     default_value = default_layer_config(configs)
     if default_value is None:
-        raise ValueError("No layer configs found under configs/")
+        raise ValueError("No layer configs found under configs/layers/")
 
     value = str(raw_value or default_value).strip()
     if not value:

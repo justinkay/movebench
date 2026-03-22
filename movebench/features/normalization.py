@@ -7,57 +7,24 @@ from typing import Any
 
 import torch
 
+from movebench.features.config import SamplerConfig
 from movebench.features.manifest import read_manifest, utc_now_iso
 from movebench.features.points import (
     point_store_dir,
     point_store_train_stats_path,
-    point_stores_dir,
+    resolve_sampler_hash,
 )
 from movebench.layers.plan import LayerPlan
-
-
-def _resolve_sampler_hash(
-    *, study_dir: Path, rasters_hash: str, sampler_hash: str | None
-) -> str:
-    if sampler_hash is not None:
-        return str(sampler_hash)
-
-    base_dir = point_stores_dir(
-        study_dir=study_dir, split="train", rasters_hash=rasters_hash
-    )
-    if not base_dir.exists():
-        raise FileNotFoundError(
-            "Normalization stats not found. Run "
-            "Study.compute_normalization_vals(from_='points', ...) first. "
-            f"Expected at least one sampler directory under: {base_dir}"
-        )
-    candidates = sorted([p.name for p in base_dir.iterdir() if p.is_dir()])
-    if not candidates:
-        raise FileNotFoundError(
-            "Normalization stats not found. Run "
-            "Study.compute_normalization_vals(from_='points', ...) first. "
-            f"Expected at least one sampler directory under: {base_dir}"
-        )
-    if len(candidates) > 1:
-        raise ValueError(
-            "Multiple normalization sampler directories found under "
-            f"{base_dir}: {candidates}. Pass sampler_hash=... to disambiguate."
-        )
-    return candidates[0]
 
 
 def load_points_normalization_mean_std(
     *,
     study_dir: Path,
     plan: LayerPlan,
-    sampler_hash: str | None = None,
+    sampler_config: SamplerConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     study_dir = Path(study_dir)
-    sampler_hash = _resolve_sampler_hash(
-        study_dir=study_dir,
-        rasters_hash=str(plan.rasters_hash),
-        sampler_hash=sampler_hash,
-    )
+    sampler_hash = resolve_sampler_hash(sampler_config)
     stats_path = point_store_train_stats_path(
         study_dir=study_dir,
         rasters_hash=str(plan.rasters_hash),
@@ -98,7 +65,7 @@ def compute_points_normalization_stats(
     *,
     study_dir: Path,
     plan: LayerPlan,
-    sampler_hash: str | None = None,
+    sampler_config: SamplerConfig,
     split: str = "train",
     skip_existing: bool = True,
 ) -> dict[str, Any]:
@@ -107,11 +74,7 @@ def compute_points_normalization_stats(
     if split != "train":
         raise ValueError("Point normalization stats are stored only for split='train'")
 
-    sampler_hash = _resolve_sampler_hash(
-        study_dir=study_dir,
-        rasters_hash=str(plan.rasters_hash),
-        sampler_hash=sampler_hash,
-    )
+    sampler_hash = resolve_sampler_hash(sampler_config)
     store_dir = point_store_dir(
         study_dir=study_dir,
         split="train",

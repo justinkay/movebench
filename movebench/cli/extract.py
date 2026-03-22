@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 
+from movebench.features.config import load_sampler_config
 from movebench.study import Study
 
 
@@ -13,9 +14,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         description="Extract point features for one or more studies.",
     )
     parser.add_argument(
-        "--config",
-        default="configs/layers_all.yaml",
-        help="Path to a layers YAML config (default: configs/layers_all.yaml).",
+        "--layers-config",
+        default="configs/layers/all.yaml",
+        help="Path to a layers YAML config (default: configs/layers/all.yaml).",
+    )
+    parser.add_argument(
+        "--sampler-config",
+        default="configs/samplers/issf_defaults.yaml",
+        help=(
+            "Path to a sampler YAML config "
+            "(default: configs/samplers/issf_defaults.yaml)."
+        ),
     )
     parser.add_argument(
         "--studies",
@@ -36,56 +45,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Number of multiprocessing workers for feature extraction (default: 16).",
     )
     parser.add_argument(
-        "--parametric",
-        action="store_true",
-        help="Use parametric iSSF sampling (default: empirical).",
-    )
-    parser.add_argument(
-        "--num-candidates",
-        type=int,
-        default=100,
-        help="Number of candidate points per step (default: 100).",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=0,
-        help="Random seed for candidate sampling (default: 0).",
-    )
-    parser.add_argument(
         "--no-skip-existing",
         action="store_true",
         help="Do not skip existing point stores on disk.",
-    )
-    parser.add_argument(
-        "--step-multiplier",
-        type=float,
-        default=2.0,
-        help="Step length multiplier used when fitting the sampler (default: 2.0).",
-    )
-    parser.add_argument(
-        "--step-q",
-        type=float,
-        default=0.95,
-        help="Quantile for step length cutoff used when fitting the sampler (default: 0.95).",
-    )
-    parser.add_argument(
-        "--gap-q",
-        type=float,
-        default=0.999,
-        help="Quantile for time gap cutoff used when fitting the sampler (default: 0.999).",
-    )
-    parser.add_argument(
-        "--max-step-q",
-        type=float,
-        default=0.99,
-        help="Upper quantile cap for valid step lengths used during extraction (default: 0.99).",
-    )
-    parser.add_argument(
-        "--bounds-buffer-deg",
-        type=float,
-        default=0.01,
-        help="Bounds buffer (degrees) for local raster reads (default: 0.01).",
     )
     parser.add_argument(
         "--data-root",
@@ -106,6 +68,8 @@ def run(args: argparse.Namespace) -> int:
     if args.paths_config:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
+    sampler = load_sampler_config(args.sampler_config)
+
     all_names = Study.list_available()
 
     studies = args.studies
@@ -117,14 +81,14 @@ def run(args: argparse.Namespace) -> int:
         names = [str(s) for s in studies]
 
     print(f"Studies to extract: {len(names)}")
-    print(f"Config: {args.config}")
+    print(f"Layers config: {args.layers_config}")
+    print(f"Sampler config: {args.sampler_config}")
     if args.splits:
         print(f"Splits: {args.splits}")
     print(f"Workers: {args.n_workers}")
-    print(f"Parametric: {bool(args.parametric)}")
-    print(f"Candidates: {args.num_candidates}")
-    print(f"Seed: {args.random_seed}")
-    print(f"Max step q: {args.max_step_q}")
+    print(f"Sampler type: {sampler.type}")
+    print(f"Candidates: {sampler.num_candidates}")
+    print(f"Seed: {sampler.random_seed}")
     print()
 
     any_failed = False
@@ -137,18 +101,11 @@ def run(args: argparse.Namespace) -> int:
         try:
             study = Study(name)
             study.extract_point_features(
-                config=args.config,
+                layers_config=args.layers_config,
+                sampler_config=args.sampler_config,
                 splits=args.splits,
-                parametric=bool(args.parametric),
-                num_candidates=int(args.num_candidates),
-                random_seed=int(args.random_seed),
                 n_workers=int(args.n_workers),
                 skip_existing=not bool(args.no_skip_existing),
-                step_multiplier=float(args.step_multiplier),
-                step_q=float(args.step_q),
-                max_step_q=float(args.max_step_q),
-                gap_q=float(args.gap_q),
-                bounds_buffer_deg=float(args.bounds_buffer_deg),
             )
         except Exception as e:
             any_failed = True

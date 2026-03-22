@@ -3,53 +3,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from movebench import paths
-from movebench.layers import REGISTRY
-from movebench.layers.config import load_layers_config
-from movebench.layers.plan import LayerPlan
-from movebench.trajectories import SET_COL, TIME_COL, prepare_interval_step_starts
-
-from movebench.layers.io import LayerIO
 import pandas as pd
-from movebench.layers import download as mb2dl
-from movebench.features.points import extract_point_feature_stores
+
+from movebench import paths
 from movebench.datasets.chips import ChipDataset
-from movebench.datasets.ssf import SSFDataset
-from movebench.datasets.ssf import iSSFDataset
+from movebench.datasets.ssf import SSFDataset, iSSFDataset
+from movebench.features.config import SamplerConfig, load_sampler_config
 from movebench.features.normalization import compute_points_normalization_stats
+from movebench.features.points import extract_point_feature_stores
+from movebench.layers import REGISTRY
+from movebench.layers import download as mb2dl
+from movebench.layers.config import load_layers_config
+from movebench.layers.io import LayerIO
+from movebench.layers.plan import LayerPlan
+from movebench.trajectories import POINT_ID_COL, SET_COL, TIME_COL, select_step_starts
+
+
+def _load_sampler(sampler_config: str | Path | SamplerConfig) -> SamplerConfig:
+    if isinstance(sampler_config, SamplerConfig):
+        return sampler_config
+    return load_sampler_config(sampler_config)
 
 
 def _rows_for_raster_downloads(
     df: pd.DataFrame,
     *,
     splits: list[str],
-    raster_buffer_cfg: dict,
+    plan: LayerPlan,
 ) -> pd.DataFrame:
-    """Return the trajectory rows that should drive raster downloads."""
     sub = df[df[SET_COL].isin(splits)].copy()
-
-    min_step_time_s = raster_buffer_cfg.get("min_step_time_s")
-    max_step_time_s = raster_buffer_cfg.get("max_step_time_s")
-    if (
-        min_step_time_s is None
-        or max_step_time_s is None
-        or int(min_step_time_s) != int(max_step_time_s)
-    ):
+    if len(sub) == 0:
         return sub
-
-    original_columns = list(sub.columns)
-    prepared = prepare_interval_step_starts(
+    starts = select_step_starts(
         sub,
-        step_time_s=int(min_step_time_s),
-        gap_q=float(raster_buffer_cfg["gap_q"]),
+        step_time_s=int(plan.step_spec.step_time_s),
+        gap_q=float(plan.step_spec.gap_q),
     )
-    return prepared.loc[prepared["valid_step_start"], original_columns].copy()
+    if len(starts) == 0:
+        return sub.iloc[0:0].copy()
+    wanted = set(starts["point_id_start"].astype(int).tolist())
+    return sub[sub[POINT_ID_COL].astype(int).isin(wanted)].copy()
 
 
 @dataclass(frozen=True)
 class Study:
-    """A single movement study identified by `study_id` within the studies root."""
-
     study_id: str
 
     def __post_init__(self) -> None:
@@ -75,82 +72,51 @@ class Study:
             return []
         return sorted([p.name for p in root.iterdir() if p.is_dir()])
 
-    def layer_plan(self, config: str | Path = "configs/layers_all.yaml") -> LayerPlan:
-        cfg = load_layers_config(config)
+    def layer_plan(
+        self, layers_config: str | Path = "configs/layers/all.yaml"
+    ) -> LayerPlan:
+        cfg = load_layers_config(layers_config)
         return REGISTRY.resolve(cfg)
 
-    def layer_io(self, config: str | Path = "configs/layers_all.yaml"):
-        """Construct a `LayerIO` for this study and a layers config.
-
-        This is a convenience entrypoint that wires together:
-        - `LayerPlan` (from the YAML config), and
-        - `LayerIO` (to load rasters from disk/local datasets using the plan).
-        """
-
-        plan = self.layer_plan(config)
-
-        # Imported lazily to keep `Study` lightweight and avoid import cycles.
-
+    def layer_io(self, layers_config: str | Path = "configs/layers/all.yaml"):
+        plan = self.layer_plan(layers_config)
         return LayerIO(study_dir=self.study_dir, plan=plan)
 
     def download_rasters(
         self,
         *,
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
         splits: list[str] | None = None,
         n_workers: int = 16,
         skip_existing: bool = True,
     ) -> dict:
-        """Download all required GEE rasters for a layers config into this study directory.
-
-        Writes rasters to `study_dir/rasters/<rasters_hash>/...` as expected by `LayerIO`.
-        """
-        cfg = load_layers_config(config)
+        cfg = load_layers_config(layers_config)
         plan = REGISTRY.resolve(cfg)
-
-        # Imported lazily: heavy deps (pandas, EE, rasterio, requests).
 
         df = pd.read_csv(self.trajectories_path)
         df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
         df = df.dropna(subset=[TIME_COL])
 
-        train_df = df[df[SET_COL] == "train"]
+        train_df = df[df[SET_COL] == "train"].copy()
         if len(train_df) == 0:
             raise ValueError(
                 "No training data found (set=='train'); cannot compute buffer"
             )
-        buf = cfg.raster_params["buffer"]
-        max_step_q = float(buf.get("max_step_q", 0.99))
-        min_step_time_s = buf.get("min_step_time_s")
-        max_step_time_s = buf.get("max_step_time_s")
 
-        resolution_buffer_m = mb2dl.get_buffer_m_for_study(
+        step = plan.step_spec
+        extent_buffer_m = mb2dl.get_buffer_m_for_study(
             train_df,
-            step_time_s=min_step_time_s,
-            step_multiplier=float(buf["step_multiplier"]),
-            step_q=float(buf["step_q"]),
-            max_step_q=max_step_q,
-            gap_q=float(buf["gap_q"]),
+            step_time_s=int(step.step_time_s),
+            step_multiplier=float(step.step_multiplier),
+            step_q=float(step.step_q),
+            max_step_q=float(step.max_step_q),
+            gap_q=float(step.gap_q),
         )
-        if max_step_time_s == min_step_time_s:
-            extent_buffer_m = float(resolution_buffer_m)
-        else:
-            extent_buffer_m = mb2dl.get_buffer_m_for_study(
-                train_df,
-                step_time_s=max_step_time_s,
-                step_multiplier=float(buf["step_multiplier"]),
-                step_q=float(buf["step_q"]),
-                max_step_q=max_step_q,
-                gap_q=float(buf["gap_q"]),
-            )
+        resolution_buffer_m = float(extent_buffer_m)
 
         if splits is None:
             splits = sorted(df[SET_COL].dropna().unique().tolist())
-        download_df = _rows_for_raster_downloads(
-            df,
-            splits=splits,
-            raster_buffer_cfg=buf,
-        )
+        download_df = _rows_for_raster_downloads(df, splits=splits, plan=plan)
 
         clamp = cfg.raster_params["scale_clamp"]
         min_pixels = int(clamp["min_pixels"])
@@ -185,7 +151,6 @@ class Study:
             n_workers=n_workers,
             skip_existing=skip_existing,
         )
-
         tile_stats = mb2dl.download_tiles(
             download_df,
             study_dir=self.study_dir,
@@ -211,198 +176,126 @@ class Study:
     def extract_point_features(
         self,
         *,
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         splits: list[str] | None = None,
-        parametric: bool = False,
-        num_candidates: int = 100,
-        random_seed: int = 0,
         n_workers: int = 16,
         skip_existing: bool = True,
-        step_multiplier: float = 2.0,
-        step_q: float = 0.95,
-        max_step_q: float = 0.99,
-        gap_q: float = 0.999,
-        bounds_buffer_deg: float = 0.01,
     ) -> dict:
-        """Extract SSF / iSSF point feature stores for a layers config.
-
-        Writes to:
-          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/shared.pt`
-          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/bands/*.pt`
-          `study_dir/features/points/<split>/<rasters_hash>/<sampler_hash>/manifest.json`
-        """
-        plan = self.layer_plan(config)
-
-        # Imported lazily: heavy deps (numpy/pandas/torch/scipy).
-
+        plan = self.layer_plan(layers_config)
+        sampler = _load_sampler(sampler_config)
         return extract_point_feature_stores(
             study_id=self.study_id,
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
             plan=plan,
+            sampler_config=sampler,
             splits=splits,
-            parametric=parametric,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
             n_workers=n_workers,
             skip_existing=skip_existing,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
         )
 
     def chip_dataset(
         self,
         *,
         split: str = "train",
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig | None = None,
         mode: str = "points",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
-        step_multiplier: float = 2.0,
-        step_q: float = 0.95,
-        gap_q: float = 0.999,
     ):
-        """Create a ChipDataset for this study.
-
-        Loads full raster stacks around each point, aligned to a metric CRS.
-        """
-        plan = self.layer_plan(config)
-
-        # Imported lazily to avoid torch/rasterio imports when unused.
-
+        plan = self.layer_plan(layers_config)
+        sampler = None if sampler_config is None else _load_sampler(sampler_config)
         return ChipDataset(
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
             split=split,
             plan=plan,
+            sampler_config=sampler,
             mode=mode,
             output_hw=output_hw,
             normalize=normalize,
-            normalization_sampler_hash=normalization_sampler_hash,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            gap_q=gap_q,
         )
 
     def deepssf_dataset(
         self,
         *,
         split: str = "train",
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
-        step_multiplier: float = 2.0,
-        step_q: float = 0.95,
-        gap_q: float = 0.999,
     ):
-        """Create a DeepSSFDataset for this study.
-
-        This wraps `ChipDataset(mode="steps")` to provide deepSSF inputs:
-        `(spatial, scalars_to_grid, bearing, target)`.
-        """
         from movebench.datasets.deepssf import DeepSSFDataset
 
         chips = self.chip_dataset(
             split=split,
-            config=config,
+            layers_config=layers_config,
+            sampler_config=sampler_config,
             mode="steps",
             output_hw=output_hw,
             normalize=normalize,
-            normalization_sampler_hash=normalization_sampler_hash,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            gap_q=gap_q,
         )
-
         return DeepSSFDataset(chips)
 
     def moveformer_dataset(
         self,
         *,
         split: str = "train",
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         max_len: int = 500,
         min_len: int = 2,
         normalize_env: bool = True,
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ):
         from movebench.datasets.moveformer import MoveFormerPointStoreDataset
-        
-        """Create a MoveFormer dataset backed by extracted iSSF point stores."""
-        plan = self.layer_plan(config)
 
+        plan = self.layer_plan(layers_config)
+        sampler = _load_sampler(sampler_config)
         return MoveFormerPointStoreDataset(
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
             plan=plan,
+            sampler_config=sampler,
             split=split,
             max_len=max_len,
             min_len=min_len,
             normalize_env=normalize_env,
             require_normalization_stats=require_normalization_stats,
             subset_band_ids=subset_band_ids,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
         )
 
     def ssf_dataset(
         self,
         *,
         split: str = "train",
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         normalize: bool = True,
         subset_env_layers: list[str] | None = None,
         subset_band_ids: list[str] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ):
-        """Create an SSFDataset (empirical sampling) from extracted point features."""
-        plan = self.layer_plan(config)
-
+        plan = self.layer_plan(layers_config)
+        sampler = _load_sampler(sampler_config)
         return SSFDataset(
             study_dir=self.study_dir,
             plan=plan,
+            sampler_config=sampler,
             split=split,
             normalize=normalize,
             subset_env_layers=subset_env_layers,
             subset_band_ids=subset_band_ids,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
         )
 
     def issf_dataset(
         self,
         *,
         split: str = "train",
-        config: str | Path = "configs/layers_all.yaml",
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         normalize: bool = True,
         subset_env_layers: list[str] | None = None,
         subset_band_ids: list[str] | None = None,
@@ -410,21 +303,14 @@ class Study:
         include_time: bool = False,
         include_individual_id: bool = False,
         movement_stats: dict[str, float] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ):
-        """Create an iSSFDataset (parametric sampling) from extracted point features."""
-        plan = self.layer_plan(config)
-
+        plan = self.layer_plan(layers_config)
+        sampler = _load_sampler(sampler_config)
         return iSSFDataset(
             study_dir=self.study_dir,
             trajectories_path=self.trajectories_path,
             plan=plan,
+            sampler_config=sampler,
             split=split,
             normalize=normalize,
             subset_env_layers=subset_env_layers,
@@ -433,36 +319,27 @@ class Study:
             include_time=include_time,
             include_individual_id=include_individual_id,
             movement_stats=movement_stats,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
         )
 
     def compute_normalization_vals(
         self,
         *,
         from_: str = "points",
-        config: str | Path = "configs/layers_all.yaml",
-        sampler_hash: str | None = None,
+        layers_config: str | Path = "configs/layers/all.yaml",
+        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         split: str = "train",
         skip_existing: bool = True,
     ) -> dict:
-        """Compute and cache normalization statistics for environmental features."""
         if from_ != "points":
             raise NotImplementedError(
                 f"Unsupported from_={from_!r}. Only 'points' is implemented."
             )
-
-        plan = self.layer_plan(config)
-
+        plan = self.layer_plan(layers_config)
+        sampler = _load_sampler(sampler_config)
         return compute_points_normalization_stats(
             study_dir=self.study_dir,
             plan=plan,
-            sampler_hash=sampler_hash,
+            sampler_config=sampler,
             split=split,
             skip_existing=skip_existing,
         )

@@ -20,11 +20,10 @@ from typing import Any
 
 import yaml
 
-from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
-
 from movebench.train import collate_deepssf
 import torch
 from movebench import Study, paths
+from movebench.features.config import SamplerConfig, load_sampler_config
 from movebench.features.points import resolve_sampler_hash
 from torch.utils.data import DataLoader
 from movebench.models.ssf import (
@@ -83,7 +82,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
             f"Unsupported benchmark config version={cfg.get('version')!r} (expected 1)"
         )
 
-    for key in ("layers_config", "output_dir", "runtime", "datasets", "methods"):
+    for key in (
+        "layers_config",
+        "sampler_config",
+        "output_dir",
+        "runtime",
+        "datasets",
+        "methods",
+    ):
         if key not in cfg:
             raise ValueError(f"Benchmark config missing required key: {key!r}")
 
@@ -98,20 +104,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if "issf" not in cfg["datasets"] or not isinstance(cfg["datasets"]["issf"], dict):
         raise ValueError("Benchmark config missing required key: datasets.issf")
     issf = cfg["datasets"]["issf"]
-    if "sampler" not in issf or not isinstance(issf["sampler"], dict):
-        raise ValueError("Benchmark config missing required key: datasets.issf.sampler")
-    for key in (
-        "num_candidates",
-        "random_seed",
-        "step_multiplier",
-        "step_q",
-        "gap_q",
-        "bounds_buffer_deg",
-    ):
-        if key not in issf["sampler"]:
-            raise ValueError(
-                f"Benchmark config missing required key: datasets.issf.sampler.{key!r}"
-            )
+    if "sampler" in issf:
+        raise ValueError(
+            "datasets.issf.sampler has been removed; use top-level sampler_config"
+        )
 
     if not isinstance(cfg["methods"], list) or not cfg["methods"]:
         raise ValueError("Benchmark config must include a non-empty `methods:` list.")
@@ -215,23 +211,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
             {"name": name, "kind": kind, "model": model_cfg, "hparams": hparams}
         )
 
-    wandb_cfg = cfg.get("wandb", None)
-    if wandb_cfg is not None:
-        if not isinstance(wandb_cfg, dict):
-            raise ValueError(
-                "Benchmark config `wandb` must be a mapping/dict when provided."
-            )
-        if "enabled" in wandb_cfg and not isinstance(wandb_cfg["enabled"], bool):
-            raise ValueError("wandb.enabled must be a boolean if provided.")
-        if (
-            "tags" in wandb_cfg
-            and wandb_cfg["tags"] is not None
-            and not isinstance(wandb_cfg["tags"], list)
-        ):
-            raise ValueError("wandb.tags must be a list of strings if provided.")
-
     cfg["methods"] = methods_out
     return cfg
+
+
+def load_sampler(cfg: dict[str, Any]) -> SamplerConfig:
+    return load_sampler_config(str(cfg["sampler_config"]))
 
 
 def resolve_studies(cfg: dict[str, Any]) -> list[str]:
@@ -261,62 +246,38 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
 
     layers_config = str(cfg["layers_config"])
     setup_workers = int(cfg["runtime"]["setup_workers"])
-    sampler = dict(cfg["datasets"]["issf"]["sampler"])
-
-    sampler_hash = resolve_sampler_hash(
-        sampler_type="parametric",
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        max_step_q=float(sampler.get("max_step_q", 0.99)),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
+    sampler = load_sampler(cfg)
+    sampler_hash = resolve_sampler_hash(sampler)
 
     try:
         study.extract_point_features(
-            config=layers_config,
+            layers_config=layers_config,
+            sampler_config=sampler,
             splits=["train", "test"],
-            parametric=True,
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
             n_workers=int(setup_workers),
             skip_existing=True,
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            max_step_q=float(sampler.get("max_step_q", 0.99)),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
         )
     except FileNotFoundError as e:
         if "rasters" not in str(e):
             raise
         study.download_rasters(
-            config=layers_config,
+            layers_config=layers_config,
             splits=["train", "test"],
             n_workers=int(setup_workers),
             skip_existing=True,
         )
         study.extract_point_features(
-            config=layers_config,
+            layers_config=layers_config,
+            sampler_config=sampler,
             splits=["train", "test"],
-            parametric=True,
-            num_candidates=int(sampler["num_candidates"]),
-            random_seed=int(sampler["random_seed"]),
             n_workers=int(setup_workers),
             skip_existing=True,
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            max_step_q=float(sampler.get("max_step_q", 0.99)),
-            gap_q=float(sampler["gap_q"]),
-            bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
         )
 
     study.compute_normalization_vals(
         from_="points",
-        config=layers_config,
-        sampler_hash=sampler_hash,
+        layers_config=layers_config,
+        sampler_config=sampler,
         split="train",
         skip_existing=True,
     )
@@ -422,17 +383,11 @@ def _run_issf(
 ) -> dict[str, Any]:
 
     issf = cfg["datasets"]["issf"]
-    sampler = issf["sampler"]
+    sampler = load_sampler(cfg)
 
     ds_kwargs: dict[str, Any] = {
-        "config": str(cfg["layers_config"]),
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-        "step_multiplier": float(sampler["step_multiplier"]),
-        "step_q": float(sampler["step_q"]),
-        "max_step_q": float(sampler.get("max_step_q", 0.99)),
-        "gap_q": float(sampler["gap_q"]),
-        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
+        "layers_config": str(cfg["layers_config"]),
+        "sampler_config": sampler,
     }
     for k in (
         "include_time",
@@ -598,13 +553,13 @@ def run_deepssf(
 
     ds_kwargs_train: dict[str, Any] = {
         "split": "train",
-        "config": str(cfg["layers_config"]),
-        "normalization_sampler_hash": str(sampler_hash),
+        "layers_config": str(cfg["layers_config"]),
+        "sampler_config": load_sampler(cfg),
     }
     ds_kwargs_test = dict(ds_kwargs_train)
     ds_kwargs_test["split"] = "test"
 
-    for k in ("output_hw", "normalize", "step_multiplier", "step_q", "gap_q"):
+    for k in ("output_hw", "normalize"):
         if k not in dcfg:
             continue
         v = dcfg[k]
@@ -779,18 +734,11 @@ def run_moveformer(
 ) -> dict[str, Any]:
 
     dcfg = cfg["datasets"]["moveformer"]
-    issf = cfg["datasets"]["issf"]
-    sampler = issf["sampler"]
+    sampler = load_sampler(cfg)
 
     ds_kwargs: dict[str, Any] = {
-        "config": str(cfg["layers_config"]),
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-        "step_multiplier": float(sampler["step_multiplier"]),
-        "step_q": float(sampler["step_q"]),
-        "max_step_q": float(sampler.get("max_step_q", 0.99)),
-        "gap_q": float(sampler["gap_q"]),
-        "bounds_buffer_deg": float(sampler["bounds_buffer_deg"]),
+        "layers_config": str(cfg["layers_config"]),
+        "sampler_config": sampler,
     }
     if "max_len" in dcfg:
         ds_kwargs["max_len"] = int(dcfg["max_len"])
@@ -1031,9 +979,6 @@ def main(
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_results_path = out_dir / "raw_results.json"
 
-    wandb_cfg = cfg.get("wandb", None)
-    config_stem = str(Path(str(config_path)).stem)
-
     device = torch.device(str(cfg["runtime"]["device"]))
 
     results: dict[str, dict[str, Any]] = {}
@@ -1091,26 +1036,14 @@ def main(
             print(f"Running {study_id} {method_name}")
 
             try:
-                with maybe_wandb_benchmark_log_callback(
-                    wandb_cfg,
-                    output_dir=out_dir,
-                    study_id=str(study_id),
-                    benchmark_name=str(config_stem),
-                    method_name=str(method_name),
-                    kind=str(kind),
-                    layers_config=str(cfg["layers_config"]),
-                    device=str(cfg["runtime"]["device"]),
-                    seed=int(cfg["runtime"]["seed"]),
-                ) as log_callback:
-                    study_results[method_name] = run_method(
-                        kind=kind,
-                        study=study,
-                        sampler_hash=str(sampler_hash),
-                        cfg=cfg,
-                        method=method,
-                        device=device,
-                        log_callback=log_callback,
-                    )
+                study_results[method_name] = run_method(
+                    kind=kind,
+                    study=study,
+                    sampler_hash=str(sampler_hash),
+                    cfg=cfg,
+                    method=method,
+                    device=device,
+                )
             except (FileNotFoundError, ValueError) as e:
                 msg = f"{method_name} failed: {type(e).__name__}: {e}"
                 skipped_studies.append((str(study_id), msg))

@@ -10,6 +10,7 @@ import pandas as pd
 from matplotlib import colormaps
 from movebench.layers import REGISTRY
 from movebench.study import Study
+from movebench.trajectories import prepare_interval_step_starts
 from PIL import Image
 
 from app.configs import REPO_ROOT, resolve_layer_config
@@ -29,6 +30,51 @@ def _study_frame(study_id: str) -> tuple[Study, pd.DataFrame]:
     if "point_id" not in df.columns:
         raise ValueError("Study trajectories.csv is missing point_id")
     return study, df
+
+
+def _step_time_seconds(plan) -> int | None:
+    buffer_cfg = dict(getattr(plan, "raster_params", {}).get("buffer", {}) or {})
+    min_step_time_s = buffer_cfg.get("min_step_time_s")
+    max_step_time_s = buffer_cfg.get("max_step_time_s")
+    if (
+        min_step_time_s is None
+        or max_step_time_s is None
+        or int(min_step_time_s) != int(max_step_time_s)
+    ):
+        return None
+    return int(min_step_time_s)
+
+
+def _selectable_rows(df: pd.DataFrame, plan) -> pd.DataFrame:
+    step_time_s = _step_time_seconds(plan)
+    if step_time_s is None:
+        return df.copy()
+
+    buffer_cfg = dict(getattr(plan, "raster_params", {}).get("buffer", {}) or {})
+    prepared = prepare_interval_step_starts(
+        df,
+        step_time_s=step_time_s,
+        gap_q=float(buffer_cfg.get("gap_q", 0.999)),
+    )
+    valid = prepared.loc[prepared["valid_step_start"]].copy()
+    if len(valid) == 0:
+        raise ValueError("No valid interval steps available for the selected layer config")
+
+    def _lookup_end(step_end_index: Any, column: str):
+        if pd.isna(step_end_index):
+            return None
+        index = int(step_end_index)
+        if index < 0 or index >= len(prepared):
+            return None
+        return prepared.iloc[index][column]
+
+    valid["step_end_point_id"] = valid["step_end_index"].map(
+        lambda value: _lookup_end(value, "point_id")
+    )
+    valid["step_end_timestamp"] = valid["step_end_index"].map(
+        lambda value: _lookup_end(value, "timestamp")
+    )
+    return valid
 
 
 def _default_point_row(df: pd.DataFrame) -> pd.Series:
@@ -51,6 +97,8 @@ def _selected_point_row(df: pd.DataFrame, point_id: int | None) -> pd.Series:
 
 def _point_payload(row: pd.Series) -> dict[str, Any]:
     timestamp = row["timestamp"]
+    end_point_id = row.get("step_end_point_id")
+    end_timestamp = row.get("step_end_timestamp")
     return {
         "point_id": int(row["point_id"]),
         "timestamp": str(timestamp.isoformat()),
@@ -63,7 +111,48 @@ def _point_payload(row: pd.Series) -> dict[str, Any]:
             or row.get("animal-id")
             or ""
         ),
+        "step_end_point_id": int(end_point_id) if pd.notna(end_point_id) else None,
+        "step_end_timestamp": (
+            str(pd.Timestamp(end_timestamp).isoformat()) if pd.notna(end_timestamp) else None
+        ),
     }
+
+
+def _step_options_payload(df: pd.DataFrame) -> list[dict[str, Any]]:
+    options = []
+    ordered = df.sort_values("timestamp").reset_index(drop=True)
+    for _, row in ordered.iterrows():
+        point_id = int(row["point_id"])
+        timestamp = pd.Timestamp(row["timestamp"])
+        individual = str(
+            row.get("individual-local-identifier", "")
+            or row.get("individual", "")
+            or row.get("animal-id", "")
+            or ""
+        )
+        split = str(row.get("set", "") or "")
+        end_point_id = row.get("step_end_point_id")
+        end_timestamp = row.get("step_end_timestamp")
+        label_parts = [str(point_id)]
+        if individual:
+            label_parts.append(individual)
+        if split:
+            label_parts.append(split)
+        label_parts.append(str(timestamp.isoformat()))
+        if pd.notna(end_timestamp):
+            label_parts.append(f"-> {pd.Timestamp(end_timestamp).isoformat()}")
+        options.append({
+            "point_id": point_id,
+            "timestamp": str(timestamp.isoformat()),
+            "individual": individual,
+            "set": split,
+            "step_end_point_id": int(end_point_id) if pd.notna(end_point_id) else None,
+            "step_end_timestamp": (
+                str(pd.Timestamp(end_timestamp).isoformat()) if pd.notna(end_timestamp) else None
+            ),
+            "label": " | ".join(part for part in label_parts if part),
+        })
+    return options
 
 
 def _robust_vmin_vmax(x: np.ndarray, p_lo: int = 2, p_hi: int = 98) -> tuple[float, float]:
@@ -164,33 +253,34 @@ def _covariate_context(
 ) -> dict[str, Any]:
     config_value, config_path = resolve_layer_config(config, repo_root=REPO_ROOT)
     study, df = _study_frame(study_id)
-    row = _selected_point_row(df, point_id)
-    point = _point_payload(row)
-
     plan = study.layer_plan(config_path)
+    selectable_df = _selectable_rows(df, plan)
+    row = _selected_point_row(selectable_df, point_id)
+    point = _point_payload(row)
     io_obj = study.layer_io(config_path)
-    chip_group_name = next(iter(plan.chip_groups.keys()), None)
-    if chip_group_name is None:
-        raise ValueError("Selected layer config did not define any chip groups")
-
-    chip_group = io_obj.load_chip_group(chip_group_name, point_id=point["point_id"])
-    bounds_latlon = tuple(map(float, chip_group.bounds))
-
     gee_tile_layers = [layer for layer in plan.layers_in_order if REGISTRY.get(layer).source == "gee_tile"]
     derived_layers = [layer for layer in plan.layers_in_order if REGISTRY.get(layer).source == "derived"]
 
     return {
         "study": study,
         "df": df,
+        "selectable_df": selectable_df,
         "row": row,
         "point": point,
         "plan": plan,
         "io": io_obj,
-        "bounds_latlon": bounds_latlon,
         "config": config_value,
         "gee_tile_layers": gee_tile_layers,
         "derived_layers": derived_layers,
     }
+
+
+def _bounds_latlon_for_point(io_obj, plan, *, point_id: int) -> tuple[float, float, float, float]:
+    chip_group_name = next(iter(plan.chip_groups.keys()), None)
+    if chip_group_name is None:
+        raise ValueError("Selected layer config did not define any chip groups")
+    chip_group = io_obj.load_chip_group(chip_group_name, point_id=point_id)
+    return tuple(map(float, chip_group.bounds))
 
 
 def build_covariates_payload(
@@ -206,6 +296,7 @@ def build_covariates_payload(
     plan = ctx["plan"]
     io_obj = ctx["io"]
     row = ctx["row"]
+    bounds_latlon = _bounds_latlon_for_point(io_obj, plan, point_id=point["point_id"])
 
     base = f"/api/artifacts/{study_id}/covariates"
 
@@ -231,7 +322,7 @@ def build_covariates_payload(
         spec = REGISTRY.get(layer)
         raster = io_obj.load_layer(
             layer,
-            bounds_latlon=ctx["bounds_latlon"],
+            bounds_latlon=bounds_latlon,
             timestamp=row["timestamp"],
         )
         idx = io_obj._tile_index(layer, timestamp=row["timestamp"])
@@ -253,7 +344,7 @@ def build_covariates_payload(
         raster = io_obj.load_layer(
             layer,
             point_id=point["point_id"],
-            bounds_latlon=ctx["bounds_latlon"],
+            bounds_latlon=bounds_latlon,
             timestamp=row["timestamp"],
         )
         derived_layers.append({
@@ -268,21 +359,44 @@ def build_covariates_payload(
             ),
         })
 
-    point_ids = sorted(int(value) for value in pd.Series(ctx["df"]["point_id"]).dropna().unique().tolist())
+    selectable_point_ids = sorted(
+        int(value) for value in pd.Series(ctx["selectable_df"]["point_id"]).dropna().unique().tolist()
+    )
     return {
         "study_id": study.study_id,
         "study_dir": str(study.study_dir),
         "config": config_value,
         "rasters_hash": plan.rasters_hash,
+        "step_time_s": _step_time_seconds(plan),
         "selected_point": {
             **point,
-            "bounds_latlon": list(ctx["bounds_latlon"]),
+            "bounds_latlon": list(bounds_latlon),
         },
-        "point_id_min": point_ids[0] if point_ids else None,
-        "point_id_max": point_ids[-1] if point_ids else None,
+        "point_id_min": selectable_point_ids[0] if selectable_point_ids else None,
+        "point_id_max": selectable_point_ids[-1] if selectable_point_ids else None,
+        "available_steps_count": len(ctx["selectable_df"]),
         "chip_groups": chip_groups,
         "gee_tile_layers": gee_tile_layers,
         "derived_layers": derived_layers,
+    }
+
+
+def build_covariate_steps_payload(
+    study_id: str,
+    *,
+    config: str | None,
+    point_id: int | None,
+) -> dict[str, Any]:
+    ctx = _covariate_context(study_id, config=config, point_id=point_id)
+    steps = _step_options_payload(ctx["selectable_df"])
+    return {
+        "study_id": ctx["study"].study_id,
+        "config": ctx["config"],
+        "rasters_hash": ctx["plan"].rasters_hash,
+        "step_time_s": _step_time_seconds(ctx["plan"]),
+        "selected_point_id": int(ctx["point"]["point_id"]),
+        "available_steps_count": len(steps),
+        "steps": steps,
     }
 
 
@@ -312,9 +426,14 @@ def tile_layer_band_png(
     band_index: int,
 ) -> bytes:
     ctx = _covariate_context(study_id, config=config, point_id=point_id)
+    bounds_latlon = _bounds_latlon_for_point(
+        ctx["io"],
+        ctx["plan"],
+        point_id=ctx["point"]["point_id"],
+    )
     raster = ctx["io"].load_layer(
         layer,
-        bounds_latlon=ctx["bounds_latlon"],
+        bounds_latlon=bounds_latlon,
         timestamp=ctx["row"]["timestamp"],
     )
     array = np.asarray(raster.array)
@@ -333,10 +452,15 @@ def derived_layer_band_png(
     band_index: int,
 ) -> bytes:
     ctx = _covariate_context(study_id, config=config, point_id=point_id)
+    bounds_latlon = _bounds_latlon_for_point(
+        ctx["io"],
+        ctx["plan"],
+        point_id=ctx["point"]["point_id"],
+    )
     raster = ctx["io"].load_layer(
         layer,
         point_id=ctx["point"]["point_id"],
-        bounds_latlon=ctx["bounds_latlon"],
+        bounds_latlon=bounds_latlon,
         timestamp=ctx["row"]["timestamp"],
     )
     array = np.asarray(raster.array)

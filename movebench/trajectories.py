@@ -45,7 +45,25 @@ def haversine_distance_m(
     return 6371000.0 * c
 
 
-_haversine_distance_m = haversine_distance_m
+def bearing_rad(
+    start_lat_deg: np.ndarray,
+    start_lon_deg: np.ndarray,
+    end_lat_deg: np.ndarray,
+    end_lon_deg: np.ndarray,
+) -> np.ndarray:
+    """Vectorized forward bearing in radians, wrapped to [-pi, pi]."""
+    start_lat = np.deg2rad(np.asarray(start_lat_deg, dtype=np.float64))
+    start_lon = np.deg2rad(np.asarray(start_lon_deg, dtype=np.float64))
+    end_lat = np.deg2rad(np.asarray(end_lat_deg, dtype=np.float64))
+    end_lon = np.deg2rad(np.asarray(end_lon_deg, dtype=np.float64))
+
+    dlon = end_lon - start_lon
+    y = np.sin(dlon) * np.cos(end_lat)
+    x = np.cos(start_lat) * np.sin(end_lat) - np.sin(start_lat) * np.cos(
+        end_lat
+    ) * np.cos(dlon)
+    out = np.arctan2(y, x)
+    return (out + np.pi) % (2.0 * np.pi) - np.pi
 
 
 def compute_step_length_extent_m(
@@ -333,54 +351,61 @@ def compute_movement_features(
 def select_step_starts(
     df: pd.DataFrame,
     *,
-    step_multiplier: float = 2.0,
-    step_q: float = 0.95,
-    max_step_q: float = 0.99,
+    step_time_s: int,
     gap_q: float = 0.999,
 ) -> pd.DataFrame:
-    """Select valid step starts and attach observed endpoints.
-
-    Returns a dataframe with one row per valid step start containing:
-      - point_id_start, timestamp,
-      - start_lon/start_lat/start_bearing,
-      - end_lon/end_lat for the observed next location.
-
-    This is the shared step selection helper used by both:
-      - point-store extraction (SSF/iSSF), and
-      - raster chip datasets for next-step prediction.
-    """
+    """Select valid fixed-interval step starts and attach observed endpoints."""
     required = [INDIVIDUAL_COL, TIME_COL, LON_COL, LAT_COL, POINT_ID_COL]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"trajectories df missing required columns: {missing}")
 
-    d = compute_movement_features(
-        df,
-        step_multiplier=step_multiplier,
-        step_q=step_q,
-        max_step_q=max_step_q,
-        gap_q=gap_q,
-    )
-    starts = d[d["can_be_step_start"]].copy()
-    if len(starts) == 0:
-        return pd.DataFrame(
+    null_dict = pd.DataFrame(
             {
                 "point_id_start": pd.Series(dtype="int64"),
+                "point_id_end": pd.Series(dtype="int64"),
                 "timestamp": pd.Series(dtype="datetime64[ns]"),
+                "timestamp_end": pd.Series(dtype="datetime64[ns]"),
                 "start_lon": pd.Series(dtype="float64"),
                 "start_lat": pd.Series(dtype="float64"),
-                "start_bearing": pd.Series(dtype="float64"),
                 "end_lon": pd.Series(dtype="float64"),
                 "end_lat": pd.Series(dtype="float64"),
-            }
-        )
+                "start_bearing": pd.Series(dtype="float64"),
+                "step_length_m": pd.Series(dtype="float64"),
+                "turn_angle_rad": pd.Series(dtype="float64"),
+                "actual_step_time_s": pd.Series(dtype="float64"),
+                "step_time_error_s": pd.Series(dtype="float64"),
+                "burst_id": pd.Series(dtype="int64"),
+                INDIVIDUAL_COL: pd.Series(dtype="object"),
+            })
 
-    next_idx = starts["next_index"]
-    starts = starts[next_idx.notna()].copy()
-    next_idx_int = next_idx[next_idx.notna()].astype(int).to_numpy()
+    d = prepare_interval_step_starts(
+        df,
+        step_time_s=int(step_time_s),
+        gap_q=float(gap_q),
+    )
+    if len(d) == 0:
+        return null_dict
 
-    # Align endpoints to starts by reindexing in the same order.
-    ends = d.loc[next_idx_int].copy()
+    grouped = d.groupby([INDIVIDUAL_COL, "burst_id"], sort=False)
+    prev_lon = grouped[LON_COL].shift()
+    prev_lat = grouped[LAT_COL].shift()
+    d = d.copy()
+    d["start_bearing"] = bearing_rad(
+        prev_lat.to_numpy(dtype=np.float64, copy=False),
+        prev_lon.to_numpy(dtype=np.float64, copy=False),
+        d[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        d[LON_COL].to_numpy(dtype=np.float64, copy=False),
+    )
+
+    starts = d[d["valid_step_start"]].copy()
+    if len(starts) == 0:
+        return null_dict
+
+    end_idx = starts["step_end_index"]
+    starts = starts[end_idx.notna()].copy()
+    end_idx_int = end_idx[end_idx.notna()].astype(int).to_numpy()
+    ends = d.loc[end_idx_int].copy()
     starts = starts.reset_index(drop=True)
     ends = ends.reset_index(drop=True)
     if len(starts) != len(ends):
@@ -388,21 +413,50 @@ def select_step_starts(
             f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})"
         )
 
+    observed_heading = bearing_rad(
+        starts[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        starts[LON_COL].to_numpy(dtype=np.float64, copy=False),
+        ends[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        ends[LON_COL].to_numpy(dtype=np.float64, copy=False),
+    )
+    turn = observed_heading - starts["start_bearing"].to_numpy(
+        dtype=np.float64, copy=False
+    )
+    turn = (turn + np.pi) % (2.0 * np.pi) - np.pi
+
     out = pd.DataFrame(
         {
             "point_id_start": starts[POINT_ID_COL].astype(int),
+            "point_id_end": ends[POINT_ID_COL].astype(int),
             "timestamp": starts[TIME_COL],
+            "timestamp_end": ends[TIME_COL],
             "start_lon": starts[LON_COL].astype(float),
             "start_lat": starts[LAT_COL].astype(float),
-            "start_bearing": starts["bearing"].astype(float),
+            "start_bearing": starts["start_bearing"].astype(float),
             "end_lon": ends[LON_COL].astype(float),
             "end_lat": ends[LAT_COL].astype(float),
+            "step_length_m": starts["step_length_m"].astype(float),
+            "turn_angle_rad": turn.astype(np.float64, copy=False),
+            "actual_step_time_s": starts["actual_step_time_s"].astype(float),
+            "step_time_error_s": starts["step_time_error_s"].astype(float),
+            "burst_id": starts["burst_id"].astype(int),
+            INDIVIDUAL_COL: starts[INDIVIDUAL_COL].astype(object),
         }
     )
 
     finite = np.isfinite(
-        out[["start_lon", "start_lat", "start_bearing", "end_lon", "end_lat"]].to_numpy(
-            dtype=np.float64, copy=False
-        )
+        out[
+            [
+                "start_lon",
+                "start_lat",
+                "end_lon",
+                "end_lat",
+                "start_bearing",
+                "step_length_m",
+                "turn_angle_rad",
+                "actual_step_time_s",
+                "step_time_error_s",
+            ]
+        ].to_numpy(dtype=np.float64, copy=False)
     ).all(axis=1)
     return out.loc[finite].reset_index(drop=True)

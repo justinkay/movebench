@@ -1,11 +1,10 @@
 raster_params:
   buffer:
+    step_time: 1h
     step_multiplier: 2.0
     step_q: 0.95
     max_step_q: 0.99
     gap_q: 0.999
-    min_step_time: 12h
-    max_step_time: 12h
   scale_clamp:
     min_pixels: 3
     max_pixels: 100

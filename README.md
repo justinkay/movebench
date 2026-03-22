@@ -15,28 +15,6 @@ conda activate movebench
 pip install -e .
 ```
 
-## Optional: Weights & Biases logging
-
-MoveBench's YAML benchmark runner supports optional Weights & Biases (W&B) logging for train/test loss (NLL).
-
-Install the extra:
-
-```bash
-pip install -e ".[wandb]"
-```
-
-Enable in a benchmark config:
-
-```yaml
-wandb:
-  enabled: true
-  project: movebench
-  # entity: your-team
-  mode: online  # or offline
-```
-
-For quick local runs without uploading, set `WANDB_MODE=offline` (or use `mode: offline`).
-
 3. If you will be downloading rasters, authenticate with your Google Earth Engine account
 
 ```bash

@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (
     load_point_store_bands,
@@ -126,31 +127,20 @@ class SSFDataset(Dataset):
         *,
         study_dir: str | Path,
         plan: LayerPlan,
+        sampler_config: SamplerConfig,
         split: str,
         normalize: bool = True,
         subset_env_layers: list[str] | None = None,
         subset_band_ids: list[str] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ) -> None:
         self.study_dir = Path(study_dir)
         self.split = str(split)
         requested_band_ids = plan.band_ids_in_order()
-        sampler_hash = resolve_sampler_hash(
-            sampler_type="empirical",
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        )
+        if str(sampler_config.type) != "empirical":
+            raise ValueError(
+                f"SSFDataset requires an empirical sampler_config, got {sampler_config.type!r}"
+            )
+        sampler_hash = resolve_sampler_hash(sampler_config)
         store_dir, m = load_point_store_manifest(
             study_dir=self.study_dir,
             split=self.split,
@@ -200,7 +190,7 @@ class SSFDataset(Dataset):
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=self.sampler_hash,
+                sampler_config=sampler_config,
             )
         else:
             self._mean = None
@@ -239,6 +229,7 @@ class iSSFDataset(SSFDataset):
         study_dir: str | Path,
         trajectories_path: str | Path,
         plan: LayerPlan,
+        sampler_config: SamplerConfig,
         split: str,
         normalize: bool = True,
         subset_env_layers: list[str] | None = None,
@@ -247,13 +238,6 @@ class iSSFDataset(SSFDataset):
         include_time: bool = False,
         include_individual_id: bool = False,
         movement_stats: dict[str, float] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ) -> None:
         # Bypass SSFDataset selection: iSSF is always parametric.
         self.study_dir = Path(study_dir)
@@ -261,16 +245,11 @@ class iSSFDataset(SSFDataset):
         self.trajectories_path = Path(trajectories_path)
 
         requested_band_ids = plan.band_ids_in_order()
-        sampler_hash = resolve_sampler_hash(
-            sampler_type="parametric",
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        )
+        if str(sampler_config.type) != "parametric":
+            raise ValueError(
+                f"iSSFDataset requires a parametric sampler_config, got {sampler_config.type!r}"
+            )
+        sampler_hash = resolve_sampler_hash(sampler_config)
         store_dir, m = load_point_store_manifest(
             study_dir=self.study_dir,
             split=self.split,
@@ -330,7 +309,7 @@ class iSSFDataset(SSFDataset):
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=self.sampler_hash,
+                sampler_config=sampler_config,
             )
         else:
             self._mean = None

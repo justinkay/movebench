@@ -58,6 +58,10 @@ class PointFeatureManifest:
     def validate_basic(self, *, root_dir: Path | None = None) -> None:
         if not self.schema_version:
             raise ValueError("schema_version is required")
+        if self.schema_version != "3":
+            raise ValueError(
+                f"Unsupported point feature manifest schema_version={self.schema_version!r} (expected '3')"
+            )
         if not self.rasters_hash:
             raise ValueError("rasters_hash is required")
         if not self.sampler_hash:
@@ -66,18 +70,14 @@ class PointFeatureManifest:
             raise ValueError("sampler.type is required")
         if self.sampler["type"] not in ("empirical", "parametric"):
             raise ValueError(f"Unknown sampler.type: {self.sampler['type']!r}")
-        for key in (
-            "num_candidates",
-            "random_seed",
-            "step_multiplier",
-            "step_q",
-            "max_step_q",
-            "gap_q",
-        ):
+        for key in ("num_candidates", "random_seed"):
             if key not in self.sampler:
                 raise ValueError(f"sampler.{key} is required")
-        if "bounds_buffer_deg" not in self.extraction:
-            raise ValueError("extraction.bounds_buffer_deg is required")
+        if self.extraction.get("step_selector") != "interval":
+            raise ValueError("extraction.step_selector must be 'interval'")
+        for key in ("step_time_s", "gap_q", "points_per_step", "choice_policy", "target_crs"):
+            if key not in self.extraction:
+                raise ValueError(f"extraction.{key} is required")
         if "points_per_step" not in self.extraction:
             raise ValueError("extraction.points_per_step is required")
         if "shared.pt" not in self.shared:

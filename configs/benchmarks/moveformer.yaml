@@ -6,15 +6,9 @@ version: 1
 # - Reuses the iSSF parametric point-store sampler to get P=101 candidates (100 pseudo + 1 true).
 # - Consumes whatever layers exist in the point-store env tensor as a generic continuous covariate vector.
 
-layers_config: configs/layers_all.yaml
+layers_config: configs/layers/all.yaml
+sampler_config: configs/samplers/issf_defaults.yaml
 output_dir: results/benchmarks
-
-# Optional W&B logging (disabled by default).
-wandb:
-  enabled: true
-  project: movebench
-  entity: justinkay
-  mode: online  # or offline
 
 runtime:
   device: cuda
@@ -23,19 +17,11 @@ runtime:
   max_eval_steps: 2500
 
 datasets:
-  # Still required: point-store extraction and disambiguation parameters live here.
   issf:
     batch_size: 32
     num_workers: 32
     normalize: true
     include_time: true
-    sampler:
-      num_candidates: 100
-      random_seed: 0
-      step_multiplier: 2.0
-      step_q: 0.95
-      gap_q: 0.999
-      bounds_buffer_deg: 0.01
 
   moveformer:
     batch_size: 24

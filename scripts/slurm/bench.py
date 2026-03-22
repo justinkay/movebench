@@ -13,9 +13,6 @@ expects rasters + point stores + (when required) normalization stats to already
 exist. Use:
   - scripts/slurm/extract.py to build point stores + normalization stats
   - scripts/slurm/wds.py to build deepSSF WebDataset caches (optional)
-
-W&B auth: set WANDB_API_KEY in the environment (recommended) or pass
---wandb-api-key-file to read it from a text file.
 """
 
 from __future__ import annotations
@@ -28,7 +25,6 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,23 +33,17 @@ from movebench.benchmark import resolve_studies
 from movebench.benchmark import run_method
 from movebench.benchmark import write_outputs
 from movebench import Study, paths
-from movebench.features.points import select_point_store_dir
+from movebench.features.config import SamplerConfig, load_sampler_config
+from movebench.features.points import (
+    load_point_store_manifest,
+    point_store_train_stats_path,
+    resolve_sampler_hash,
+)
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
 import torch
-from movebench.wandb_utils import maybe_wandb_benchmark_log_callback
 
 _REPO_ROOT = bootstrap.REPO_ROOT
-
-
-@dataclass(frozen=True)
-class _SamplerParams:
-    num_candidates: int
-    random_seed: int
-    step_multiplier: float
-    step_q: float
-    gap_q: float
-    bounds_buffer_deg: float
 
 
 def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
@@ -113,12 +103,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Ignore existing per-study results and rerun all methods for queued studies.",
     )
     p.add_argument(
-        "--wandb-api-key-file",
-        type=str,
-        default=None,
-        help="Optional path to a text file containing your WANDB_API_KEY. The key is not printed.",
-    )
-    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print actions/commands but do not submit jobs.",
@@ -159,20 +143,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _maybe_set_wandb_api_key(api_key_file: str | None) -> None:
-    if api_key_file is None:
-        return
-    if os.environ.get("WANDB_API_KEY"):
-        return
-    p = Path(str(api_key_file))
-    if not p.exists():
-        raise FileNotFoundError(f"--wandb-api-key-file not found: {p}")
-    key = p.read_text().strip()
-    if not key:
-        raise ValueError(f"--wandb-api-key-file is empty: {p}")
-    os.environ["WANDB_API_KEY"] = key
-
-
 def _load_cfg(config_path: str) -> dict[str, Any]:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
@@ -207,16 +177,8 @@ def _rasters_root_for(plan, *, study_dir: Path) -> Path:
     return Path(study_dir) / "rasters" / str(plan.rasters_hash)
 
 
-def _issf_sampler_params(cfg: dict[str, Any]) -> _SamplerParams:
-    sampler = cfg["datasets"]["issf"]["sampler"]
-    return _SamplerParams(
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
+def _issf_sampler_config(cfg: dict[str, Any]) -> SamplerConfig:
+    return load_sampler_config(str(cfg["sampler_config"]))
 
 
 def _select_parametric_store(
@@ -224,33 +186,21 @@ def _select_parametric_store(
     study_dir: Path,
     plan,
     split: str,
-    sampler: _SamplerParams,
+    sampler: SamplerConfig,
 ):
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-
-    return select_point_store_dir(
+    return load_point_store_manifest(
         study_dir=Path(study_dir),
         split=str(split),
-        config_hash=str(plan.config_hash),
-        expected_type="parametric",
-        num_candidates=int(sampler.num_candidates),
-        random_seed=int(sampler.random_seed),
-        step_multiplier=float(sampler.step_multiplier),
-        step_q=float(sampler.step_q),
-        gap_q=float(sampler.gap_q),
-        bounds_buffer_deg=float(sampler.bounds_buffer_deg),
+        rasters_hash=str(plan.rasters_hash),
+        sampler_hash=resolve_sampler_hash(sampler),
     )
 
 
-def _norm_stats_path(*, study_dir: Path, config_hash: str, sampler_hash: str) -> Path:
-    return (
-        Path(study_dir)
-        / "normalization"
-        / "points"
-        / str(config_hash)
-        / str(sampler_hash)
-        / "stats.json"
+def _norm_stats_path(*, study_dir: Path, rasters_hash: str, sampler_hash: str) -> Path:
+    return point_store_train_stats_path(
+        study_dir=Path(study_dir),
+        rasters_hash=str(rasters_hash),
+        sampler_hash=str(sampler_hash),
     )
 
 
@@ -310,7 +260,7 @@ def _check_prereqs(
     study_id: str,
     cfg: dict[str, Any],
     plan,
-    sampler: _SamplerParams,
+    sampler: SamplerConfig,
     require_norm_stats: bool,
 ) -> tuple[bool, str | None, str]:
     """Return (ok, sampler_hash, reason)."""
@@ -341,7 +291,7 @@ def _check_prereqs(
     if require_norm_stats:
         stats_path = _norm_stats_path(
             study_dir=study.study_dir,
-            config_hash=str(plan.config_hash),
+            rasters_hash=str(plan.rasters_hash),
             sampler_hash=sampler_hash,
         )
         if not stats_path.exists():
@@ -391,8 +341,6 @@ def _build_srun_cmd(
     )
     if args.overwrite:
         cmd.append("--overwrite")
-    if args.wandb_api_key_file:
-        cmd.extend(["--wandb-api-key-file", str(args.wandb_api_key_file)])
     return cmd
 
 
@@ -437,14 +385,12 @@ def _merge_outputs(*, cfg: dict[str, Any], out_dir: Path) -> None:
 def _worker(args: argparse.Namespace) -> int:
     assert args.study is not None
 
-    _maybe_set_wandb_api_key(args.wandb_api_key_file)
-
     cfg = _load_cfg(str(args.config))
     out_dir = Path(str(cfg["output_dir"]))
     config_stem = Path(str(args.config)).stem
 
     plan = _resolve_layer_plan(str(cfg["layers_config"]))
-    sampler = _issf_sampler_params(cfg)
+    sampler = _issf_sampler_config(cfg)
     need_norm = _needs_points_normalization(cfg)
 
     ok, sampler_hash, reason = _check_prereqs(
@@ -466,8 +412,6 @@ def _worker(args: argparse.Namespace) -> int:
         sys.path.insert(0, str(_REPO_ROOT))
 
     device = torch.device(str(cfg["runtime"]["device"]))
-    wandb_cfg = cfg.get("wandb", None)
-
     study = Study(str(args.study))
 
     per_study_path = _study_results_path(out_dir, str(args.study))
@@ -496,26 +440,14 @@ def _worker(args: argparse.Namespace) -> int:
             continue
 
         print(f"Running {study.study_id} {method_name}", flush=True)
-        with maybe_wandb_benchmark_log_callback(
-            wandb_cfg,
-            output_dir=out_dir,
-            study_id=str(study.study_id),
-            benchmark_name=str(config_stem),
-            method_name=str(method_name),
-            kind=str(kind),
-            layers_config=str(cfg["layers_config"]),
-            device=str(cfg["runtime"]["device"]),
-            seed=int(cfg["runtime"]["seed"]),
-        ) as log_callback:
-            study_results[method_name] = run_method(
-                kind=kind,
-                study=study,
-                sampler_hash=str(sampler_hash),
-                cfg=cfg,
-                method=method,
-                device=device,
-                log_callback=log_callback,
-            )
+        study_results[method_name] = run_method(
+            kind=kind,
+            study=study,
+            sampler_hash=str(sampler_hash),
+            cfg=cfg,
+            method=method,
+            device=device,
+        )
 
         study_results.setdefault("__meta__", {})
         if isinstance(study_results["__meta__"], dict):
@@ -526,7 +458,7 @@ def _worker(args: argparse.Namespace) -> int:
                     "config_path": str(args.config),
                     "output_dir": str(out_dir),
                     "layers_config": str(cfg["layers_config"]),
-                    "config_hash": str(plan.config_hash),
+                    "rasters_hash": str(plan.rasters_hash),
                     "sampler_hash": str(sampler_hash),
                 }
             )
@@ -541,12 +473,10 @@ def _worker(args: argparse.Namespace) -> int:
 
 
 def _launcher(args: argparse.Namespace) -> int:
-    _maybe_set_wandb_api_key(args.wandb_api_key_file)
-
     cfg = _load_cfg(str(args.config))
     out_dir = Path(str(cfg["output_dir"]))
     plan = _resolve_layer_plan(str(cfg["layers_config"]))
-    sampler = _issf_sampler_params(cfg)
+    sampler = _issf_sampler_config(cfg)
     need_norm = _needs_points_normalization(cfg)
 
     if str(_REPO_ROOT) not in sys.path:

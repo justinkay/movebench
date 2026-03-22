@@ -37,6 +37,7 @@ from tqdm.auto import tqdm
 import movebench.paths as paths
 
 import shutil
+from movebench.features.points import resolve_sampler_hash
 from movebench.layers.plan import LayerPlan
 from torch.utils.data import Subset
 
@@ -60,9 +61,6 @@ def deepssf_wds_cache_hash(
     output_hw: tuple[int, int],
     normalize: bool,
     normalization_sampler_hash: str | None,
-    step_multiplier: float,
-    step_q: float,
-    gap_q: float,
     samples_per_shard: int,
     spatial_dtype: SpatialDType,
     target_dtype: TargetDType,
@@ -81,9 +79,6 @@ def deepssf_wds_cache_hash(
             "normalization_sampler_hash": str(normalization_sampler_hash)
             if normalization_sampler_hash is not None
             else None,
-            "step_multiplier": float(step_multiplier),
-            "step_q": float(step_q),
-            "gap_q": float(gap_q),
             "samples_per_shard": int(samples_per_shard),
             "spatial_dtype": str(spatial_dtype),
             "target_dtype": str(target_dtype),
@@ -92,7 +87,7 @@ def deepssf_wds_cache_hash(
     )
 
 
-_MANIFEST_SCHEMA_VERSION = "2"
+_MANIFEST_SCHEMA_VERSION = "3"
 _PAYLOAD_FORMAT = "pth"
 
 
@@ -466,7 +461,7 @@ def ensure_deepssf_wds_cache_split(
 
     ds_kwargs = dict(ds_kwargs)
     ds_kwargs["split"] = split
-    ds_kwargs["config"] = layers_config
+    ds_kwargs["layers_config"] = layers_config
 
     output_hw = ds_kwargs.get("output_hw", (101, 101))
     if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
@@ -476,14 +471,12 @@ def ensure_deepssf_wds_cache_split(
     output_hw = (int(output_hw[0]), int(output_hw[1]))
 
     normalize = bool(ds_kwargs.get("normalize", True))
-    norm_hash_raw = ds_kwargs.get("normalization_sampler_hash", None)
+    sampler_config = ds_kwargs.get("sampler_config")
     norm_hash = (
-        str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
+        resolve_sampler_hash(sampler_config)
+        if (normalize and sampler_config is not None)
+        else None
     )
-
-    step_multiplier = float(ds_kwargs.get("step_multiplier", 2.0))
-    step_q = float(ds_kwargs.get("step_q", 0.95))
-    gap_q = float(ds_kwargs.get("gap_q", 0.999))
 
     cache_hash = deepssf_wds_cache_hash(
         rasters_hash=str(plan.rasters_hash),
@@ -492,9 +485,6 @@ def ensure_deepssf_wds_cache_split(
         output_hw=output_hw,
         normalize=normalize,
         normalization_sampler_hash=norm_hash,
-        step_multiplier=step_multiplier,
-        step_q=step_q,
-        gap_q=gap_q,
         samples_per_shard=int(samples_per_shard),
         spatial_dtype=spatial_dtype,
         target_dtype=target_dtype,

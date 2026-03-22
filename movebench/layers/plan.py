@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from movebench.layers.config import FixedStepSpec
+
 
 @dataclass(frozen=True)
 class Channel:
@@ -52,6 +54,8 @@ class LayerPlan:
     # Derived layers required by this plan (including intermediate derived layers
     # needed to compute output derived layers).
     derived_dependencies: dict[str, list[str]]
+
+    step: FixedStepSpec | None = None
 
     def num_channels(self) -> int:
         return len(self.channels)
@@ -101,7 +105,7 @@ class LayerPlan:
         return out
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "rasters_hash": self.rasters_hash,
             "layers_in_order": list(self.layers_in_order),
             "channels": [
@@ -124,6 +128,21 @@ class LayerPlan:
                 k: list(v) for k, v in self.derived_dependencies.items()
             },
         }
+        if self.step is not None:
+            out["step"] = {
+                "step_time_s": int(self.step.step_time_s),
+                "step_multiplier": float(self.step.step_multiplier),
+                "step_q": float(self.step.step_q),
+                "max_step_q": float(self.step.max_step_q),
+                "gap_q": float(self.step.gap_q),
+            }
+        return out
+
+    @property
+    def step_spec(self) -> FixedStepSpec:
+        if self.step is None:
+            raise ValueError("LayerPlan has no fixed step specification")
+        return self.step
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "LayerPlan":
@@ -146,6 +165,17 @@ class LayerPlan:
 
         return cls(
             rasters_hash=d["rasters_hash"],
+            step=(
+                FixedStepSpec(
+                    step_time_s=int(d["step"]["step_time_s"]),
+                    step_multiplier=float(d["step"]["step_multiplier"]),
+                    step_q=float(d["step"]["step_q"]),
+                    max_step_q=float(d["step"]["max_step_q"]),
+                    gap_q=float(d["step"]["gap_q"]),
+                )
+                if d.get("step") is not None
+                else None
+            ),
             layers_in_order=list(d["layers_in_order"]),
             channels=channels,
             chip_groups=chip_groups,

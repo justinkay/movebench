@@ -70,6 +70,8 @@ class MoveBenchTrajectoryApp {
     this.currentArtifact = "";
     this.currentArtifactEntry = null;
     this.currentLayerConfig = "";
+    this.covariateSteps = [];
+    this.covariateStepOptionsKey = "";
     this.activeTab = this.uiState.activeTab || "trajectory";
     this.data = null;
     this.covariates = null;
@@ -614,7 +616,7 @@ class MoveBenchTrajectoryApp {
         <div class="cov-root hidden" data-role="covariates-panel">
           <div class="cov-toolbar">
             <label>Layer config <select data-role="cov-config"></select></label>
-            <label>Point ID <input type="number" data-role="cov-point-id" min="0" step="1"></label>
+            <label>Step <select data-role="cov-point-id"></select></label>
             <button type="button" data-role="cov-load">Load covariates</button>
             <div class="cov-status" data-role="cov-status"></div>
           </div>
@@ -700,18 +702,16 @@ class MoveBenchTrajectoryApp {
     this.refs.covConfig.addEventListener("change", async () => {
       this.currentLayerConfig = this.refs.covConfig.value;
       this.saveUiState();
+      await this.loadCovariateSteps(true);
       if (this.activeTab === "covariates") {
         await this.loadCovariates();
       }
     });
+    this.refs.covPointId.addEventListener("change", () => {
+      this.saveUiState();
+    });
     this.refs.covLoad.addEventListener("click", () => {
       void this.loadCovariates();
-    });
-    this.refs.covPointId.addEventListener("keydown", event => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void this.loadCovariates();
-      }
     });
   }
 
@@ -798,7 +798,7 @@ class MoveBenchTrajectoryApp {
       ? this.uiState.layerConfig
       : defaultConfig || this.layerConfigs[0]?.path || "";
     this.refs.covConfig.value = this.currentLayerConfig;
-    this.refs.covPointId.value = this.uiState.pointId || "";
+    this.refs.covPointId.innerHTML = "";
   }
 
   async loadArtifact() {
@@ -823,6 +823,8 @@ class MoveBenchTrajectoryApp {
       this.data.selectedIndividuals = restoreSelectedIndividuals(this.data.individuals, this.uiState.selectedIndividuals);
 
       this.covariates = null;
+      this.covariateSteps = [];
+      this.covariateStepOptionsKey = "";
       this.saveUiState();
       this.renderIndividuals();
       this.updateTimeLabel();
@@ -850,12 +852,86 @@ class MoveBenchTrajectoryApp {
     }
   }
 
+  async loadCovariateSteps(force = false) {
+    if (!this.currentArtifact || !this.currentLayerConfig) {
+      this.covariateSteps = [];
+      this.populateCovariateSteps([], "");
+      return [];
+    }
+
+    const cacheKey = `${this.currentArtifact}|${this.currentLayerConfig}`;
+    if (!force && this.covariateStepOptionsKey === cacheKey && this.covariateSteps.length) {
+      return this.covariateSteps;
+    }
+
+    const query = new URLSearchParams({ config: this.currentLayerConfig });
+    const preferredPointId = String(this.uiState.pointId || this.refs.covPointId.value || "").trim();
+    if (preferredPointId) {
+      query.set("point_id", preferredPointId);
+    }
+
+    this.setCovariateStatus(`Loading valid steps for ${this.currentArtifact}...`);
+    try {
+      const payload = await fetchJSON(
+        `/api/artifacts/${encodeURIComponent(this.currentArtifact)}/covariates/steps?${query.toString()}`,
+      );
+      this.currentLayerConfig = payload.config || this.currentLayerConfig;
+      this.refs.covConfig.value = this.currentLayerConfig;
+      this.covariateStepOptionsKey = cacheKey;
+      this.covariateSteps = Array.isArray(payload.steps) ? payload.steps : [];
+      this.populateCovariateSteps(this.covariateSteps, String(payload.selected_point_id ?? ""));
+      if (!this.covariateSteps.length) {
+        this.setCovariateStatus("No valid steps are available for this layer config.", true);
+      }
+      return this.covariateSteps;
+    } catch (error) {
+      this.covariateSteps = [];
+      this.covariateStepOptionsKey = "";
+      this.populateCovariateSteps([], "");
+      this.setCovariateStatus(error.message, true);
+      return [];
+    }
+  }
+
+  populateCovariateSteps(steps, selectedPointId) {
+    this.refs.covPointId.innerHTML = "";
+    if (!steps.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No valid steps";
+      this.refs.covPointId.appendChild(option);
+      this.refs.covPointId.disabled = true;
+      this.refs.covLoad.disabled = true;
+      return;
+    }
+
+    const preferred = String(selectedPointId || this.uiState.pointId || "");
+    for (const step of steps) {
+      const option = document.createElement("option");
+      option.value = String(step.point_id ?? "");
+      option.textContent = step.label || String(step.point_id ?? "");
+      this.refs.covPointId.appendChild(option);
+    }
+
+    const values = new Set(steps.map(step => String(step.point_id ?? "")));
+    this.refs.covPointId.value = values.has(preferred) ? preferred : String(steps[0].point_id ?? "");
+    this.refs.covPointId.disabled = false;
+    this.refs.covLoad.disabled = false;
+    this.saveUiState();
+  }
+
   async loadCovariates() {
     if (!this.currentArtifact) {
       return;
     }
     if (!this.currentLayerConfig) {
       this.setCovariateStatus("No layer config available.", true);
+      return;
+    }
+    const steps = await this.loadCovariateSteps();
+    if (!steps.length) {
+      this.covariates = null;
+      this.renderCovariates();
       return;
     }
 
@@ -874,12 +950,6 @@ class MoveBenchTrajectoryApp {
       this.currentLayerConfig = payload.config || this.currentLayerConfig;
       this.refs.covConfig.value = this.currentLayerConfig;
       this.refs.covPointId.value = String(payload.selected_point?.point_id ?? pointValue);
-      if (payload.point_id_min != null) {
-        this.refs.covPointId.min = String(payload.point_id_min);
-      }
-      if (payload.point_id_max != null) {
-        this.refs.covPointId.max = String(payload.point_id_max);
-      }
       this.saveUiState();
       this.renderCovariates();
       this.setCovariateStatus(`Loaded raster grids for point ${payload.selected_point?.point_id ?? "?"}.`);
@@ -895,7 +965,7 @@ class MoveBenchTrajectoryApp {
       this.refs.covSummary.innerHTML = "";
       this.refs.covContent.innerHTML = `
         <div class="cov-empty">
-          Select a layer config and point ID to load the raster inspection views from
+          Select a layer config and valid step to load the raster inspection views from
           <code>notebooks/eda_download.ipynb</code>.
         </div>
       `;
@@ -906,8 +976,10 @@ class MoveBenchTrajectoryApp {
     this.refs.covSummary.innerHTML = `
       Study: <code>${escapeHtml(this.covariates.study_id || "")}</code>
       &nbsp;|&nbsp; Config: <code>${escapeHtml(this.covariates.config || "")}</code>
-      &nbsp;|&nbsp; Point: <code>${escapeHtml(String(selectedPoint.point_id ?? ""))}</code>
-      &nbsp;|&nbsp; Timestamp: <code>${escapeHtml(selectedPoint.timestamp || "")}</code>
+      &nbsp;|&nbsp; Step start: <code>${escapeHtml(String(selectedPoint.point_id ?? ""))}</code>
+      &nbsp;|&nbsp; Start time: <code>${escapeHtml(selectedPoint.timestamp || "")}</code>
+      ${selectedPoint.step_end_point_id != null ? `&nbsp;|&nbsp; Step end: <code>${escapeHtml(String(selectedPoint.step_end_point_id))}</code>` : ""}
+      ${selectedPoint.step_end_timestamp ? `&nbsp;|&nbsp; End time: <code>${escapeHtml(selectedPoint.step_end_timestamp)}</code>` : ""}
       &nbsp;|&nbsp; Rasters hash: <code>${escapeHtml(this.covariates.rasters_hash || "")}</code>
     `;
 

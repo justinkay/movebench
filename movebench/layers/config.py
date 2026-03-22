@@ -13,12 +13,11 @@ import yaml
 
 DEFAULT_RASTER_PARAMS: dict[str, Any] = {
     "buffer": {
+        "step_time_s": None,
         "step_multiplier": 2.0,
         "step_q": 0.95,
         "max_step_q": 0.99,
         "gap_q": 0.999,
-        "min_step_time_s": None,
-        "max_step_time_s": None,
     },
     "scale_clamp": {
         "min_pixels": 3,
@@ -31,12 +30,22 @@ DEFAULT_RASTER_PARAMS: dict[str, Any] = {
 
 _MAX_ARTIFACT_KEY_LEN = 96
 
+# TODO refactor this to a separate ssf preparation step - not actually related to layers
+@dataclass(frozen=True)
+class FixedStepSpec:
+    step_time_s: int
+    step_multiplier: float
+    step_q: float
+    max_step_q: float
+    gap_q: float
+
 
 @dataclass(frozen=True)
 class LayersConfig:
     layers: list[str]
     chip_groups: dict[str, dict[str, Any]]
     raster_params: dict[str, Any]
+    step: FixedStepSpec
 
 
 def _compact_name(name: str) -> str:
@@ -102,6 +111,7 @@ def _canonical_chip_groups(cfg: LayersConfig) -> dict[str, Any]:
 def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
     rp = cfg.raster_params
     buffer = {
+        "step_time_s": int(cfg.step.step_time_s),
         "step_multiplier": float(rp["buffer"]["step_multiplier"]),
         "step_q": float(rp["buffer"]["step_q"]),
         "max_step_q": float(
@@ -111,10 +121,6 @@ def _canonical_raster_params(cfg: LayersConfig) -> dict[str, Any]:
         ),
         "gap_q": float(rp["buffer"]["gap_q"]),
     }
-    if rp["buffer"].get("min_step_time_s") is not None:
-        buffer["min_step_time_s"] = int(rp["buffer"]["min_step_time_s"])
-    if rp["buffer"].get("max_step_time_s") is not None:
-        buffer["max_step_time_s"] = int(rp["buffer"]["max_step_time_s"])
     return {
         "buffer": buffer,
         "scale_clamp": {
@@ -144,15 +150,12 @@ def rasters_hash(cfg: LayersConfig) -> str:
     )
     buffer = raster_params["buffer"]
     parts = [
+        f"st{_format_slug_duration(int(buffer['step_time_s']))}",
         f"sm{_format_slug_number(buffer['step_multiplier'])}",
         f"sq{_format_slug_number(buffer['step_q'])}",
         f"msq{_format_slug_number(buffer['max_step_q'])}",
         f"gq{_format_slug_number(buffer['gap_q'])}",
     ]
-    if buffer.get("min_step_time_s") is not None:
-        parts.append(f"mns{_format_slug_duration(int(buffer['min_step_time_s']))}")
-    if buffer.get("max_step_time_s") is not None:
-        parts.append(f"mxs{_format_slug_duration(int(buffer['max_step_time_s']))}")
     parts.extend(
         [
             f"mnp{int(raster_params['scale_clamp']['min_pixels'])}",
@@ -194,7 +197,8 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
 
     if "region_multiplier" in raw:
         raise ValueError(
-            "raster_params.region_multiplier has been removed; use max_step_time to control extent"
+            "raster_params.region_multiplier has been removed; "
+            "use raster_params.buffer.step_time with step_multiplier/step_q/max_step_q"
         )
 
     allowed_keys = {"buffer", "scale_clamp", "tiles"}
@@ -218,22 +222,17 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
     step_q = float(buf["step_q"])
     max_step_q = float(buf["max_step_q"])
     gap_q = float(buf["gap_q"])
-    min_step_time_s = _parse_duration_seconds(
-        buf_raw.get("min_step_time"),
-        field_name="raster_params.buffer.min_step_time",
-    )
-    max_step_time_s = _parse_duration_seconds(
-        buf_raw.get("max_step_time"),
-        field_name="raster_params.buffer.max_step_time",
-    )
-    if (
-        min_step_time_s is not None
-        and max_step_time_s is not None
-        and min_step_time_s > max_step_time_s
-    ):
+    if "min_step_time" in buf_raw or "max_step_time" in buf_raw:
         raise ValueError(
-            "raster_params.buffer.min_step_time must be <= raster_params.buffer.max_step_time"
+            "raster_params.buffer.min_step_time/max_step_time are no longer supported; "
+            "use raster_params.buffer.step_time"
         )
+    step_time_s = _parse_duration_seconds(
+        buf_raw.get("step_time"),
+        field_name="raster_params.buffer.step_time",
+    )
+    if step_time_s is None:
+        raise ValueError("raster_params.buffer.step_time is required")
     if step_multiplier <= 0:
         raise ValueError(
             f"raster_params.buffer.step_multiplier must be > 0, got {step_multiplier}"
@@ -268,12 +267,11 @@ def _parse_raster_params(raw: Any) -> dict[str, Any]:
 
     return {
         "buffer": {
+            "step_time_s": int(step_time_s),
             "step_multiplier": step_multiplier,
             "step_q": step_q,
             "max_step_q": max_step_q,
             "gap_q": gap_q,
-            "min_step_time_s": min_step_time_s,
-            "max_step_time_s": max_step_time_s,
         },
         "scale_clamp": {"min_pixels": min_pixels, "max_pixels": max_pixels},
         "tiles": {"px_per_side": px_per_side},
@@ -316,7 +314,16 @@ def parse_layers_config(data: dict[str, Any]) -> LayersConfig:
         }
 
     return LayersConfig(
-        layers=layers, chip_groups=chip_groups, raster_params=raster_params
+        layers=layers,
+        chip_groups=chip_groups,
+        raster_params=raster_params,
+        step=FixedStepSpec(
+            step_time_s=int(raster_params["buffer"]["step_time_s"]),
+            step_multiplier=float(raster_params["buffer"]["step_multiplier"]),
+            step_q=float(raster_params["buffer"]["step_q"]),
+            max_step_q=float(raster_params["buffer"]["max_step_q"]),
+            gap_q=float(raster_params["buffer"]["gap_q"]),
+        ),
     )
 
 

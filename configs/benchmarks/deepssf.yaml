@@ -1,13 +1,8 @@
 version: 1
 
-layers_config: configs/layers_all.yaml
+layers_config: configs/layers/all.yaml
+sampler_config: configs/samplers/issf_defaults.yaml
 output_dir: results/benchmarks
-
-wandb:
-  enabled: true
-  project: movebench
-  entity: justinkay # TODO env variable
-  mode: online
 
 runtime:
   device: cuda
@@ -21,13 +16,6 @@ datasets:
     num_workers: 8
     normalize: true
     include_time: true
-    sampler:
-      num_candidates: 100
-      random_seed: 0
-      step_multiplier: 2.0
-      step_q: 0.95
-      gap_q: 0.999
-      bounds_buffer_deg: 0.01
 
   deepssf:
     cache:
@@ -37,9 +25,6 @@ datasets:
     num_workers: 8
     output_hw: [101, 101]
     normalize: true
-    step_multiplier: 2.0
-    step_q: 0.95
-    gap_q: 0.999
 
 methods:
   - name: deepssf

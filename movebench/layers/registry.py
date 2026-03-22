@@ -438,6 +438,7 @@ class LayerRegistry:
 
         return LayerPlan(
             rasters_hash=rasters_hash(cfg),
+            step=cfg.step,
             layers_in_order=list(cfg.layers),
             channels=channels,
             chip_groups=chip_groups_plan,

@@ -37,10 +37,10 @@ from movebench.trajectories import (
 
 
 def _default_config_path() -> str:
-    ae = bootstrap.REPO_ROOT / "configs" / "layers_all_ae.yaml"
+    ae = bootstrap.REPO_ROOT / "configs" / "layers" / "all_ae_native.yaml"
     if ae.exists():
         return str(ae)
-    return str(bootstrap.REPO_ROOT / "configs" / "layers_all.yaml")
+    return str(bootstrap.REPO_ROOT / "configs" / "layers" / "all.yaml")
 
 
 def _format_bytes(n: int | float | None) -> str:
@@ -139,13 +139,13 @@ DEFAULT_FALLBACK_MODEL = SizeModel(
 
 # Default heuristic models tuned for the current default configs (chips+tiles written as float32 GeoTIFFs).
 DEFAULT_SIZE_MODELS: dict[str, SizeModel] = {
-    # Chip groups (configs/layers_all_ae.yaml)
+    # Chip groups (configs/layers/all_ae_native.yaml)
     "era5": SizeModel(intercept_bytes_per_file=8_000.0, slope_bytes_per_pixel_band=2.9),
     "modis": SizeModel(intercept_bytes_per_file=0.0, slope_bytes_per_pixel_band=2.0),
     "high_res": SizeModel(
         intercept_bytes_per_file=25_000.0, slope_bytes_per_pixel_band=3.0
     ),
-    # Tile layers (configs/layers_all_ae.yaml)
+    # Tile layers (configs/layers/all_ae_native.yaml)
     "alphaearth_embeddings": SizeModel(
         intercept_bytes_per_file=0.0, slope_bytes_per_pixel_band=1.25
     ),

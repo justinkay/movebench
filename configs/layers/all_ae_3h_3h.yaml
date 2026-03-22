@@ -1,5 +1,6 @@
 raster_params:
   buffer:
+    step_time: 3h
     step_multiplier: 2.0
     step_q: 0.95
     max_step_q: 0.99
@@ -34,6 +35,7 @@ layers:
   - hii
   - bioclim
   - dynamic_world
+  - alphaearth_embeddings
 
 chip_groups:
   era5:

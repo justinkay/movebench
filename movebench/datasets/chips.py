@@ -18,6 +18,7 @@ from rasterio.enums import Resampling
 from rasterio.transform import from_bounds, rowcol
 from torch.utils.data import Dataset
 
+from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.layers.constants import WGS84_CRS
 from movebench.layers.io import LayerIO
@@ -30,7 +31,7 @@ from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
-    compute_movement_features,
+    compute_step_length_extent_m,
     load_trajectories_csv,
     select_step_starts,
 )
@@ -86,13 +87,10 @@ class ChipDataset(Dataset):
         trajectories_path: str | Path,
         split: str,
         plan: LayerPlan,
+        sampler_config: SamplerConfig | None = None,
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
-        normalization_sampler_hash: str | None = None,
         mode: Literal["points", "steps"] = "points",
-        step_multiplier: float = 2.0,
-        step_q: float = 0.95,
-        gap_q: float = 0.999,
         registry: LayerRegistry = REGISTRY,
     ) -> None:
         self.study_dir = Path(study_dir)
@@ -112,29 +110,22 @@ class ChipDataset(Dataset):
         self.output_hw = (oh_i, ow_i)
         self.normalize = bool(normalize)
         self.mode = str(mode)
+        self.sampler_config = sampler_config
         if self.mode not in {"points", "steps"}:
             raise ValueError(f"Unknown mode={mode!r} (expected 'points' or 'steps')")
-
-        self.step_multiplier = float(step_multiplier)
-        self.step_q = float(step_q)
-        self.gap_q = float(gap_q)
-        if not (0.0 <= self.step_q <= 1.0):
-            raise ValueError(f"step_q must be in [0,1], got {self.step_q}")
-        if not (0.0 <= self.gap_q <= 1.0):
-            raise ValueError(f"gap_q must be in [0,1], got {self.gap_q}")
-        if self.step_multiplier <= 0:
-            raise ValueError(
-                f"step_multiplier must be positive, got {self.step_multiplier}"
-            )
 
         self.io = LayerIO(
             study_dir=self.study_dir, plan=self.plan, registry=self.registry
         )
         if self.normalize:
+            if self.sampler_config is None:
+                raise ValueError(
+                    "ChipDataset(normalize=True) requires sampler_config so normalization stats can be resolved explicitly."
+                )
             self._mean, self._std = load_points_normalization_mean_std(
                 study_dir=self.study_dir,
                 plan=self.plan,
-                sampler_hash=normalization_sampler_hash,
+                sampler_config=self.sampler_config,
             )
         else:
             self._mean = None
@@ -179,9 +170,8 @@ class ChipDataset(Dataset):
 
             steps = select_step_starts(
                 df,
-                step_multiplier=self.step_multiplier,
-                step_q=self.step_q,
-                gap_q=self.gap_q,
+                step_time_s=int(self.plan.step_spec.step_time_s),
+                gap_q=float(self.plan.step_spec.gap_q),
             )
             if len(steps) == 0:
                 raise ValueError(
@@ -212,13 +202,17 @@ class ChipDataset(Dataset):
                     f"Found no rows for set='train' in {self.trajectories_path}."
                 )
             try:
-                d_train = compute_movement_features(
+                d_train = select_step_starts(
                     df_train,
-                    step_multiplier=self.step_multiplier,
-                    step_q=self.step_q,
-                    gap_q=self.gap_q,
+                    step_time_s=int(self.plan.step_spec.step_time_s),
+                    gap_q=float(self.plan.step_spec.gap_q),
                 )
-                buffer_m = float(d_train["max_step_len"].iloc[0])
+                buffer_m = compute_step_length_extent_m(
+                    d_train["step_length_m"].to_numpy(dtype=np.float64, copy=False),
+                    step_q=float(self.plan.step_spec.step_q),
+                    step_multiplier=float(self.plan.step_spec.step_multiplier),
+                    max_step_q=float(self.plan.step_spec.max_step_q),
+                )
             except Exception as exc:
                 raise ValueError(
                     "Could not compute step_buffer_m from the train split. "

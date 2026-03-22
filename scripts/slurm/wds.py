@@ -21,30 +21,27 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from movebench.benchmark import load_config
 from movebench.benchmark import resolve_studies
 from movebench import Study, paths
-from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
-from movebench.datasets.deepssf_wds_cache import ensure_deepssf_wds_cache_split
-from movebench.features.points import select_point_store_dir
+from movebench.datasets.deepssf_wds_cache import (
+    cache_dir_for_study,
+    deepssf_wds_cache_hash,
+    ensure_deepssf_wds_cache_split,
+)
+from movebench.features.config import SamplerConfig, load_sampler_config
+from movebench.features.points import (
+    load_point_store_manifest,
+    point_store_train_stats_path,
+    resolve_sampler_hash,
+)
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
 
 _REPO_ROOT = bootstrap.REPO_ROOT
-
-
-@dataclass(frozen=True)
-class _SamplerParams:
-    num_candidates: int
-    random_seed: int
-    step_multiplier: float
-    step_q: float
-    gap_q: float
-    bounds_buffer_deg: float
 
 
 @dataclass(frozen=True)
@@ -211,16 +208,8 @@ def _resolve_layer_plan(layers_config: str):
     return REGISTRY.resolve(cfg)
 
 
-def _issf_sampler_params(cfg: dict[str, Any]) -> _SamplerParams:
-    sampler = cfg["datasets"]["issf"]["sampler"]
-    return _SamplerParams(
-        num_candidates=int(sampler["num_candidates"]),
-        random_seed=int(sampler["random_seed"]),
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        gap_q=float(sampler["gap_q"]),
-        bounds_buffer_deg=float(sampler["bounds_buffer_deg"]),
-    )
+def _issf_sampler_config(cfg: dict[str, Any]) -> SamplerConfig:
+    return load_sampler_config(str(cfg["sampler_config"]))
 
 
 def _uses_gee_layers(plan) -> bool:
@@ -242,32 +231,20 @@ def _rasters_root_for(plan, *, study_dir: Path) -> Path:
     return Path(study_dir) / "rasters" / str(plan.rasters_hash)
 
 
-def _select_parametric_train_store(*, study_dir: Path, plan, sampler: _SamplerParams):
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-
-    return select_point_store_dir(
+def _select_parametric_train_store(*, study_dir: Path, plan, sampler: SamplerConfig):
+    return load_point_store_manifest(
         study_dir=Path(study_dir),
         split="train",
-        config_hash=str(plan.config_hash),
-        expected_type="parametric",
-        num_candidates=int(sampler.num_candidates),
-        random_seed=int(sampler.random_seed),
-        step_multiplier=float(sampler.step_multiplier),
-        step_q=float(sampler.step_q),
-        gap_q=float(sampler.gap_q),
-        bounds_buffer_deg=float(sampler.bounds_buffer_deg),
+        rasters_hash=str(plan.rasters_hash),
+        sampler_hash=resolve_sampler_hash(sampler),
     )
 
 
-def _norm_stats_path(*, study_dir: Path, config_hash: str, sampler_hash: str) -> Path:
-    return (
-        Path(study_dir)
-        / "normalization"
-        / "points"
-        / str(config_hash)
-        / str(sampler_hash)
-        / "stats.json"
+def _norm_stats_path(*, study_dir: Path, rasters_hash: str, sampler_hash: str) -> Path:
+    return point_store_train_stats_path(
+        study_dir=Path(study_dir),
+        rasters_hash=str(rasters_hash),
+        sampler_hash=str(sampler_hash),
     )
 
 
@@ -318,15 +295,15 @@ def _resolve_cache_params(
     )
 
 
-def _deepssf_ds_kwargs(cfg: dict[str, Any], *, sampler_hash: str) -> dict[str, Any]:
+def _deepssf_ds_kwargs(cfg: dict[str, Any], *, sampler: SamplerConfig) -> dict[str, Any]:
     dcfg = cfg.get("datasets", {}).get("deepssf", None)
     if not isinstance(dcfg, dict):
         raise ValueError("Benchmark config missing required key: datasets.deepssf")
 
     ds_kwargs: dict[str, Any] = {
-        "normalization_sampler_hash": str(sampler_hash),
+        "sampler_config": sampler,
     }
-    for k in ("output_hw", "normalize", "step_multiplier", "step_q", "gap_q"):
+    for k in ("output_hw", "normalize"):
         if k not in dcfg:
             continue
         v = dcfg[k]
@@ -359,38 +336,26 @@ def _expected_cache_manifest(
     output_hw = (int(output_hw[0]), int(output_hw[1]))
 
     normalize = bool(ds_kwargs.get("normalize", True))
-    norm_hash_raw = ds_kwargs.get("normalization_sampler_hash", None)
-    norm_hash = (
-        str(norm_hash_raw) if (normalize and norm_hash_raw is not None) else None
-    )
-
-    step_multiplier = float(ds_kwargs.get("step_multiplier", 2.0))
-    step_q = float(ds_kwargs.get("step_q", 0.95))
-    gap_q = float(ds_kwargs.get("gap_q", 0.999))
+    sampler = ds_kwargs.get("sampler_config")
+    norm_hash = resolve_sampler_hash(sampler) if (normalize and sampler is not None) else None
 
     cache_hash = deepssf_wds_cache_hash(
-        config_hash=str(plan.config_hash),
         rasters_hash=str(plan.rasters_hash),
+        band_ids=plan.band_ids_in_order(),
         split=str(split),
         output_hw=output_hw,
         normalize=bool(normalize),
         normalization_sampler_hash=norm_hash,
-        step_multiplier=float(step_multiplier),
-        step_q=float(step_q),
-        gap_q=float(gap_q),
         samples_per_shard=int(cache_params.samples_per_shard),
         spatial_dtype=str(cache_params.spatial_dtype),  # type: ignore[arg-type]
         target_dtype=str(cache_params.target_dtype),  # type: ignore[arg-type]
         compression=str(cache_params.compression),  # type: ignore[arg-type]
     )
 
-    cache_dir = (
-        Path(study_dir)
-        / "cache"
-        / "deepssf_wds"
-        / str(split)
-        / str(plan.config_hash)
-        / str(cache_hash)
+    cache_dir = cache_dir_for_study(
+        study_dir=study_dir,
+        split=str(split),
+        cache_hash=str(cache_hash),
     )
     return cache_dir / "manifest.json"
 
@@ -400,7 +365,7 @@ def _check_prereqs(
     study_id: str,
     cfg: dict[str, Any],
     plan,
-    issf_sampler: _SamplerParams,
+    issf_sampler: SamplerConfig,
 ) -> tuple[bool, str | None, str]:
     """Return (ok, sampler_hash, reason)."""
     if str(_REPO_ROOT) not in sys.path:
@@ -426,7 +391,7 @@ def _check_prereqs(
     sampler_hash = str(train_m.sampler_hash)
     stats_path = _norm_stats_path(
         study_dir=study.study_dir,
-        config_hash=str(plan.config_hash),
+        rasters_hash=str(plan.rasters_hash),
         sampler_hash=sampler_hash,
     )
     if not stats_path.exists():
@@ -509,7 +474,7 @@ def _worker(args: argparse.Namespace) -> int:
     cfg = _load_cfg(str(args.config))
     layers_config = str(cfg["layers_config"])
     plan = _resolve_layer_plan(layers_config)
-    issf_sampler = _issf_sampler_params(cfg)
+    issf_sampler = _issf_sampler_config(cfg)
     cache_params = _resolve_cache_params(args, cfg)
 
     assert args.study is not None
@@ -530,7 +495,7 @@ def _worker(args: argparse.Namespace) -> int:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-    ds_kwargs = _deepssf_ds_kwargs(cfg, sampler_hash=str(sampler_hash))
+    ds_kwargs = _deepssf_ds_kwargs(cfg, sampler=issf_sampler)
     study = Study(str(args.study))
 
     cache_dirs: list[str] = []
@@ -553,7 +518,7 @@ def _worker(args: argparse.Namespace) -> int:
         cache_dirs.append(str(cache_dir))
 
     print(
-        f"[wds] OK study_id={args.study} config_hash={plan.config_hash} "
+        f"[wds] OK study_id={args.study} rasters_hash={plan.rasters_hash} "
         f"sampler_hash={sampler_hash} splits={args.splits} cache_dirs={cache_dirs}",
         flush=True,
     )
@@ -564,7 +529,7 @@ def _launcher(args: argparse.Namespace) -> int:
     cfg = _load_cfg(str(args.config))
     layers_config = str(cfg["layers_config"])
     plan = _resolve_layer_plan(layers_config)
-    issf_sampler = _issf_sampler_params(cfg)
+    issf_sampler = _issf_sampler_config(cfg)
     cache_params = _resolve_cache_params(args, cfg)
     cpus_per_task = (
         int(args.cpus_per_task)
@@ -611,7 +576,7 @@ def _launcher(args: argparse.Namespace) -> int:
             blocked.append((str(study_id), reason))
             continue
 
-        ds_kwargs = _deepssf_ds_kwargs(cfg, sampler_hash=str(sampler_hash))
+        ds_kwargs = _deepssf_ds_kwargs(cfg, sampler=issf_sampler)
         need = False
         if cache_params.overwrite:
             need = True

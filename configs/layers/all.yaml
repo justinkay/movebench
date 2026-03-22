@@ -1,0 +1,50 @@
+raster_params:
+  buffer:
+    step_time: 1h
+    step_multiplier: 2.0
+    step_q: 0.95
+    max_step_q: 0.99
+    gap_q: 0.999
+  scale_clamp:
+    min_pixels: 3
+    max_pixels: 100
+  tiles:
+    px_per_side: 350
+
+layers:
+  - era5_land_hourly
+  - era5_hourly
+  - era5_land_daily
+  - modis_lc
+  - modis_cvf_tree
+  - modis_cvf_nontree
+  - modis_cvf_nonveg
+  - landsat_ndvi
+  - landsat_evi
+  - landsat_ndwi
+  - landsat_ndsi
+  - landsat_bai
+  - landsat_lst
+  - dem
+  - slope
+  - aspect
+  - rugosity
+  - dist_water
+  - orographic_uplift_hourly
+  - thermal_uplift_hourly
+  - hii
+  - bioclim
+  - dynamic_world
+
+chip_groups:
+  era5:
+    layers:
+      - era5_land_hourly
+      - era5_hourly
+      - era5_land_daily
+    target_scale_m: 11132.0
+  high_res:
+    layers:
+      - dynamic_world
+      - landsat
+    target_scale_m: 30.0

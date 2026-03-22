@@ -591,7 +591,7 @@ def _add_common_dataset_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--config",
         type=str,
-        default="configs/layers_all.yaml",
+        default="configs/layers/all.yaml",
         help="Layer config YAML.",
     )
     p.add_argument(

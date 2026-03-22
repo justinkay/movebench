@@ -1,12 +1,4 @@
-"""Point feature extraction for SSF / iSSF workflows.
-
-This module writes a disk-backed "point feature store" used by downstream
-datasets/models. Each "step" corresponds to one start location with:
-- P candidate endpoints (num_candidates pseudo + 1 true endpoint),
-- environmental values sampled at each candidate,
-- a validity mask per (channel, candidate),
-- movement values (step length, turn angle) for each candidate.
-"""
+"""Point feature extraction for SSF / iSSF workflows."""
 
 from __future__ import annotations
 
@@ -14,6 +6,7 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -25,45 +18,31 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+import movebench.layers.derived as derived
+from movebench.features.config import SamplerConfig
 from movebench.features.manifest import (
     PointFeatureManifest,
     read_manifest,
     utc_now_iso,
     write_manifest,
 )
-from movebench.layers.config import _format_slug_number, _truncate_key
+from movebench.layers.config import FixedStepSpec, _truncate_key
 from movebench.layers.constants import WGS84_CRS
+from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.rasters import Raster
-from movebench.trajectories import (
-    SET_COL,
-    compute_movement_features,
-    select_step_starts,
-)
+from movebench.trajectories import SET_COL, compute_step_length_extent_m, select_step_starts
 
-from pyproj import (
-    Transformer,
-)
+from pyproj import Transformer
 from scipy import stats
-import movebench.layers.derived as derived
-from movebench.layers.io import LayerIO
 
 TARGET_CRS = "EPSG:3857"  # meters
 SamplerType = Literal["empirical", "parametric"]
-DEFAULT_NUM_CANDIDATES = 100
-DEFAULT_RANDOM_SEED = 0
-DEFAULT_STEP_MULTIPLIER = 2.0
-DEFAULT_STEP_Q = 0.95
-DEFAULT_MAX_STEP_Q = 0.99
-DEFAULT_GAP_Q = 0.999
-DEFAULT_BOUNDS_BUFFER_DEG = 0.01
 
 
 @lru_cache(maxsize=1)
 def _transformers():
-    """Construct cached CRS transformers lazily (pyproj is an optional dependency for readers)."""
-
     to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
     to_4326 = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
     return to_target, to_4326
@@ -80,68 +59,33 @@ def _step_seed(random_seed: int, point_id_start: int) -> int:
     return int(hashlib.sha256(s).hexdigest()[:8], 16)
 
 
-def sampler_hash(
-    *,
-    parametric: bool,
-    num_candidates: int,
-    random_seed: int,
-    step_multiplier: float,
-    step_q: float,
-    max_step_q: float,
-    gap_q: float,
-    bounds_buffer_deg: float,
-) -> str:
-    payload_dict = {
-        "type": "parametric" if parametric else "empirical",
-        "num_candidates": int(num_candidates),
-        "random_seed": int(random_seed),
-        "step_multiplier": float(step_multiplier),
-        "step_q": float(step_q),
-        "max_step_q": float(max_step_q),
-        "gap_q": float(gap_q),
-        "bounds_buffer_deg": float(bounds_buffer_deg),
+def _sampler_payload_dict(sampler: SamplerConfig | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(sampler, SamplerConfig):
+        return {
+            "type": str(sampler.type),
+            "num_candidates": int(sampler.num_candidates),
+            "random_seed": int(sampler.random_seed),
+        }
+    return {
+        "type": str(sampler["type"]),
+        "num_candidates": int(sampler["num_candidates"]),
+        "random_seed": int(sampler["random_seed"]),
     }
+
+
+def sampler_hash(sampler: SamplerConfig | dict[str, Any]) -> str:
+    payload_dict = _sampler_payload_dict(sampler)
     payload = _stable_payload(payload_dict)
     parts = [
-        f"tp{'par' if parametric else 'emp'}",
-        f"nc{int(num_candidates)}",
-        f"rs{int(random_seed)}",
-        f"sm{_format_slug_number(float(step_multiplier))}",
-        f"sq{_format_slug_number(float(step_q))}",
-        f"msq{_format_slug_number(float(max_step_q))}",
-        f"gq{_format_slug_number(float(gap_q))}",
-        f"bb{_format_slug_number(float(bounds_buffer_deg))}",
+        f"tp{'par' if payload_dict['type'] == 'parametric' else 'emp'}",
+        f"nc{payload_dict['num_candidates']}",
+        f"rs{payload_dict['random_seed']}",
     ]
     return _truncate_key("-".join(parts), payload=payload)
 
 
-def resolve_sampler_hash(
-    *,
-    sampler_type: SamplerType,
-    num_candidates: int | None = None,
-    random_seed: int | None = None,
-    step_multiplier: float | None = None,
-    step_q: float | None = None,
-    max_step_q: float | None = None,
-    gap_q: float | None = None,
-    bounds_buffer_deg: float | None = None,
-) -> str:
-    return sampler_hash(
-        parametric=str(sampler_type) == "parametric",
-        num_candidates=DEFAULT_NUM_CANDIDATES
-        if num_candidates is None
-        else int(num_candidates),
-        random_seed=DEFAULT_RANDOM_SEED if random_seed is None else int(random_seed),
-        step_multiplier=DEFAULT_STEP_MULTIPLIER
-        if step_multiplier is None
-        else float(step_multiplier),
-        step_q=DEFAULT_STEP_Q if step_q is None else float(step_q),
-        max_step_q=DEFAULT_MAX_STEP_Q if max_step_q is None else float(max_step_q),
-        gap_q=DEFAULT_GAP_Q if gap_q is None else float(gap_q),
-        bounds_buffer_deg=DEFAULT_BOUNDS_BUFFER_DEG
-        if bounds_buffer_deg is None
-        else float(bounds_buffer_deg),
-    )
+def resolve_sampler_hash(sampler: SamplerConfig | dict[str, Any]) -> str:
+    return sampler_hash(sampler)
 
 
 def point_stores_dir(*, study_dir: Path, split: str, rasters_hash: str) -> Path:
@@ -248,98 +192,83 @@ def load_point_store_bands(
 @dataclass(frozen=True)
 class _StepRequest:
     point_id_start: int
+    point_id_end: int
     timestamp: Any
+    timestamp_end: Any
     start_lon: float
     start_lat: float
     start_bearing: float
     end_lon: float
     end_lat: float
+    actual_step_time_s: float
+    step_time_error_s: float
 
 
-def build_train_sampler(
-    train_df: pd.DataFrame,
+def _fit_sampler_state(
     *,
-    parametric: bool,
-    num_candidates: int,
-    random_seed: int,
-    step_multiplier: float,
-    step_q: float,
-    max_step_q: float,
-    gap_q: float,
-    bounds_buffer_deg: float,
+    step_lengths_m: np.ndarray,
+    turn_angles_rad: np.ndarray,
+    sampler_config: SamplerConfig,
+    step_spec: FixedStepSpec,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    """Fit/train-only movement sampler for candidate generation."""
-    valid_lengths = train_df.loc[train_df["valid_step"], "step_length_m"].to_numpy(
-        dtype=np.float64
-    )
-    valid_turns = train_df["turn_angle_rad"].dropna().to_numpy(dtype=np.float64)
+    valid_lengths = np.asarray(step_lengths_m, dtype=np.float64)
+    valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
+    valid_turns = np.asarray(turn_angles_rad, dtype=np.float64)
+    valid_turns = valid_turns[np.isfinite(valid_turns)]
 
     if len(valid_lengths) == 0:
         raise ValueError(
-            "No valid step lengths in train split; cannot build candidate sampler"
+            "No valid interval step lengths in train split; cannot build candidate sampler"
         )
     if len(valid_turns) == 0:
         raise ValueError(
-            "No valid turn angles in train split; cannot build candidate sampler"
+            "No valid interval turn angles in train split; cannot build candidate sampler"
         )
 
-    max_step_len = (
-        float(train_df["max_step_len"].iloc[0]) if len(train_df) else float("nan")
+    max_step_len_m_train = compute_step_length_extent_m(
+        valid_lengths,
+        step_q=float(step_spec.step_q),
+        max_step_q=float(step_spec.max_step_q),
+        step_multiplier=float(step_spec.step_multiplier),
     )
 
-    sampler: dict[str, Any] = {
-        "type": "parametric" if parametric else "empirical",
+    sampler = {
+        "type": str(sampler_config.type),
         "fit_source_split": "train",
-        "num_candidates": int(num_candidates),
-        "random_seed": int(random_seed),
-        "step_multiplier": float(step_multiplier),
-        "step_q": float(step_q),
-        "max_step_q": float(max_step_q),
-        "gap_q": float(gap_q),
-        "bounds_buffer_deg": float(bounds_buffer_deg),
+        "num_candidates": int(sampler_config.num_candidates),
+        "random_seed": int(sampler_config.random_seed),
         "n_valid_lengths_train": int(len(valid_lengths)),
         "n_valid_turns_train": int(len(valid_turns)),
-        "max_step_len_m_train": float(max_step_len),
+        "max_step_len_m_train": float(max_step_len_m_train),
     }
-
     state: dict[str, Any] = {
         "valid_lengths": valid_lengths,
         "valid_turns": valid_turns,
-        "num_candidates": int(num_candidates),
-        "random_seed": int(random_seed),
+        "num_candidates": int(sampler_config.num_candidates),
+        "random_seed": int(sampler_config.random_seed),
         "gamma_used": False,
         "gamma_params": None,
         "vonmises_used": False,
         "vonmises_params": None,
     }
 
-    if parametric:
+    if str(sampler_config.type) == "parametric":
         gamma_used = False
-        vonmises_used = False
         gamma_params = None
+        vonmises_used = False
         vonmises_params = None
-
         try:
-            try:
-                gamma_params = stats.gamma.fit(valid_lengths, floc=0)
-                gamma_used = True
-            except Exception:
-                gamma_used = False
-                gamma_params = None
-
-            try:
-                vonmises_params = stats.vonmises.fit(valid_turns)
-                vonmises_used = True
-            except Exception:
-                vonmises_used = False
-                vonmises_params = None
-
+            gamma_params = stats.gamma.fit(valid_lengths, floc=0)
+            gamma_used = True
         except Exception:
-            gamma_used = False
-            vonmises_used = False
             gamma_params = None
+            gamma_used = False
+        try:
+            vonmises_params = stats.vonmises.fit(valid_turns)
+            vonmises_used = True
+        except Exception:
             vonmises_params = None
-
+            vonmises_used = False
         sampler["gamma"] = {
             "used": bool(gamma_used),
             "params": [float(x) for x in gamma_params]
@@ -352,25 +281,25 @@ def build_train_sampler(
             if vonmises_used and vonmises_params is not None
             else None,
         }
-
         state["gamma_used"] = bool(gamma_used)
         state["gamma_params"] = gamma_params
         state["vonmises_used"] = bool(vonmises_used)
         state["vonmises_params"] = vonmises_params
 
-    return (
-        sampler,
-        state,
-        sampler_hash(
-            parametric=parametric,
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        ),
+    return sampler, state, sampler_hash(sampler_config)
+
+
+def build_train_sampler(
+    train_steps: pd.DataFrame,
+    *,
+    sampler_config: SamplerConfig,
+    step_spec: FixedStepSpec,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    return _fit_sampler_state(
+        step_lengths_m=train_steps["step_length_m"].to_numpy(dtype=np.float64),
+        turn_angles_rad=train_steps["turn_angle_rad"].to_numpy(dtype=np.float64),
+        sampler_config=sampler_config,
+        step_spec=step_spec,
     )
 
 
@@ -382,15 +311,13 @@ def _sample_from_raster(
     *,
     bilinear: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample raster at point locations (EPSG:4326) in raster's native CRS."""
-
     arr = raster.array
     transform = raster.transform
     src_crs = raster.crs
     nodata = raster.nodata
 
-    C, H, W = arr.shape
-    N = int(len(lons))
+    c_channels, height, width = arr.shape
+    n_points = int(len(lons))
 
     transformer = Transformer.from_crs(WGS84_CRS, src_crs, always_xy=True)
     xs, ys = transformer.transform(lons, lats)
@@ -414,20 +341,19 @@ def _sample_from_raster(
         arr_clean = np.where(nodata_mask, arr, 0.0).astype(np.float32, copy=False)
         arr_t = torch.from_numpy(arr_clean)
 
-        in_bounds = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
-        rows_clamped = np.clip(rows, 0, H - 1)
-        cols_clamped = np.clip(cols, 0, W - 1)
+        in_bounds = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+        rows_clamped = np.clip(rows, 0, height - 1)
+        cols_clamped = np.clip(cols, 0, width - 1)
 
-        x_norm = 2.0 * (cols_clamped / max(W - 1, 1)) - 1.0
-        y_norm = 2.0 * (rows_clamped / max(H - 1, 1)) - 1.0
-
+        x_norm = 2.0 * (cols_clamped / max(width - 1, 1)) - 1.0
+        y_norm = 2.0 * (rows_clamped / max(height - 1, 1)) - 1.0
         grid = torch.stack(
             [
                 torch.tensor(x_norm, dtype=torch.float32),
                 torch.tensor(y_norm, dtype=torch.float32),
             ],
             dim=-1,
-        ).view(1, N, 1, 2)
+        ).view(1, n_points, 1, 2)
 
         samples = (
             F.grid_sample(
@@ -454,16 +380,22 @@ def _sample_from_raster(
             .squeeze(-1)
         )
 
-        valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(C, -1)
+        valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(
+            c_channels, -1
+        )
         valid_t = valid_t & (mask_interp > 0.99)
         return samples, valid_t
 
-    rows_int = np.clip(np.round(rows).astype(int), 0, H - 1)
-    cols_int = np.clip(np.round(cols).astype(int), 0, W - 1)
-    in_bounds = (rows >= -0.5) & (rows < H - 0.5) & (cols >= -0.5) & (cols < W - 0.5)
+    rows_int = np.clip(np.round(rows).astype(int), 0, height - 1)
+    cols_int = np.clip(np.round(cols).astype(int), 0, width - 1)
+    in_bounds = (rows >= -0.5) & (rows < height - 0.5) & (cols >= -0.5) & (
+        cols < width - 0.5
+    )
 
     samples = torch.from_numpy(arr[:, rows_int, cols_int]).float()
-    valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(C, -1)
+    valid_t = torch.tensor(in_bounds, dtype=torch.bool).unsqueeze(0).expand(
+        c_channels, -1
+    )
     valid_t = valid_t & torch.from_numpy(nodata_mask[:, rows_int, cols_int])
     return samples, valid_t
 
@@ -487,13 +419,9 @@ def _sample_pseudo_steps(
 ) -> tuple[np.ndarray, np.ndarray]:
     seed = _step_seed(int(state["random_seed"]), int(point_id_start))
     rng = np.random.default_rng(seed)
-
     valid_lengths = state["valid_lengths"]
     valid_turns = state["valid_turns"]
     n = int(state["num_candidates"])
-
-    pseudo_lens: np.ndarray
-    pseudo_turns: np.ndarray
 
     if state.get("gamma_used", False) and state.get("gamma_params") is not None:
         pseudo_lens = stats.gamma.rvs(
@@ -512,7 +440,6 @@ def _sample_pseudo_steps(
         pseudo_turns = rng.choice(valid_turns, size=n, replace=True).astype(
             np.float64, copy=False
         )
-
     return pseudo_lens, pseudo_turns
 
 
@@ -529,7 +456,6 @@ def _compute_candidates(
     req: _StepRequest,
     *,
     sampler_state: dict[str, Any],
-    bounds_buffer_deg: float,
 ) -> _CandidateSet:
     pseudo_lens, pseudo_turns = _sample_pseudo_steps(sampler_state, req.point_id_start)
 
@@ -542,14 +468,9 @@ def _compute_candidates(
 
     dx = pseudo_lens * np.sin(headings)
     dy = pseudo_lens * np.cos(headings)
-    xs = x0 + dx
-    ys = y0 + dy
+    xs = np.append(x0 + dx, x1)
+    ys = np.append(y0 + dy, y1)
 
-    # True endpoint appended last.
-    xs = np.append(xs, x1)
-    ys = np.append(ys, y1)
-
-    # Step lengths / turn angles for all candidates.
     true_sl = float(np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2))
     true_heading = float(np.arctan2(x1 - x0, y1 - y0))
     true_ta = true_heading - float(req.start_bearing)
@@ -561,13 +482,11 @@ def _compute_candidates(
     lons, lats = to_4326.transform(xs, ys)
     lons = np.asarray(lons, dtype=np.float64)
     lats = np.asarray(lats, dtype=np.float64)
-
-    b = float(bounds_buffer_deg)
     bounds_4326 = (
-        float(np.min(lons) - b),
-        float(np.min(lats) - b),
-        float(np.max(lons) + b),
-        float(np.max(lats) + b),
+        float(np.min(lons)),
+        float(np.min(lats)),
+        float(np.max(lons)),
+        float(np.max(lats)),
     )
 
     return _CandidateSet(
@@ -580,7 +499,7 @@ def _compute_candidates(
 
 
 def _ensure_timestamp_ns(ts: Any) -> int:
-    if hasattr(ts, "value"):  # pandas Timestamp
+    if hasattr(ts, "value"):
         return int(ts.value)
     if hasattr(ts, "timestamp"):
         return int(float(ts.timestamp()) * 1e9)
@@ -590,23 +509,30 @@ def _ensure_timestamp_ns(ts: Any) -> int:
 def _extract_one_step(
     req: _StepRequest,
     *,
-    io,
+    io: LayerIO,
     plan: LayerPlan,
     layer_slices: dict[str, tuple[int, int]],
     sampler_state: dict[str, Any],
-    bounds_buffer_deg: float,
 ) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
+    int,
+    int,
+    float,
+    float,
 ]:
-    cand = _compute_candidates(
-        req, sampler_state=sampler_state, bounds_buffer_deg=bounds_buffer_deg
-    )
-    P = int(len(cand.lons))
-    C = int(plan.num_channels())
+    cand = _compute_candidates(req, sampler_state=sampler_state)
+    points_per_step = int(len(cand.lons))
+    n_channels = int(plan.num_channels())
 
-    env = torch.zeros((C, P), dtype=torch.float32)
-    valid = torch.zeros((C, P), dtype=torch.bool)
-
+    env = torch.zeros((n_channels, points_per_step), dtype=torch.float32)
+    valid = torch.zeros((n_channels, points_per_step), dtype=torch.bool)
     cache: dict[str, Raster] = {}
 
     def get_raster(layer: str) -> Raster:
@@ -619,7 +545,6 @@ def _extract_one_step(
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
             parents = {p: get_raster(p) for p in spec.derived_from}
-
             fn = getattr(derived, f"compute_{layer}", None)
             if fn is None:
                 raise ValueError(
@@ -627,7 +552,6 @@ def _extract_one_step(
                 )
             arr = fn(**parents)
             base = parents[spec.derived_from[0]]
-
             r = Raster(
                 array=arr,
                 transform=base.transform,
@@ -645,28 +569,22 @@ def _extract_one_step(
             bounds_latlon=cand.bounds_4326,
             timestamp=req.timestamp,
         )
-
         cache[layer] = r
         return r
 
     for layer in plan.layers_in_order:
         start, end = layer_slices[layer]
         spec = REGISTRY.get(layer)
-
         bilinear = not spec.categorical
-
         r = get_raster(layer)
         vals, vmask = _sample_from_raster(r, cand.lons, cand.lats, bilinear=bilinear)
 
         if spec.categorical:
-            # Expect a single band with integer class labels.
             class_vals = vals.squeeze(0).to(torch.int64)
             class_vals = torch.clamp(class_vals, 0, int(spec.num_classes) - 1)
             one_hot = F.one_hot(class_vals, int(spec.num_classes)).T.to(torch.float32)
             vexp = vmask.expand(int(spec.num_classes), -1)
-            one_hot = one_hot * vexp.to(one_hot.dtype)
-
-            env[start:end] = one_hot
+            env[start:end] = one_hot * vexp.to(one_hot.dtype)
             valid[start:end] = vexp
             continue
 
@@ -674,9 +592,7 @@ def _extract_one_step(
         env[start:end] = vals
         valid[start:end] = vmask
 
-    # Invalid pixels must be materialized as 0.0 in env.
     env = torch.where(valid, env, torch.zeros_like(env))
-
     return (
         env.numpy(),
         valid.numpy(),
@@ -685,26 +601,25 @@ def _extract_one_step(
         cand.step_lengths_m,
         cand.turn_angles_rad,
         int(req.point_id_start),
+        int(req.point_id_end),
         _ensure_timestamp_ns(req.timestamp),
+        _ensure_timestamp_ns(req.timestamp_end),
+        float(req.actual_step_time_s),
+        float(req.step_time_error_s),
     )
 
-
-# ---- multiprocessing wiring ----
 
 _W_IO = None
 _W_PLAN = None
 _W_LAYER_SLICES = None
 _W_SAMPLER_STATE = None
-_W_BOUNDS_BUFFER_DEG = None
 
 
 def _worker_init(ctx: dict[str, Any]) -> None:
-    global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE, _W_BOUNDS_BUFFER_DEG
-
+    global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE
     _W_PLAN = LayerPlan.from_dict(ctx["plan_dict"])
     _W_LAYER_SLICES = {k: tuple(v) for k, v in ctx["layer_slices"].items()}
     _W_SAMPLER_STATE = ctx["sampler_state"]
-    _W_BOUNDS_BUFFER_DEG = float(ctx["bounds_buffer_deg"])
     _W_IO = LayerIO(study_dir=Path(ctx["study_dir"]), plan=_W_PLAN)
 
 
@@ -720,6 +635,10 @@ def _worker_run(
     np.ndarray,
     int,
     int,
+    int,
+    int,
+    float,
+    float,
 ]:
     idx, req = args
     out = _extract_one_step(
@@ -728,7 +647,6 @@ def _worker_run(
         plan=_W_PLAN,
         layer_slices=_W_LAYER_SLICES,
         sampler_state=_W_SAMPLER_STATE,
-        bounds_buffer_deg=_W_BOUNDS_BUFFER_DEG,
     )
     return (idx,) + out
 
@@ -745,6 +663,7 @@ def _subset_plan_for_band_ids(plan: LayerPlan, band_ids: list[str]) -> LayerPlan
         layers_in_order.append(ch.layer)
     return LayerPlan(
         rasters_hash=str(plan.rasters_hash),
+        step=plan.step,
         layers_in_order=layers_in_order,
         channels=channels,
         chip_groups={k: dict(v) for k, v in plan.chip_groups.items()},
@@ -765,12 +684,16 @@ def _build_step_requests(steps: pd.DataFrame) -> list[_StepRequest]:
         reqs.append(
             _StepRequest(
                 point_id_start=int(row.point_id_start),
+                point_id_end=int(row.point_id_end),
                 timestamp=pd.Timestamp(row.timestamp),
+                timestamp_end=pd.Timestamp(row.timestamp_end),
                 start_lon=float(row.start_lon),
                 start_lat=float(row.start_lat),
                 start_bearing=float(row.start_bearing),
                 end_lon=float(row.end_lon),
                 end_lat=float(row.end_lat),
+                actual_step_time_s=float(row.actual_step_time_s),
+                step_time_error_s=float(row.step_time_error_s),
             )
         )
     return reqs
@@ -783,7 +706,6 @@ def _extract_env_block(
     plan: LayerPlan,
     reqs: list[_StepRequest],
     sampler_state: dict[str, Any],
-    bounds_buffer_deg: float,
     n_workers: int,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     n_steps = int(len(reqs))
@@ -797,22 +719,39 @@ def _extract_env_block(
         "step_length_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "turn_angle_rad": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "point_id_start": torch.zeros((n_steps,), dtype=torch.int64),
+        "point_id_end": torch.zeros((n_steps,), dtype=torch.int64),
         "timestamp_ns": torch.zeros((n_steps,), dtype=torch.int64),
+        "timestamp_end_ns": torch.zeros((n_steps,), dtype=torch.int64),
+        "actual_step_time_s": torch.zeros((n_steps,), dtype=torch.float32),
+        "step_time_error_s": torch.zeros((n_steps,), dtype=torch.float32),
     }
     layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
     if n_workers <= 1:
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
-        for i, req in enumerate(
-            tqdm(reqs, total=n_steps, desc=f"{study_id}:{plan.rasters_hash} steps")
+        iterator = enumerate(reqs)
+        for i, req in tqdm(
+            iterator, total=n_steps, desc=f"{study_id}:{plan.rasters_hash} steps"
         ):
-            e, v, lons, lats, sl, ta, pid, tsn = _extract_one_step(
+            (
+                e,
+                v,
+                lons,
+                lats,
+                sl,
+                ta,
+                pid_start,
+                pid_end,
+                ts_start,
+                ts_end,
+                actual_step_time_s,
+                step_time_error_s,
+            ) = _extract_one_step(
                 req,
                 io=io,
                 plan=plan,
                 layer_slices=layer_slices,
                 sampler_state=sampler_state,
-                bounds_buffer_deg=bounds_buffer_deg,
             )
             env[i] = torch.from_numpy(e)
             valid[i] = torch.from_numpy(v)
@@ -820,8 +759,12 @@ def _extract_env_block(
             shared["candidate_lat"][i] = torch.from_numpy(lats)
             shared["step_length_m"][i] = torch.from_numpy(sl)
             shared["turn_angle_rad"][i] = torch.from_numpy(ta)
-            shared["point_id_start"][i] = int(pid)
-            shared["timestamp_ns"][i] = int(tsn)
+            shared["point_id_start"][i] = int(pid_start)
+            shared["point_id_end"][i] = int(pid_end)
+            shared["timestamp_ns"][i] = int(ts_start)
+            shared["timestamp_end_ns"][i] = int(ts_end)
+            shared["actual_step_time_s"][i] = float(actual_step_time_s)
+            shared["step_time_error_s"][i] = float(step_time_error_s)
     else:
         ctx = mp.get_context("spawn")
         init_ctx = {
@@ -829,7 +772,6 @@ def _extract_env_block(
             "plan_dict": plan.to_dict(),
             "layer_slices": {k: list(v) for k, v in layer_slices.items()},
             "sampler_state": sampler_state,
-            "bounds_buffer_deg": float(bounds_buffer_deg),
         }
         with ctx.Pool(
             processes=int(n_workers),
@@ -837,7 +779,21 @@ def _extract_env_block(
             initargs=(init_ctx,),
             maxtasksperchild=200,
         ) as pool:
-            for idx, e, v, lons, lats, sl, ta, pid, tsn in tqdm(
+            for (
+                idx,
+                e,
+                v,
+                lons,
+                lats,
+                sl,
+                ta,
+                pid_start,
+                pid_end,
+                ts_start,
+                ts_end,
+                actual_step_time_s,
+                step_time_error_s,
+            ) in tqdm(
                 pool.imap_unordered(_worker_run, list(enumerate(reqs)), chunksize=10),
                 total=n_steps,
                 desc=f"{study_id}:{plan.rasters_hash} steps",
@@ -848,8 +804,12 @@ def _extract_env_block(
                 shared["candidate_lat"][idx] = torch.from_numpy(lats)
                 shared["step_length_m"][idx] = torch.from_numpy(sl)
                 shared["turn_angle_rad"][idx] = torch.from_numpy(ta)
-                shared["point_id_start"][idx] = int(pid)
-                shared["timestamp_ns"][idx] = int(tsn)
+                shared["point_id_start"][idx] = int(pid_start)
+                shared["point_id_end"][idx] = int(pid_end)
+                shared["timestamp_ns"][idx] = int(ts_start)
+                shared["timestamp_end_ns"][idx] = int(ts_end)
+                shared["actual_step_time_s"][idx] = float(actual_step_time_s)
+                shared["step_time_error_s"][idx] = float(step_time_error_s)
 
     return env, valid, shared
 
@@ -874,6 +834,26 @@ def _band_meta(
     }
 
 
+def _manifest_matches_request(
+    manifest: PointFeatureManifest,
+    *,
+    plan: LayerPlan,
+    sampler_hash_value: str,
+    points_per_step: int,
+) -> bool:
+    return (
+        manifest.schema_version == "3"
+        and manifest.rasters_hash == str(plan.rasters_hash)
+        and manifest.sampler_hash == str(sampler_hash_value)
+        and manifest.extraction.get("step_selector") == "interval"
+        and int(manifest.extraction.get("step_time_s", -1))
+        == int(plan.step_spec.step_time_s)
+        and float(manifest.extraction.get("gap_q", float("nan")))
+        == float(plan.step_spec.gap_q)
+        and int(manifest.extraction.get("points_per_step", -1)) == int(points_per_step)
+    )
+
+
 def extract_split_feature_store(
     *,
     study_id: str,
@@ -884,12 +864,9 @@ def extract_split_feature_store(
     sampler: dict[str, Any],
     sampler_state: dict[str, Any],
     sampler_hash: str,
-    num_candidates: int,
-    bounds_buffer_deg: float,
     n_workers: int,
     skip_existing: bool,
 ) -> dict[str, Any]:
-    """Extract one split into a point feature store on disk."""
     out_dir = point_store_dir(
         study_dir=Path(study_dir),
         split=str(split),
@@ -899,17 +876,38 @@ def extract_split_feature_store(
     manifest_path = out_dir / "manifest.json"
     shared_path = out_dir / "shared.pt"
 
+    steps = select_step_starts(
+        df_split,
+        step_time_s=int(plan.step_spec.step_time_s),
+        gap_q=float(plan.step_spec.gap_q),
+    )
+    reqs = _build_step_requests(steps)
+    n_steps = int(len(reqs))
+    points_per_step = int(sampler["num_candidates"]) + 1
+
     existing_manifest: PointFeatureManifest | None = None
+    rebuild_store = False
     if manifest_path.exists():
-        existing_manifest = read_manifest(manifest_path)
-        if existing_manifest.rasters_hash != str(plan.rasters_hash):
-            raise ValueError(
-                "Existing manifest rasters_hash does not match requested plan"
-            )
-        if existing_manifest.sampler_hash != str(sampler_hash):
-            raise ValueError(
-                "Existing manifest sampler_hash does not match requested sampler_hash"
-            )
+        try:
+            existing_manifest = read_manifest(manifest_path)
+        except Exception:
+            rebuild_store = True
+            existing_manifest = None
+        else:
+            if not _manifest_matches_request(
+                existing_manifest,
+                plan=plan,
+                sampler_hash_value=sampler_hash,
+                points_per_step=points_per_step,
+            ):
+                rebuild_store = True
+                existing_manifest = None
+            elif not shared_path.exists():
+                rebuild_store = True
+                existing_manifest = None
+
+    if rebuild_store and out_dir.exists():
+        shutil.rmtree(out_dir)
 
     existing_band_ids = (
         set(existing_manifest.bands.keys()) if existing_manifest is not None else set()
@@ -932,21 +930,9 @@ def extract_split_feature_store(
             "n_steps": int(existing_manifest.shared["shared.pt"]["shape"][0]),
         }
 
-    steps = select_step_starts(
-        df_split,
-        step_multiplier=float(sampler["step_multiplier"]),
-        step_q=float(sampler["step_q"]),
-        max_step_q=float(sampler["max_step_q"]),
-        gap_q=float(sampler["gap_q"]),
-    )
-    reqs = _build_step_requests(steps)
-    n_steps = int(len(reqs))
-    points_per_step = int(num_candidates) + 1
-
     if existing_manifest is None:
         write_band_ids = requested_band_ids
         write_plan = plan
-        missing_band_ids = requested_band_ids
     else:
         write_band_ids = missing_band_ids
         write_plan = (
@@ -955,7 +941,6 @@ def extract_split_feature_store(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    shared_data: dict[str, torch.Tensor]
     if existing_manifest is None:
         env, valid, shared_data = _extract_env_block(
             study_id=study_id,
@@ -963,7 +948,6 @@ def extract_split_feature_store(
             plan=write_plan,
             reqs=reqs,
             sampler_state=sampler_state,
-            bounds_buffer_deg=bounds_buffer_deg,
             n_workers=n_workers,
         )
         _torch_atomic_save(shared_data, shared_path)
@@ -971,8 +955,18 @@ def extract_split_feature_store(
         shared_data = torch.load(shared_path, map_location="cpu")
         shape = list(existing_manifest.shared["shared.pt"]["shape"])
         if shape != [n_steps, points_per_step]:
-            raise ValueError(
-                f"Existing shared.pt shape {shape} does not match requested [{n_steps}, {points_per_step}]"
+            shutil.rmtree(out_dir)
+            return extract_split_feature_store(
+                study_id=study_id,
+                study_dir=study_dir,
+                split=split,
+                df_split=df_split,
+                plan=plan,
+                sampler=sampler,
+                sampler_state=sampler_state,
+                sampler_hash=sampler_hash,
+                n_workers=n_workers,
+                skip_existing=skip_existing,
             )
         if write_band_ids:
             env, valid, _unused_shared = _extract_env_block(
@@ -981,7 +975,6 @@ def extract_split_feature_store(
                 plan=write_plan,
                 reqs=reqs,
                 sampler_state=sampler_state,
-                bounds_buffer_deg=bounds_buffer_deg,
                 n_workers=n_workers,
             )
 
@@ -995,13 +988,7 @@ def extract_split_feature_store(
         for i, channel in enumerate(write_plan.channels):
             band_id = channel.band_id
             band_path = out_dir / "bands" / f"{band_id}.pt"
-            if band_path.exists() and band_id not in existing_band_ids:
-                raise ValueError(
-                    f"Band file already exists but is not tracked in manifest: {band_path}"
-                )
-            _torch_atomic_save(
-                {"env": env[:, i, :], "valid": valid[:, i, :]}, band_path
-            )
+            _torch_atomic_save({"env": env[:, i, :], "valid": valid[:, i, :]}, band_path)
             bands_meta[band_id] = _band_meta(
                 band_id=band_id,
                 channel=channel,
@@ -1011,7 +998,7 @@ def extract_split_feature_store(
         assert n_write_channels == len(write_band_ids)
 
     manifest = PointFeatureManifest(
-        schema_version="2",
+        schema_version="3",
         study_id=str(study_id),
         split=str(split),
         created_at=utc_now_iso(),
@@ -1019,8 +1006,10 @@ def extract_split_feature_store(
         sampler_hash=str(sampler_hash),
         sampler=dict(sampler),
         extraction={
+            "step_selector": "interval",
+            "step_time_s": int(plan.step_spec.step_time_s),
+            "gap_q": float(plan.step_spec.gap_q),
             "points_per_step": int(points_per_step),
-            "bounds_buffer_deg": float(bounds_buffer_deg),
             "choice_policy": "last_is_true",
             "target_crs": TARGET_CRS,
         },
@@ -1045,45 +1034,27 @@ def extract_point_feature_stores(
     study_dir: Path,
     trajectories_path: Path,
     plan: LayerPlan,
+    sampler_config: SamplerConfig,
     splits: list[str] | None,
-    parametric: bool,
-    num_candidates: int,
-    random_seed: int,
     n_workers: int,
     skip_existing: bool,
-    step_multiplier: float,
-    step_q: float,
-    max_step_q: float,
-    gap_q: float,
-    bounds_buffer_deg: float,
 ) -> dict[str, Any]:
-    """Extract point feature stores for one study."""
     df = pd.read_csv(Path(trajectories_path))
-
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
 
     train_df = df[df[SET_COL] == "train"].copy()
     if len(train_df) == 0:
         raise ValueError("No training data found (set=='train'); cannot fit sampler")
-    train_df = compute_movement_features(
+    train_steps = select_step_starts(
         train_df,
-        step_multiplier=step_multiplier,
-        step_q=step_q,
-        max_step_q=max_step_q,
-        gap_q=gap_q,
+        step_time_s=int(plan.step_spec.step_time_s),
+        gap_q=float(plan.step_spec.gap_q),
     )
-
-    sampler, sampler_state, sampler_hash = build_train_sampler(
-        train_df,
-        parametric=parametric,
-        num_candidates=num_candidates,
-        random_seed=random_seed,
-        step_multiplier=step_multiplier,
-        step_q=step_q,
-        max_step_q=max_step_q,
-        gap_q=gap_q,
-        bounds_buffer_deg=bounds_buffer_deg,
+    sampler, sampler_state, sampler_hash_value = build_train_sampler(
+        train_steps,
+        sampler_config=sampler_config,
+        step_spec=plan.step_spec,
     )
 
     results: dict[str, Any] = {}
@@ -1097,9 +1068,7 @@ def extract_point_feature_stores(
             plan=plan,
             sampler=sampler,
             sampler_state=sampler_state,
-            sampler_hash=sampler_hash,
-            num_candidates=num_candidates,
-            bounds_buffer_deg=bounds_buffer_deg,
+            sampler_hash=sampler_hash_value,
             n_workers=n_workers,
             skip_existing=skip_existing,
         )
@@ -1107,6 +1076,6 @@ def extract_point_feature_stores(
     return {
         "study_id": str(study_id),
         "rasters_hash": plan.rasters_hash,
-        "sampler_hash": sampler_hash,
+        "sampler_hash": sampler_hash_value,
         "splits": results,
     }

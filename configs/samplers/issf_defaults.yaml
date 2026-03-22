@@ -1,0 +1,4 @@
+version: 1
+type: parametric
+num_candidates: 100
+random_seed: 0

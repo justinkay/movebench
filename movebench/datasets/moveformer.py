@@ -1,9 +1,4 @@
-"""MoveFormer dataset wrapper backed by MoveBench point feature stores.
-
-This integration reuses:
-- MoveBench's extracted iSSF point stores for candidate sets + env values, and
-- MoveFormer's upstream `SimpleTrajectoryProcessor.encode` for feature encoding.
-"""
+"""MoveFormer dataset wrapper backed by MoveBench point feature stores."""
 
 from __future__ import annotations
 
@@ -18,7 +13,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from movebench.datasets.ssf import _subset_plan_env_channels
+from movebench.datasets.ssf import _compute_movement_stats, _subset_plan_env_channels
+from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (
     load_point_store_bands,
@@ -30,17 +26,12 @@ from movebench.layers.constants import WGS84_CRS
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     INDIVIDUAL_COL,
-    LAT_COL,
-    LON_COL,
-    POINT_ID_COL,
     SET_COL,
-    TIME_COL,
-    compute_movement_features,
     load_trajectories_csv,
+    select_step_starts,
 )
 
 from pyproj import Transformer
-from movebench.datasets.ssf import _compute_movement_stats
 from movebench.lib.moveformer.geo_transformers.trajectory import (
     SimpleTrajectoryProcessor,
 )
@@ -48,49 +39,40 @@ from movebench.lib.moveformer.geo_transformers.trajectory import (
 
 @lru_cache(maxsize=1)
 def _crs_transformers():
-
     to_3857 = Transformer.from_crs(WGS84_CRS, "EPSG:3857", always_xy=True)
     to_4326 = Transformer.from_crs("EPSG:3857", WGS84_CRS, always_xy=True)
     return to_3857, to_4326
 
 
 def _timestamp_ns(ts: np.ndarray) -> np.ndarray:
-    # Expect dtype datetime64[ns]; use astype('datetime64[ns]') to be robust.
     ts64 = ts.astype("datetime64[ns]", copy=False)
     return ts64.astype("int64", copy=False)
 
 
 @dataclass(frozen=True)
 class _StepStarts:
-    point_id_start: np.ndarray  # (N,)
-    start_ts: np.ndarray  # (N,) datetime64[ns]
-    start_lon: np.ndarray  # (N,)
-    start_lat: np.ndarray  # (N,)
-    start_bearing: np.ndarray  # (N,)
-    end_ts: np.ndarray  # (N,) datetime64[ns]
-    end_lon: np.ndarray  # (N,)
-    end_lat: np.ndarray  # (N,)
-    individual: np.ndarray  # (N,) object/str
-    burst_id: np.ndarray  # (N,) int
+    point_id_start: np.ndarray
+    start_ts: np.ndarray
+    start_lon: np.ndarray
+    start_lat: np.ndarray
+    start_bearing: np.ndarray
+    end_ts: np.ndarray
+    end_lon: np.ndarray
+    end_lat: np.ndarray
+    individual: np.ndarray
+    burst_id: np.ndarray
 
 
 def _select_step_starts_with_targets(
     df_split: pd.DataFrame,
     *,
-    step_multiplier: float,
-    step_q: float,
-    max_step_q: float,
-    gap_q: float,
+    plan: LayerPlan,
 ) -> _StepStarts:
-    d = compute_movement_features(
+    starts = select_step_starts(
         df_split,
-        step_multiplier=float(step_multiplier),
-        step_q=float(step_q),
-        max_step_q=float(max_step_q),
-        gap_q=float(gap_q),
+        step_time_s=int(plan.step_spec.step_time_s),
+        gap_q=float(plan.step_spec.gap_q),
     )
-    starts = d[d["can_be_step_start"]].copy()
-    starts = starts[starts["next_index"].notna()].copy()
     if len(starts) == 0:
         return _StepStarts(
             point_id_start=np.zeros((0,), dtype=np.int64),
@@ -104,60 +86,22 @@ def _select_step_starts_with_targets(
             individual=np.zeros((0,), dtype=object),
             burst_id=np.zeros((0,), dtype=np.int64),
         )
-
-    next_idx = starts["next_index"].astype(int).to_numpy()
-    ends = d.loc[next_idx].copy()
-
-    starts = starts.reset_index(drop=True)
-    ends = ends.reset_index(drop=True)
-    if len(starts) != len(ends):
-        raise RuntimeError(
-            f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})"
-        )
-
-    out = _StepStarts(
-        point_id_start=starts[POINT_ID_COL].to_numpy(dtype=np.int64, copy=False),
-        # Use microsecond resolution so numpy.datetime64.item() returns datetime.datetime
-        # (MoveFormer's upstream encoder assumes that behavior).
-        start_ts=starts[TIME_COL].to_numpy(dtype="datetime64[us]", copy=False),
-        start_lon=starts[LON_COL].to_numpy(dtype=np.float64, copy=False),
-        start_lat=starts[LAT_COL].to_numpy(dtype=np.float64, copy=False),
-        start_bearing=starts["bearing"].to_numpy(dtype=np.float64, copy=False),
-        end_ts=ends[TIME_COL].to_numpy(dtype="datetime64[us]", copy=False),
-        end_lon=ends[LON_COL].to_numpy(dtype=np.float64, copy=False),
-        end_lat=ends[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+    return _StepStarts(
+        point_id_start=starts["point_id_start"].to_numpy(dtype=np.int64, copy=False),
+        start_ts=starts["timestamp"].to_numpy(dtype="datetime64[us]", copy=False),
+        start_lon=starts["start_lon"].to_numpy(dtype=np.float64, copy=False),
+        start_lat=starts["start_lat"].to_numpy(dtype=np.float64, copy=False),
+        start_bearing=starts["start_bearing"].to_numpy(dtype=np.float64, copy=False),
+        end_ts=starts["timestamp_end"].to_numpy(dtype="datetime64[us]", copy=False),
+        end_lon=starts["end_lon"].to_numpy(dtype=np.float64, copy=False),
+        end_lat=starts["end_lat"].to_numpy(dtype=np.float64, copy=False),
         individual=starts[INDIVIDUAL_COL].to_numpy(copy=False),
         burst_id=starts["burst_id"].to_numpy(dtype=np.int64, copy=False),
     )
 
-    finite = np.isfinite(
-        np.stack(
-            [out.start_lon, out.start_lat, out.start_bearing, out.end_lon, out.end_lat],
-            axis=1,
-        )
-    ).all(axis=1)
-    if not finite.all():
-        keep = finite
-        out = _StepStarts(
-            point_id_start=out.point_id_start[keep],
-            start_ts=out.start_ts[keep],
-            start_lon=out.start_lon[keep],
-            start_lat=out.start_lat[keep],
-            start_bearing=out.start_bearing[keep],
-            end_ts=out.end_ts[keep],
-            end_lon=out.end_lon[keep],
-            end_lat=out.end_lat[keep],
-            individual=out.individual[keep],
-            burst_id=out.burst_id[keep],
-        )
-    return out
-
 
 class MoveFormerPointStoreDataset(Dataset):
-    """Sequence dataset for MoveFormer selection model, built from point stores.
-
-    Each item is a variable-length segment (<= max_len) from one (individual, burst).
-    """
+    """Sequence dataset for MoveFormer selection model, built from point stores."""
 
     def __init__(
         self,
@@ -165,21 +109,20 @@ class MoveFormerPointStoreDataset(Dataset):
         study_dir: str | Path,
         trajectories_path: str | Path,
         plan: LayerPlan,
+        sampler_config: SamplerConfig,
         split: str,
         max_len: int = 500,
         min_len: int = 2,
         normalize_env: bool = True,
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
-        num_candidates: int | None = None,
-        random_seed: int | None = None,
-        step_multiplier: float | None = None,
-        step_q: float | None = None,
-        max_step_q: float | None = None,
-        gap_q: float | None = None,
-        bounds_buffer_deg: float | None = None,
     ) -> None:
         super().__init__()
+        if str(sampler_config.type) != "parametric":
+            raise ValueError(
+                f"MoveFormerPointStoreDataset requires a parametric sampler_config, got {sampler_config.type!r}"
+            )
+
         self.study_dir = Path(study_dir)
         self.trajectories_path = Path(trajectories_path)
         self.split = str(split)
@@ -189,16 +132,7 @@ class MoveFormerPointStoreDataset(Dataset):
         self.require_normalization_stats = bool(require_normalization_stats)
 
         requested_band_ids = plan.band_ids_in_order()
-        sampler_hash = resolve_sampler_hash(
-            sampler_type="parametric",
-            num_candidates=num_candidates,
-            random_seed=random_seed,
-            step_multiplier=step_multiplier,
-            step_q=step_q,
-            max_step_q=max_step_q,
-            gap_q=gap_q,
-            bounds_buffer_deg=bounds_buffer_deg,
-        )
+        sampler_hash = resolve_sampler_hash(sampler_config)
         store_dir, m = load_point_store_manifest(
             study_dir=self.study_dir,
             split=self.split,
@@ -283,7 +217,7 @@ class MoveFormerPointStoreDataset(Dataset):
                 self._mean, self._std = load_points_normalization_mean_std(
                     study_dir=self.study_dir,
                     plan=self.plan,
-                    sampler_hash=str(self.manifest.sampler_hash),
+                    sampler_config=sampler_config,
                 )
             except FileNotFoundError as e:
                 if self.require_normalization_stats:
@@ -301,23 +235,13 @@ class MoveFormerPointStoreDataset(Dataset):
                 )
                 self.normalize_env = False
 
-        # Load trajectories + compute step starts aligned to point store ordering.
         df = load_trajectories_csv(str(self.trajectories_path))
         df_split = df[df[SET_COL] == self.split].copy()
         if len(df_split) == 0:
             raise ValueError(
                 f"No trajectories found for split={self.split!r} in {self.trajectories_path}"
             )
-
-        # Recompute movement features with the same params used by point-store extraction.
-        sampler = self.manifest.sampler
-        self._starts = _select_step_starts_with_targets(
-            df_split,
-            step_multiplier=float(sampler["step_multiplier"]),
-            step_q=float(sampler["step_q"]),
-            max_step_q=float(sampler["max_step_q"]),
-            gap_q=float(sampler["gap_q"]),
-        )
+        self._starts = _select_step_starts_with_targets(df_split, plan=self.plan)
 
         n_steps = int(self.env.shape[0])
         if int(len(self._starts.point_id_start)) != n_steps:
@@ -325,7 +249,6 @@ class MoveFormerPointStoreDataset(Dataset):
                 f"Step-start count mismatch: point_store={n_steps} trajectories={len(self._starts.point_id_start)}"
             )
 
-        # Assert alignment by point_id_start + timestamp.
         pid_store = self.point_id_start.numpy()
         pid_traj = self._starts.point_id_start
         if not np.array_equal(pid_store, pid_traj):
@@ -344,7 +267,6 @@ class MoveFormerPointStoreDataset(Dataset):
                 f"{i}: store_ts_ns={int(ts_store[i])} traj_ts_ns={int(ts_traj[i])}"
             )
 
-        # Precompute previous-step index within (individual, burst_id).
         self._prev_idx = np.full((n_steps,), -1, dtype=np.int64)
         indiv = self._starts.individual
         burst = self._starts.burst_id
@@ -352,7 +274,6 @@ class MoveFormerPointStoreDataset(Dataset):
             if indiv[i] == indiv[i - 1] and int(burst[i]) == int(burst[i - 1]):
                 self._prev_idx[i] = i - 1
 
-        # Build segment slices (contiguous within burst).
         self._segments: list[tuple[int, int]] = []
         i = 0
         while i < n_steps:
@@ -361,7 +282,6 @@ class MoveFormerPointStoreDataset(Dataset):
                 j < n_steps and indiv[j] == indiv[i] and int(burst[j]) == int(burst[i])
             ):
                 j += 1
-
             group_len = j - i
             if group_len >= self.min_len:
                 for k in range(i, j, self.max_len):
@@ -385,12 +305,9 @@ class MoveFormerPointStoreDataset(Dataset):
             pass_through=["taxon", "cov", "cov_cand"],
         )
 
-        # Light sanity check: reconstructed true candidate matches the observed endpoint.
         n_check = min(25, n_steps)
         if n_check > 0:
-            lons_cand, lats_cand = self._reconstruct_candidates(
-                0, n_check
-            )  # (n_check,P)
+            lons_cand, lats_cand = self._reconstruct_candidates(0, n_check)
             lons_true = lons_cand[:, 0]
             lats_true = lats_cand[:, 0]
             max_err = float(
@@ -418,19 +335,14 @@ class MoveFormerPointStoreDataset(Dataset):
     def _reconstruct_candidates(
         self, start: int, end: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return (lons, lats) for candidates with MoveFormer ordering (true is index 0)."""
         to_3857, to_4326 = _crs_transformers()
 
         start_lon = self._starts.start_lon[start:end]
         start_lat = self._starts.start_lat[start:end]
         start_bearing = self._starts.start_bearing[start:end]
 
-        sl = (
-            self.step_length_m[start:end].numpy().astype(np.float64, copy=False)
-        )  # (L,P)
-        ta = (
-            self.turn_angle_rad[start:end].numpy().astype(np.float64, copy=False)
-        )  # (L,P)
+        sl = self.step_length_m[start:end].numpy().astype(np.float64, copy=False)
+        ta = self.turn_angle_rad[start:end].numpy().astype(np.float64, copy=False)
 
         x0, y0 = to_3857.transform(start_lon, start_lat)
         x0 = np.asarray(x0, dtype=np.float64)
@@ -439,7 +351,6 @@ class MoveFormerPointStoreDataset(Dataset):
         heading = start_bearing[:, None] + ta
         dx = sl * np.sin(heading)
         dy = sl * np.cos(heading)
-
         xs = x0[:, None] + dx
         ys = y0[:, None] + dy
 
@@ -447,16 +358,14 @@ class MoveFormerPointStoreDataset(Dataset):
         lons = np.asarray(lons, dtype=np.float64)
         lats = np.asarray(lats, dtype=np.float64)
 
-        # Reorder: true endpoint first.
         perm = self._cand_perm.numpy()
         return lons[:, perm], lats[:, perm]
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         start, end = self._segments[int(idx)]
-        L = int(end - start)
-        P = int(self.num_candidates_total)
+        segment_len = int(end - start)
+        num_candidates = int(self.num_candidates_total)
 
-        # --- trajectory core fields ---
         traj: dict[str, Any] = {
             "timestamp": self._starts.start_ts[start:end],
             "timestamp_tgt": self._starts.end_ts[start:end],
@@ -466,14 +375,12 @@ class MoveFormerPointStoreDataset(Dataset):
             "location_long_tgt": self._starts.end_lon[start:end],
         }
 
-        lons_cand, lats_cand = self._reconstruct_candidates(start, end)  # (L,P)
+        lons_cand, lats_cand = self._reconstruct_candidates(start, end)
         traj["location_long_cand"] = lons_cand
         traj["location_lat_cand"] = lats_cand
 
-        # --- env features from point store ---
-        env = self.env[start:end]  # (L,C,P)
-        valid = self.valid[start:end]  # (L,C,P)
-
+        env = self.env[start:end]
+        valid = self.valid[start:end]
         if self.normalize_env:
             assert self._mean is not None
             assert self._std is not None
@@ -481,52 +388,46 @@ class MoveFormerPointStoreDataset(Dataset):
             std = self._std.view(1, -1, 1)
             env = (env - mean) / std
 
-        # Index candidates into MoveFormer order.
         env = env.index_select(dim=2, index=self._cand_perm)
         valid = valid.index_select(dim=2, index=self._cand_perm)
-
-        cov_cand = (
-            env.permute(0, 2, 1).contiguous().numpy().astype(np.float32, copy=False)
-        )  # (L,P,C)
-        cov_v = valid.permute(0, 2, 1).contiguous().numpy()  # (L,P,C)
+        cov_cand = env.permute(0, 2, 1).contiguous().numpy().astype(
+            np.float32, copy=False
+        )
+        cov_v = valid.permute(0, 2, 1).contiguous().numpy()
         cov_cand = np.where(cov_v, cov_cand, np.float32(np.nan)).astype(
             np.float32, copy=False
         )
 
-        # Current-location env is previous step's target within the same burst.
         global_idxs = np.arange(start, end, dtype=np.int64)
         prev = self._prev_idx[global_idxs]
         has_prev = prev >= 0
 
-        cov_cur = np.full((L, int(self.cov_dim)), np.float32(np.nan), dtype=np.float32)
-
+        cov_cur = np.full(
+            (segment_len, int(self.cov_dim)), np.float32(np.nan), dtype=np.float32
+        )
         if bool(has_prev.any()):
             prev_idxs = prev[has_prev]
             prev_t = torch.from_numpy(prev_idxs.astype(np.int64, copy=False))
-            env_prev = self.env.index_select(dim=0, index=prev_t)  # (K,C,P)
-            valid_prev = self.valid.index_select(dim=0, index=prev_t)  # (K,C,P)
+            env_prev = self.env.index_select(dim=0, index=prev_t)
+            valid_prev = self.valid.index_select(dim=0, index=prev_t)
 
-            # Previous target is the true endpoint (original last candidate).
-            true_idx = int(P - 1)
+            true_idx = int(num_candidates - 1)
             cov_prev = env_prev[:, :, true_idx]
             if self.normalize_env:
                 assert self._mean is not None
                 assert self._std is not None
                 cov_prev = (cov_prev - self._mean.view(1, -1)) / self._std.view(1, -1)
 
-            cov_prev = (
-                cov_prev.contiguous().numpy().astype(np.float32, copy=False)
-            )  # (K,C)
-            cov_prev_v = valid_prev[:, :, true_idx].contiguous().numpy()  # (K,C)
+            cov_prev = cov_prev.contiguous().numpy().astype(np.float32, copy=False)
+            cov_prev_v = valid_prev[:, :, true_idx].contiguous().numpy()
             cov_prev = np.where(cov_prev_v, cov_prev, np.float32(np.nan)).astype(
                 np.float32, copy=False
             )
-
             cov_cur[has_prev] = cov_prev
 
         traj.update(
             {
-                "taxon": np.zeros((L, 100), dtype=np.float32),
+                "taxon": np.zeros((segment_len, 100), dtype=np.float32),
                 "cov": cov_cur,
                 "cov_cand": cov_cand,
             }

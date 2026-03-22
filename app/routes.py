@@ -100,7 +100,17 @@ def register_routes(app: FastAPI, *, studies_root: Path | None = None):
             from app.covariates import build_covariates_payload
 
             return JSONResponse(build_covariates_payload(study_id, config=config, point_id=point_id))
-        except ValueError as exc:
+        except (ValueError, FileNotFoundError) as exc:
+            return json_error(str(exc), 404)
+
+    @app.get("/api/artifacts/{study_id}/covariates/steps")
+    async def get_covariate_steps(study_id: str, config: str | None = None, point_id: int | None = None):
+        try:
+            resolve_study_dir(studies_root, study_id)
+            from app.covariates import build_covariate_steps_payload
+
+            return JSONResponse(build_covariate_steps_payload(study_id, config=config, point_id=point_id))
+        except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/artifacts/{study_id}/covariates/chip-groups/{group_name}/bands/{band_index}.png")
@@ -125,7 +135,7 @@ def register_routes(app: FastAPI, *, studies_root: Path | None = None):
                 ),
                 media_type="image/png",
             )
-        except ValueError as exc:
+        except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/artifacts/{study_id}/covariates/tile-layers/{layer}/bands/{band_index}.png")
@@ -150,7 +160,7 @@ def register_routes(app: FastAPI, *, studies_root: Path | None = None):
                 ),
                 media_type="image/png",
             )
-        except ValueError as exc:
+        except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/artifacts/{study_id}/covariates/derived-layers/{layer}/bands/{band_index}.png")
@@ -175,5 +185,5 @@ def register_routes(app: FastAPI, *, studies_root: Path | None = None):
                 ),
                 media_type="image/png",
             )
-        except ValueError as exc:
+        except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc), 404)
