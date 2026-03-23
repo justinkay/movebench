@@ -10,7 +10,16 @@ import pandas as pd
 from matplotlib import colormaps
 from movebench.layers import REGISTRY
 from movebench.study import Study
-from movebench.trajectories import prepare_interval_step_starts
+from movebench.trajectories import (
+    INDIVIDUAL_COL,
+    LAT_COL,
+    LON_COL,
+    POINT_ID_COL,
+    SET_COL,
+    fit_interval_gap_cutoffs,
+    fit_interval_step_length_cutoff_m,
+    select_step_starts,
+)
 from PIL import Image
 
 from app.configs import REPO_ROOT, resolve_layer_config
@@ -33,16 +42,10 @@ def _study_frame(study_id: str) -> tuple[Study, pd.DataFrame]:
 
 
 def _step_time_seconds(plan) -> int | None:
-    buffer_cfg = dict(getattr(plan, "raster_params", {}).get("buffer", {}) or {})
-    min_step_time_s = buffer_cfg.get("min_step_time_s")
-    max_step_time_s = buffer_cfg.get("max_step_time_s")
-    if (
-        min_step_time_s is None
-        or max_step_time_s is None
-        or int(min_step_time_s) != int(max_step_time_s)
-    ):
+    step = getattr(plan, "step", None)
+    if step is None:
         return None
-    return int(min_step_time_s)
+    return int(step.step_time_s)
 
 
 def _selectable_rows(df: pd.DataFrame, plan) -> pd.DataFrame:
@@ -50,31 +53,51 @@ def _selectable_rows(df: pd.DataFrame, plan) -> pd.DataFrame:
     if step_time_s is None:
         return df.copy()
 
-    buffer_cfg = dict(getattr(plan, "raster_params", {}).get("buffer", {}) or {})
-    prepared = prepare_interval_step_starts(
+    step = plan.step_spec
+    train_df = (
+        df[df[SET_COL] == "train"].copy()
+        if SET_COL in df.columns
+        else df.iloc[0:0]
+    )
+    fit_df = train_df if len(train_df) else df
+    if len(fit_df) == 0:
+        raise ValueError("No trajectory rows available to prepare interval steps")
+
+    gap_cutoffs = fit_interval_gap_cutoffs(fit_df, gap_q=float(step.gap_q))
+    max_step_length_m = fit_interval_step_length_cutoff_m(
+        fit_df,
+        step_time_s=int(step.step_time_s),
+        gap_q=float(step.gap_q),
+        gap_cutoffs=gap_cutoffs,
+        step_q=float(step.step_q),
+        max_step_q=float(step.max_step_q),
+        step_multiplier=float(step.step_multiplier),
+    )
+    starts = select_step_starts(
         df,
-        step_time_s=step_time_s,
-        gap_q=float(buffer_cfg.get("gap_q", 0.999)),
+        step_time_s=int(step.step_time_s),
+        gap_q=float(step.gap_q),
+        gap_cutoffs=gap_cutoffs,
+        max_step_length_m=float(max_step_length_m),
     )
-    valid = prepared.loc[prepared["valid_step_start"]].copy()
-    if len(valid) == 0:
-        raise ValueError("No valid interval steps available for the selected layer config")
+    if len(starts) == 0:
+        raise ValueError(
+            "No valid interval steps available for the selected layer config"
+        )
 
-    def _lookup_end(step_end_index: Any, column: str):
-        if pd.isna(step_end_index):
-            return None
-        index = int(step_end_index)
-        if index < 0 or index >= len(prepared):
-            return None
-        return prepared.iloc[index][column]
-
-    valid["step_end_point_id"] = valid["step_end_index"].map(
-        lambda value: _lookup_end(value, "point_id")
+    out = pd.DataFrame(
+        {
+            POINT_ID_COL: starts["point_id_start"].astype(int),
+            "step_end_point_id": starts["point_id_end"].astype(int),
+            "timestamp": starts["timestamp"],
+            "step_end_timestamp": starts["timestamp_end"],
+            LON_COL: starts["start_lon"].astype(float),
+            LAT_COL: starts["start_lat"].astype(float),
+            SET_COL: starts[SET_COL].astype(object),
+            INDIVIDUAL_COL: starts[INDIVIDUAL_COL].astype(object),
+        }
     )
-    valid["step_end_timestamp"] = valid["step_end_index"].map(
-        lambda value: _lookup_end(value, "timestamp")
-    )
-    return valid
+    return out
 
 
 def _default_point_row(df: pd.DataFrame) -> pd.Series:
