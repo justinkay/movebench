@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thumbnail Embedding Report</title>
+  <style>
+    :root {
+      --bg: #f5f0e6;
+      --panel: rgba(255,255,255,0.92);
+      --ink: #17211f;
+      --muted: #5a625e;
+      --line: rgba(23,33,31,0.14);
+      --shadow: 0 16px 34px rgba(17, 26, 24, 0.12);
+    }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(76, 123, 111, 0.14), transparent 28%),
+        linear-gradient(180deg, #faf7f1 0%, var(--bg) 100%);
+    }
+    .wrap { padding: 22px; }
+    .title {
+      margin: 0 0 14px 0;
+      font-size: 30px;
+      letter-spacing: -0.03em;
+    }
+    .subtitle {
+      margin: 0 0 22px 0;
+      color: var(--muted);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 1.3fr) minmax(280px, 0.9fr);
+      gap: 18px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+    .two-up {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(90px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(255,255,255,0.72);
+    }
+    .stat .k { color: var(--muted); font-size: 12px; }
+    .stat .v { font-size: 20px; font-weight: 600; }
+    canvas {
+      width: 100%;
+      height: 340px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: white;
+    }
+    .samples {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .sample {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px;
+      background: white;
+    }
+    .sample img {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: contain;
+      border-radius: 10px;
+      background: #f5f6f7;
+      display: block;
+    }
+    .sample .t {
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .sample .s {
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    pre {
+      white-space: pre-wrap;
+      font-size: 12px;
+      margin: 0;
+    }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .two-up { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="title">Thumbnail Embedding Report</h1>
+    <p class="subtitle">Run b38f3f1be382eb11</p>
+    <div class="layout">
+      <section class="panel">
+        <div class="two-up">
+          <div>
+            <h2>Current Run</h2>
+            <canvas id="current-canvas" width="560" height="340"></canvas>
+          </div>
+          <div>
+            <h2>Config</h2>
+            <pre id='config-panel'></pre>
+          </div>
+        </div>
+        <div class="stats" id="stats"></div>
+      </section>
+      <section class="panel">
+        <h2>Representative Thumbnails</h2>
+        <div class="samples" id="samples"></div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const DATA = {"current": {"run_id": "b38f3f1be382eb11", "config": {"data": {"csv_path": "/tmp/pytest-of-shir_bar/pytest-5/test_export_embedding_report_w0/demo.csv", "split": "train"}, "embedding": {"batch_size": 2, "device_preference": "auto", "image_size": 64, "model_name": "dinov2_vits14"}, "projection": {"method": "pca", "min_dist": 0.1, "n_neighbors": 10, "perplexity": 5.0, "random_state": 17}, "thumbnail": {"chunk_size": 2, "color_by": null, "img_size": 48, "line_width": 1, "marker_radius": 1, "min_chunk_size": 2, "padding": 2, "scale_mode": "chunk", "scale_quantile": 0.5, "stride": 1}}, "summary": {"label_counts": {"clean": 0, "has_algorithm_marked_outlier": 3, "has_any_outlier": 3, "has_manually_marked_outlier": 2, "overlap_state": {"algorithm + manual": 2, "algorithm only": 1}}, "n_chunks": 3, "n_individuals": 2, "split_counts": {"train": 3}}, "warnings": [], "points": [{"x": 0.00010114922770299017, "y": -2.4640337770165388e-08, "label": "algorithm only", "idx": 0}, {"x": -0.00020225797197781503, "y": -2.464823545267336e-08, "label": "algorithm + manual", "idx": 1}, {"x": 0.00010114922042703256, "y": -2.4646272578365824e-08, "label": "algorithm + manual", "idx": 2}]}, "baseline": null, "compare_summary": null, "samples": [{"idx": 0, "title": "bird-a | 2020-01-01T00:00:00", "subtitle": "algorithm only | outlier_frac=0.50", "thumb": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAAByaaZbAAAAMklEQVR42u3OsQ0AAAjDsML/P8MNGZAY0tlSk9xuUtCn4QU+0Ov1er1e/9sP8o1zaNAC4Msu2FVv7lsAAAAASUVORK5CYII="}, {"idx": 1, "title": "bird-a | 2020-01-01T01:00:00", "subtitle": "algorithm + manual | outlier_frac=1.00", "thumb": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAAByaaZbAAAASUlEQVR42u3RMRIAIQxC0c/9D802Fha6QzoLXhtwNEJVPctoFicuGEBYirOLBtn/gi9TTR+n8OBTwSRbE1hhdhUmv7Fdpaqe9AGJGQ4I19WmCAAAAABJRU5ErkJggg=="}, {"idx": 2, "title": "bird-b | 2020-01-01T00:30:00", "subtitle": "algorithm + manual | outlier_frac=0.50", "thumb": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAAByaaZbAAAAMklEQVR42u3OsQ0AAAjDsML/P8MNGZAY0tlSk9xuUtCn4QU+0Ov1er1e/9sP8o1zaNAC4Msu2FVv7lsAAAAASUVORK5CYII="}]};
+    const palette = {
+      "clean": "#2f7d4b",
+      "algorithm only": "#da6e2f",
+      "manual only": "#147a8a",
+      "algorithm + manual": "#9e3fcb",
+      "other outlier": "#c23c3c",
+    };
+    function drawScatter(canvasId, points) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !points || !points.length) return;
+      const ctx = canvas.getContext("2d");
+      const xs = points.map(p => p.x);
+      const ys = points.map(p => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const pad = 18;
+      const sx = (v) => pad + ((v - minX) / Math.max(1e-6, maxX - minX)) * (canvas.width - pad * 2);
+      const sy = (v) => canvas.height - pad - ((v - minY) / Math.max(1e-6, maxY - minY)) * (canvas.height - pad * 2);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (const p of points) {
+        ctx.fillStyle = palette[p.label] || "#6c7672";
+        ctx.beginPath();
+        ctx.arc(sx(p.x), sy(p.y), 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    drawScatter("current-canvas", DATA.current.points);
+    if (DATA.baseline) drawScatter("baseline-canvas", DATA.baseline.points);
+    const stats = document.getElementById("stats");
+    const summary = DATA.current.summary || {};
+    const statRows = [
+      ["Chunks", summary.n_chunks || 0],
+      ["Individuals", summary.n_individuals || 0],
+      ["Warnings", (DATA.current.warnings || []).length],
+    ];
+    if (DATA.compare_summary) statRows.push(["Shared Chunks", DATA.compare_summary.shared_chunk_ids || 0]);
+    stats.innerHTML = statRows.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    const samples = document.getElementById("samples");
+    samples.innerHTML = (DATA.samples || []).map((s) => `
+      <div class="sample">
+        <img src="${s.thumb}" alt="${s.title}" />
+        <div class="t">${s.title}</div>
+        <div class="s">${s.subtitle}</div>
+      </div>
+    `).join("");
+    const cfg = document.getElementById("config-panel");
+    if (cfg) cfg.textContent = JSON.stringify(DATA.current.config, null, 2);
+  </script>
+</body>
+</html>
