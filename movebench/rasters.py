@@ -76,17 +76,18 @@ def read_geotiff_window(
         else:
             bounds_in_ds = (min_lon, min_lat, max_lon, max_lat)
 
-        # Rasterio can produce empty windows for bounds smaller than 1 pixel.
-        # Convert to an integer window and force at least one pixel in each dim.
+        # Rasterio can produce empty windows for tiny bounds. Convert to an
+        # integer window and force at least 2 pixels in each dimension so
+        # downstream derived layers such as slope/aspect can compute gradients.
         win = from_bounds(*bounds_in_ds, transform=ds.transform)
         col0 = int(math.floor(win.col_off))
         row0 = int(math.floor(win.row_off))
         col1 = int(math.ceil(win.col_off + win.width))
         row1 = int(math.ceil(win.row_off + win.height))
-        if col1 <= col0:
-            col1 = col0 + 1
-        if row1 <= row0:
-            row1 = row0 + 1
+        if col1 <= col0 + 1:
+            col1 = col0 + 2
+        if row1 <= row0 + 1:
+            row1 = row0 + 2
         window = Window(col0, row0, col1 - col0, row1 - row0)
         b = window_bounds(window, ds.transform)
         win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
@@ -133,7 +134,8 @@ def merge_hdf_window(
         left, bottom, right, top = transform_bounds(
             WGS84_CRS, crs, min_lon, min_lat, max_lon, max_lat
         )
-        # Snap to >=1-pixel integer bounds in the dataset CRS (avoids 0x0 merges).
+        # Snap to >=2-pixel integer bounds in the dataset CRS so downstream
+        # derived layers have enough spatial support for gradient calculations.
         win = from_bounds(
             float(left),
             float(bottom),
@@ -145,10 +147,10 @@ def merge_hdf_window(
         row0 = int(math.floor(win.row_off))
         col1 = int(math.ceil(win.col_off + win.width))
         row1 = int(math.ceil(win.row_off + win.height))
-        if col1 <= col0:
-            col1 = col0 + 1
-        if row1 <= row0:
-            row1 = row0 + 1
+        if col1 <= col0 + 1:
+            col1 = col0 + 2
+        if row1 <= row0 + 1:
+            row1 = row0 + 2
         win_i = Window(col0, row0, col1 - col0, row1 - row0)
         b = window_bounds(win_i, datasets[0].transform)
         win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))

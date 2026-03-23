@@ -16,7 +16,14 @@ from movebench.layers import download as mb2dl
 from movebench.layers.config import load_layers_config
 from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
-from movebench.trajectories import POINT_ID_COL, SET_COL, TIME_COL, select_step_starts
+from movebench.trajectories import (
+    POINT_ID_COL,
+    SET_COL,
+    IntervalGapCutoffs,
+    fit_interval_gap_cutoffs,
+    load_trajectories_csv,
+    select_step_starts,
+)
 
 
 def _load_sampler(sampler_config: str | Path | SamplerConfig) -> SamplerConfig:
@@ -30,6 +37,8 @@ def _rows_for_raster_downloads(
     *,
     splits: list[str],
     plan: LayerPlan,
+    gap_cutoffs: IntervalGapCutoffs,
+    max_step_length_m: float | None = None,
 ) -> pd.DataFrame:
     sub = df[df[SET_COL].isin(splits)].copy()
     if len(sub) == 0:
@@ -38,6 +47,8 @@ def _rows_for_raster_downloads(
         sub,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
+        gap_cutoffs=gap_cutoffs,
+        max_step_length_m=max_step_length_m,
     )
     if len(starts) == 0:
         return sub.iloc[0:0].copy()
@@ -93,9 +104,7 @@ class Study:
         cfg = load_layers_config(layers_config)
         plan = REGISTRY.resolve(cfg)
 
-        df = pd.read_csv(self.trajectories_path)
-        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
-        df = df.dropna(subset=[TIME_COL])
+        df = load_trajectories_csv(self.trajectories_path)
 
         train_df = df[df[SET_COL] == "train"].copy()
         if len(train_df) == 0:
@@ -104,6 +113,7 @@ class Study:
             )
 
         step = plan.step_spec
+        gap_cutoffs = fit_interval_gap_cutoffs(train_df, gap_q=float(step.gap_q))
         extent_buffer_m = mb2dl.get_buffer_m_for_study(
             train_df,
             step_time_s=int(step.step_time_s),
@@ -116,7 +126,13 @@ class Study:
 
         if splits is None:
             splits = sorted(df[SET_COL].dropna().unique().tolist())
-        download_df = _rows_for_raster_downloads(df, splits=splits, plan=plan)
+        download_df = _rows_for_raster_downloads(
+            df,
+            splits=splits,
+            plan=plan,
+            gap_cutoffs=gap_cutoffs,
+            max_step_length_m=float(extent_buffer_m),
+        )
 
         clamp = cfg.raster_params["scale_clamp"]
         min_pixels = int(clamp["min_pixels"])

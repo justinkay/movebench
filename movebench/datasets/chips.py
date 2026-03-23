@@ -31,7 +31,8 @@ from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
-    compute_step_length_extent_m,
+    fit_interval_gap_cutoffs,
+    fit_interval_step_length_cutoff_m,
     load_trajectories_csv,
     select_step_starts,
 )
@@ -167,11 +168,32 @@ class ChipDataset(Dataset):
                     "ChipDataset(mode='steps') requires output_hw >= (2,2) to define a pixel size. "
                     f"Got output_hw={self.output_hw}."
                 )
+            df_train = df_all[df_all[SET_COL] == "train"].copy()
+            if len(df_train) == 0:
+                raise ValueError(
+                    "ChipDataset(mode='steps') requires a non-empty train split in trajectories.csv to define a "
+                    "deterministic chip extent. "
+                    f"Found no rows for set='train' in {self.trajectories_path}."
+                )
+            train_gap_cutoffs = fit_interval_gap_cutoffs(
+                df_train, gap_q=float(self.plan.step_spec.gap_q)
+            )
+            train_max_step_length_m = fit_interval_step_length_cutoff_m(
+                df_train,
+                step_time_s=int(self.plan.step_spec.step_time_s),
+                gap_q=float(self.plan.step_spec.gap_q),
+                gap_cutoffs=train_gap_cutoffs,
+                step_q=float(self.plan.step_spec.step_q),
+                max_step_q=float(self.plan.step_spec.max_step_q),
+                step_multiplier=float(self.plan.step_spec.step_multiplier),
+            )
 
             steps = select_step_starts(
                 df,
                 step_time_s=int(self.plan.step_spec.step_time_s),
                 gap_q=float(self.plan.step_spec.gap_q),
+                gap_cutoffs=train_gap_cutoffs,
+                max_step_length_m=train_max_step_length_m,
             )
             if len(steps) == 0:
                 raise ValueError(
@@ -194,25 +216,8 @@ class ChipDataset(Dataset):
                 WGS84_CRS, TARGET_CRS, always_xy=True
             )
 
-            df_train = df_all[df_all[SET_COL] == "train"].copy()
-            if len(df_train) == 0:
-                raise ValueError(
-                    "ChipDataset(mode='steps') requires a non-empty train split in trajectories.csv to define a "
-                    "deterministic chip extent. "
-                    f"Found no rows for set='train' in {self.trajectories_path}."
-                )
             try:
-                d_train = select_step_starts(
-                    df_train,
-                    step_time_s=int(self.plan.step_spec.step_time_s),
-                    gap_q=float(self.plan.step_spec.gap_q),
-                )
-                buffer_m = compute_step_length_extent_m(
-                    d_train["step_length_m"].to_numpy(dtype=np.float64, copy=False),
-                    step_q=float(self.plan.step_spec.step_q),
-                    step_multiplier=float(self.plan.step_spec.step_multiplier),
-                    max_step_q=float(self.plan.step_spec.max_step_q),
-                )
+                buffer_m = float(train_max_step_length_m)
             except Exception as exc:
                 raise ValueError(
                     "Could not compute step_buffer_m from the train split. "

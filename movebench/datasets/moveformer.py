@@ -27,6 +27,8 @@ from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     INDIVIDUAL_COL,
     SET_COL,
+    fit_interval_gap_cutoffs,
+    fit_interval_step_length_cutoff_m,
     load_trajectories_csv,
     select_step_starts,
 )
@@ -64,15 +66,23 @@ class _StepStarts:
 
 
 def _select_step_starts_with_targets(
-    df_split: pd.DataFrame,
+    df_all: pd.DataFrame,
     *,
     plan: LayerPlan,
+    selected_splits: list[str],
+    split: str,
+    train_gap_cutoffs,
+    train_max_step_length_m: float,
 ) -> _StepStarts:
+    df_selected = df_all[df_all[SET_COL].isin(selected_splits)].copy()
     starts = select_step_starts(
-        df_split,
+        df_selected,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
+        gap_cutoffs=train_gap_cutoffs,
+        max_step_length_m=float(train_max_step_length_m),
     )
+    starts = starts[starts[SET_COL] == str(split)].copy()
     if len(starts) == 0:
         return _StepStarts(
             point_id_start=np.zeros((0,), dtype=np.int64),
@@ -241,7 +251,34 @@ class MoveFormerPointStoreDataset(Dataset):
             raise ValueError(
                 f"No trajectories found for split={self.split!r} in {self.trajectories_path}"
             )
-        self._starts = _select_step_starts_with_targets(df_split, plan=self.plan)
+        selected_splits = self.manifest.extraction.get("selected_splits")
+        if not isinstance(selected_splits, list) or not selected_splits:
+            selected_splits = sorted(df[SET_COL].dropna().astype(str).unique().tolist())
+        train_df = df[df[SET_COL] == "train"].copy()
+        if len(train_df) == 0:
+            raise ValueError(
+                f"No training trajectories found in {self.trajectories_path}"
+            )
+        train_gap_cutoffs = fit_interval_gap_cutoffs(
+            train_df, gap_q=float(self.plan.step_spec.gap_q)
+        )
+        train_max_step_length_m = fit_interval_step_length_cutoff_m(
+            train_df,
+            step_time_s=int(self.plan.step_spec.step_time_s),
+            gap_q=float(self.plan.step_spec.gap_q),
+            gap_cutoffs=train_gap_cutoffs,
+            step_q=float(self.plan.step_spec.step_q),
+            max_step_q=float(self.plan.step_spec.max_step_q),
+            step_multiplier=float(self.plan.step_spec.step_multiplier),
+        )
+        self._starts = _select_step_starts_with_targets(
+            df,
+            plan=self.plan,
+            selected_splits=[str(x) for x in selected_splits],
+            split=self.split,
+            train_gap_cutoffs=train_gap_cutoffs,
+            train_max_step_length_m=train_max_step_length_m,
+        )
 
         n_steps = int(self.env.shape[0])
         if int(len(self._starts.point_id_start)) != n_steps:

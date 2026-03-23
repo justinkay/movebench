@@ -32,7 +32,14 @@ from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.rasters import Raster
-from movebench.trajectories import SET_COL, compute_step_length_extent_m, select_step_starts
+from movebench.trajectories import (
+    SET_COL,
+    compute_step_length_extent_m,
+    fit_interval_gap_cutoffs,
+    fit_interval_step_length_cutoff_m,
+    load_trajectories_csv,
+    select_step_starts,
+)
 
 from pyproj import Transformer
 from scipy import stats
@@ -210,6 +217,7 @@ def _fit_sampler_state(
     turn_angles_rad: np.ndarray,
     sampler_config: SamplerConfig,
     step_spec: FixedStepSpec,
+    max_step_len_m_train: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     valid_lengths = np.asarray(step_lengths_m, dtype=np.float64)
     valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
@@ -225,12 +233,20 @@ def _fit_sampler_state(
             "No valid interval turn angles in train split; cannot build candidate sampler"
         )
 
-    max_step_len_m_train = compute_step_length_extent_m(
-        valid_lengths,
-        step_q=float(step_spec.step_q),
-        max_step_q=float(step_spec.max_step_q),
-        step_multiplier=float(step_spec.step_multiplier),
-    )
+    if max_step_len_m_train is None:
+        max_step_len_m_train = compute_step_length_extent_m(
+            valid_lengths,
+            step_q=float(step_spec.step_q),
+            max_step_q=float(step_spec.max_step_q),
+            step_multiplier=float(step_spec.step_multiplier),
+        )
+    else:
+        max_step_len_m_train = float(max_step_len_m_train)
+        if not np.isfinite(max_step_len_m_train) or max_step_len_m_train <= 0.0:
+            raise ValueError(
+                "max_step_len_m_train must be finite and > 0, got "
+                f"{max_step_len_m_train}"
+            )
 
     sampler = {
         "type": str(sampler_config.type),
@@ -294,12 +310,14 @@ def build_train_sampler(
     *,
     sampler_config: SamplerConfig,
     step_spec: FixedStepSpec,
+    max_step_len_m_train: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     return _fit_sampler_state(
         step_lengths_m=train_steps["step_length_m"].to_numpy(dtype=np.float64),
         turn_angles_rad=train_steps["turn_angle_rad"].to_numpy(dtype=np.float64),
         sampler_config=sampler_config,
         step_spec=step_spec,
+        max_step_len_m_train=max_step_len_m_train,
     )
 
 
@@ -840,6 +858,7 @@ def _manifest_matches_request(
     plan: LayerPlan,
     sampler_hash_value: str,
     points_per_step: int,
+    selected_splits: list[str],
 ) -> bool:
     return (
         manifest.schema_version == "3"
@@ -850,7 +869,9 @@ def _manifest_matches_request(
         == int(plan.step_spec.step_time_s)
         and float(manifest.extraction.get("gap_q", float("nan")))
         == float(plan.step_spec.gap_q)
+        and manifest.extraction.get("gap_cutoff_source") == "train"
         and int(manifest.extraction.get("points_per_step", -1)) == int(points_per_step)
+        and list(manifest.extraction.get("selected_splits", [])) == list(selected_splits)
     )
 
 
@@ -859,11 +880,12 @@ def extract_split_feature_store(
     study_id: str,
     study_dir: Path,
     split: str,
-    df_split: pd.DataFrame,
+    steps: pd.DataFrame,
     plan: LayerPlan,
     sampler: dict[str, Any],
     sampler_state: dict[str, Any],
     sampler_hash: str,
+    selected_splits: list[str],
     n_workers: int,
     skip_existing: bool,
 ) -> dict[str, Any]:
@@ -876,11 +898,6 @@ def extract_split_feature_store(
     manifest_path = out_dir / "manifest.json"
     shared_path = out_dir / "shared.pt"
 
-    steps = select_step_starts(
-        df_split,
-        step_time_s=int(plan.step_spec.step_time_s),
-        gap_q=float(plan.step_spec.gap_q),
-    )
     reqs = _build_step_requests(steps)
     n_steps = int(len(reqs))
     points_per_step = int(sampler["num_candidates"]) + 1
@@ -899,6 +916,7 @@ def extract_split_feature_store(
                 plan=plan,
                 sampler_hash_value=sampler_hash,
                 points_per_step=points_per_step,
+                selected_splits=selected_splits,
             ):
                 rebuild_store = True
                 existing_manifest = None
@@ -960,11 +978,12 @@ def extract_split_feature_store(
                 study_id=study_id,
                 study_dir=study_dir,
                 split=split,
-                df_split=df_split,
+                steps=steps,
                 plan=plan,
                 sampler=sampler,
                 sampler_state=sampler_state,
                 sampler_hash=sampler_hash,
+                selected_splits=selected_splits,
                 n_workers=n_workers,
                 skip_existing=skip_existing,
             )
@@ -1009,6 +1028,8 @@ def extract_split_feature_store(
             "step_selector": "interval",
             "step_time_s": int(plan.step_spec.step_time_s),
             "gap_q": float(plan.step_spec.gap_q),
+            "gap_cutoff_source": "train",
+            "selected_splits": list(selected_splits),
             "points_per_step": int(points_per_step),
             "choice_policy": "last_is_true",
             "target_crs": TARGET_CRS,
@@ -1039,36 +1060,65 @@ def extract_point_feature_stores(
     n_workers: int,
     skip_existing: bool,
 ) -> dict[str, Any]:
-    df = pd.read_csv(Path(trajectories_path))
+    df = load_trajectories_csv(Path(trajectories_path))
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
 
+    # Match download_rasters(): select interval starts once over the combined
+    # requested splits, then partition by the start row's split.
+    selected_df = df[df[SET_COL].isin(splits)].copy()
     train_df = df[df[SET_COL] == "train"].copy()
     if len(train_df) == 0:
         raise ValueError("No training data found (set=='train'); cannot fit sampler")
-    train_steps = select_step_starts(
+    gap_cutoffs = fit_interval_gap_cutoffs(
+        train_df, gap_q=float(plan.step_spec.gap_q)
+    )
+    train_max_step_length_m = fit_interval_step_length_cutoff_m(
         train_df,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
+        gap_cutoffs=gap_cutoffs,
+        step_q=float(plan.step_spec.step_q),
+        max_step_q=float(plan.step_spec.max_step_q),
+        step_multiplier=float(plan.step_spec.step_multiplier),
     )
+    requested_steps = select_step_starts(
+        selected_df,
+        step_time_s=int(plan.step_spec.step_time_s),
+        gap_q=float(plan.step_spec.gap_q),
+        gap_cutoffs=gap_cutoffs,
+        max_step_length_m=train_max_step_length_m,
+    )
+    if len(splits) == 1 and str(splits[0]) == "train":
+        train_steps = requested_steps.copy()
+    else:
+        train_steps = select_step_starts(
+            train_df,
+            step_time_s=int(plan.step_spec.step_time_s),
+            gap_q=float(plan.step_spec.gap_q),
+            gap_cutoffs=gap_cutoffs,
+            max_step_length_m=train_max_step_length_m,
+        )
     sampler, sampler_state, sampler_hash_value = build_train_sampler(
         train_steps,
         sampler_config=sampler_config,
         step_spec=plan.step_spec,
+        max_step_len_m_train=train_max_step_length_m,
     )
 
     results: dict[str, Any] = {}
     for split in splits:
-        split_df = df[df[SET_COL] == split].copy()
+        split_steps = requested_steps[requested_steps[SET_COL] == split].copy()
         results[split] = extract_split_feature_store(
             study_id=study_id,
             study_dir=study_dir,
             split=split,
-            df_split=split_df,
+            steps=split_steps,
             plan=plan,
             sampler=sampler,
             sampler_state=sampler_state,
             sampler_hash=sampler_hash_value,
+            selected_splits=list(splits),
             n_workers=n_workers,
             skip_existing=skip_existing,
         )

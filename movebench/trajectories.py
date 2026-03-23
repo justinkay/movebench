@@ -10,6 +10,9 @@ which rows can serve as the start of a step for stepwise algorithms (SSF/iSSF).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -21,6 +24,12 @@ INDIVIDUAL_COL = "individual-local-identifier"
 SET_COL = "set"
 POINT_ID_COL = "point_id"
 OUTLIER_COL = "manually-marked-outlier"
+
+
+@dataclass(frozen=True)
+class IntervalGapCutoffs:
+    per_individual: dict[object, pd.Timedelta]
+    fallback: pd.Timedelta | None = None
 
 
 def haversine_distance_m(
@@ -82,11 +91,64 @@ def compute_step_length_extent_m(
     return min(base_extent_m, max_extent_m)
 
 
-def load_trajectories_csv(path: str) -> pd.DataFrame:
-    """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
+def _is_manual_outlier(series: pd.Series) -> pd.Series:
+    values = series.astype("string").str.strip().str.lower()
+    return values.isin({"true", "1", "t", "yes", "y"})
+
+
+def load_trajectories_csv(
+    path: str | Path,
+    *,
+    drop_manual_outliers: bool = True,
+) -> pd.DataFrame:
+    """Load trajectories.csv with early outlier filtering and timestamp parsing."""
     df = pd.read_csv(path)
+    if bool(drop_manual_outliers) and OUTLIER_COL in df.columns:
+        df = df.loc[~_is_manual_outlier(df[OUTLIER_COL])].copy()
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
     return df.dropna(subset=[TIME_COL])
+
+
+def fit_interval_gap_cutoffs(
+    df: pd.DataFrame,
+    *,
+    gap_q: float = 0.999,
+) -> IntervalGapCutoffs:
+    """Fit per-individual burst gap cutoffs from training data only."""
+    required = [INDIVIDUAL_COL, TIME_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"trajectories df missing required columns: {missing}")
+    if not (0.0 <= float(gap_q) <= 1.0):
+        raise ValueError(f"gap_q must be in [0,1], got {gap_q}")
+
+    d = df.copy()
+    d[TIME_COL] = pd.to_datetime(d[TIME_COL], errors="coerce")
+    d = d.dropna(subset=[TIME_COL])
+    if len(d) == 0:
+        return IntervalGapCutoffs(per_individual={}, fallback=None)
+
+    d = d.sort_values([INDIVIDUAL_COL, TIME_COL]).reset_index(drop=True)
+    time_since_last = d.groupby(INDIVIDUAL_COL, sort=False)[TIME_COL].diff()
+
+    per_individual: dict[object, pd.Timedelta] = {}
+    for indiv, series in time_since_last.groupby(d[INDIVIDUAL_COL], sort=False):
+        valid = series.dropna()
+        if len(valid) == 0:
+            continue
+        cutoff = valid.quantile(float(gap_q))
+        if pd.isna(cutoff):
+            continue
+        per_individual[indiv] = pd.Timedelta(cutoff)
+
+    valid_all = time_since_last.dropna()
+    fallback = None
+    if len(valid_all) > 0:
+        cutoff_all = valid_all.quantile(float(gap_q))
+        if not pd.isna(cutoff_all):
+            fallback = pd.Timedelta(cutoff_all)
+
+    return IntervalGapCutoffs(per_individual=per_individual, fallback=fallback)
 
 
 def prepare_interval_step_starts(
@@ -94,7 +156,9 @@ def prepare_interval_step_starts(
     *,
     step_time_s: int,
     gap_q: float = 0.999,
+    gap_cutoffs: IntervalGapCutoffs | None = None,
     max_time_error_s: float | None = None,
+    max_step_length_m: float | None = None,
 ) -> pd.DataFrame:
     """Prepare burst-aware interval step starts for a requested step time.
 
@@ -122,6 +186,12 @@ def prepare_interval_step_starts(
     max_time_error_s = float(max_time_error_s)
     if max_time_error_s < 0:
         raise ValueError(f"max_time_error_s must be >= 0, got {max_time_error_s}")
+    if max_step_length_m is not None:
+        max_step_length_m = float(max_step_length_m)
+        if not np.isfinite(max_step_length_m) or max_step_length_m <= 0.0:
+            raise ValueError(
+                f"max_step_length_m must be finite and > 0, got {max_step_length_m}"
+            )
 
     d = df.copy()
     d[TIME_COL] = pd.to_datetime(d[TIME_COL], errors="coerce")
@@ -131,9 +201,16 @@ def prepare_interval_step_starts(
 
     g = d.groupby(INDIVIDUAL_COL, sort=False)
     d["time_since_last"] = g[TIME_COL].diff()
-    per_indiv_cutoff = g["time_since_last"].transform(
-        lambda s: s.dropna().quantile(gap_q)
-    )
+    if gap_cutoffs is None:
+        per_indiv_cutoff = g["time_since_last"].transform(
+            lambda s: s.dropna().quantile(gap_q)
+        )
+    else:
+        per_indiv_cutoff = pd.to_timedelta(
+            d[INDIVIDUAL_COL].map(gap_cutoffs.per_individual), errors="coerce"
+        )
+        if gap_cutoffs.fallback is not None:
+            per_indiv_cutoff = per_indiv_cutoff.fillna(gap_cutoffs.fallback)
     d["within_time"] = d["time_since_last"] <= per_indiv_cutoff
     d["is_first_in_indiv"] = g.cumcount() == 0
     d["burst_start"] = d["is_first_in_indiv"] | (~d["within_time"])
@@ -225,6 +302,11 @@ def prepare_interval_step_starts(
             & (np.abs(error_s) <= max_time_error_s)
         )
 
+    if max_step_length_m is not None:
+        valid_step_start &= np.isfinite(step_length_m) & (
+            step_length_m <= float(max_step_length_m)
+        )
+
     d["step_target_time"] = d[TIME_COL] + pd.to_timedelta(step_time_s, unit="s")
     d["step_end_index"] = pd.array(
         [None if i < 0 else int(i) for i in end_index], dtype="Int64"
@@ -236,6 +318,36 @@ def prepare_interval_step_starts(
 
     d = d.sort_values("_source_index").reset_index(drop=True)
     return d.drop(columns=["_source_index", "is_first_in_indiv", "burst_start"])
+
+
+def fit_interval_step_length_cutoff_m(
+    df: pd.DataFrame,
+    *,
+    step_time_s: int,
+    gap_q: float = 0.999,
+    gap_cutoffs: IntervalGapCutoffs | None = None,
+    step_q: float = 0.95,
+    max_step_q: float = 0.99,
+    step_multiplier: float = 2.0,
+) -> float:
+    """Fit the interval-step spatial cutoff from valid interval steps."""
+    d = prepare_interval_step_starts(
+        df,
+        step_time_s=int(step_time_s),
+        gap_q=float(gap_q),
+        gap_cutoffs=gap_cutoffs,
+    )
+    valid = d.loc[d["valid_step_start"], "step_length_m"].to_numpy(
+        dtype=np.float64, copy=False
+    )
+    if len(valid) == 0:
+        raise ValueError("No valid interval step lengths computed")
+    return compute_step_length_extent_m(
+        valid,
+        step_q=float(step_q),
+        max_step_q=float(max_step_q),
+        step_multiplier=float(step_multiplier),
+    )
 
 
 def compute_movement_features(
@@ -353,6 +465,8 @@ def select_step_starts(
     *,
     step_time_s: int,
     gap_q: float = 0.999,
+    gap_cutoffs: IntervalGapCutoffs | None = None,
+    max_step_length_m: float | None = None,
 ) -> pd.DataFrame:
     """Select valid fixed-interval step starts and attach observed endpoints."""
     required = [INDIVIDUAL_COL, TIME_COL, LON_COL, LAT_COL, POINT_ID_COL]
@@ -376,6 +490,7 @@ def select_step_starts(
                 "actual_step_time_s": pd.Series(dtype="float64"),
                 "step_time_error_s": pd.Series(dtype="float64"),
                 "burst_id": pd.Series(dtype="int64"),
+                SET_COL: pd.Series(dtype="object"),
                 INDIVIDUAL_COL: pd.Series(dtype="object"),
             })
 
@@ -383,6 +498,8 @@ def select_step_starts(
         df,
         step_time_s=int(step_time_s),
         gap_q=float(gap_q),
+        gap_cutoffs=gap_cutoffs,
+        max_step_length_m=max_step_length_m,
     )
     if len(d) == 0:
         return null_dict
@@ -440,6 +557,7 @@ def select_step_starts(
             "actual_step_time_s": starts["actual_step_time_s"].astype(float),
             "step_time_error_s": starts["step_time_error_s"].astype(float),
             "burst_id": starts["burst_id"].astype(int),
+            SET_COL: starts[SET_COL].astype(object),
             INDIVIDUAL_COL: starts[INDIVIDUAL_COL].astype(object),
         }
     )

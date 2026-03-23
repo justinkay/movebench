@@ -54,8 +54,8 @@ from movebench.trajectories import (
     SET_COL,
     TIME_COL,
     compute_step_length_extent_m,
+    fit_interval_step_length_cutoff_m,
     haversine_distance_m,
-    prepare_interval_step_starts,
 )
 
 _ee_initialized = False
@@ -1464,16 +1464,10 @@ def get_buffer_m_for_study(
         raise RuntimeError(f"Expected a '{TIME_COL}' column in the data.")
 
     if step_time_s is not None:
-        d = prepare_interval_step_starts(
-            df, step_time_s=int(step_time_s), gap_q=float(gap_q)
-        )
-        valid = d.loc[d["valid_step_start"], "step_length_m"].to_numpy(
-            dtype=np.float64, copy=False
-        )
-        if len(valid) == 0:
-            raise ValueError("No valid interval step lengths computed")
-        return compute_step_length_extent_m(
-            valid,
+        return fit_interval_step_length_cutoff_m(
+            df,
+            step_time_s=int(step_time_s),
+            gap_q=float(gap_q),
             step_q=step_q,
             max_step_q=max_step_q,
             step_multiplier=step_multiplier,
