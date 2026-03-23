@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 EARTH_RADIUS_M = 6_371_000.0
 
@@ -35,12 +38,14 @@ def safe_speed_m_s_numpy(
         return np.where(dt > 0, sl / dt, np.nan)
 
 
-def safe_speed_m_s_torch(step_length_m: torch.Tensor, step_dt_s: torch.Tensor) -> torch.Tensor:
+def safe_speed_m_s_torch(step_length_m: "torch.Tensor", step_dt_s: "torch.Tensor") -> "torch.Tensor":
     """Compute speed in m/s with nonpositive dt mapped to NaN.
 
     ``step_dt_s`` may have lower rank than ``step_length_m`` and will be unsqueezed
     on trailing axes for broadcasting.
     """
+    import torch
+
     dt = step_dt_s
     while dt.ndim < step_length_m.ndim:
         dt = dt.unsqueeze(-1)

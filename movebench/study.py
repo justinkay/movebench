@@ -471,7 +471,7 @@ class Study:
             transform:       Optional torchvision-compatible transform applied
                              to the (1, H, W) float32 tensor in __getitem__.
         """
-        from movebench.datasets.thumbnails import TrackThumbnailDataset
+        from movebench.datasets.thumbnail_dataset import TrackThumbnailDataset
 
         return TrackThumbnailDataset(
             trajectories_path=self.trajectories_path,

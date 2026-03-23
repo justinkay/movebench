@@ -1,8 +1,40 @@
-"""PyTorch datasets built on top of movebench feature stores and rasters."""
+"""PyTorch dataset entrypoints built on top of movebench feature stores and rasters."""
 
-from movebench.datasets.chips import ChipDataset
-from movebench.datasets.deepssf import DeepSSFDataset
-from movebench.datasets.ssf import SSFDataset, iSSFDataset
-from movebench.datasets.thumbnails import TrackThumbnailDataset
+from __future__ import annotations
 
-__all__ = ["ChipDataset", "DeepSSFDataset", "SSFDataset", "iSSFDataset", "TrackThumbnailDataset"]
+from importlib import import_module
+
+__all__ = [
+    "ChipDataset",
+    "DeepSSFDataset",
+    "SSFDataset",
+    "iSSFDataset",
+    "TrackThumbnailBuild",
+    "TrackThumbnailDataset",
+    "build_track_thumbnails",
+    "detect_color_columns",
+    "load_thumbnail_source_df",
+]
+
+_ATTR_TO_MODULE = {
+    "ChipDataset": ("movebench.datasets.chips", "ChipDataset"),
+    "DeepSSFDataset": ("movebench.datasets.deepssf", "DeepSSFDataset"),
+    "SSFDataset": ("movebench.datasets.ssf", "SSFDataset"),
+    "iSSFDataset": ("movebench.datasets.ssf", "iSSFDataset"),
+    "TrackThumbnailBuild": ("movebench.datasets.thumbnails", "TrackThumbnailBuild"),
+    "TrackThumbnailDataset": ("movebench.datasets.thumbnail_dataset", "TrackThumbnailDataset"),
+    "build_track_thumbnails": ("movebench.datasets.thumbnails", "build_track_thumbnails"),
+    "detect_color_columns": ("movebench.datasets.thumbnails", "detect_color_columns"),
+    "load_thumbnail_source_df": ("movebench.datasets.thumbnails", "load_thumbnail_source_df"),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attr_name = _ATTR_TO_MODULE[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    module = import_module(module_name)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

@@ -27,7 +27,7 @@ OUTLIER_COL = "manually-marked-outlier"
 
 def load_trajectories_csv(path: str) -> pd.DataFrame:
     """Load trajectories.csv with timestamp parsing and NaT rows dropped."""
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, low_memory=False)
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
     return df.dropna(subset=[TIME_COL])
 
