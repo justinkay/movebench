@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from movebench.bench_v2 import run as bench_run
 from movebench.cli import download, extract, ingest
 
 
@@ -13,6 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.register(subparsers)
     extract.register(subparsers)
     ingest.register(subparsers)
+    bench_run.register(subparsers)
 
     return parser
 

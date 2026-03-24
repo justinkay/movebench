@@ -25,6 +25,10 @@ dependencies = [
 movebench = "movebench.cli.main:main"
 
 [project.optional-dependencies]
+bench = [
+  "mlflow",
+]
+
 apps = [
   "cartopy",
   "matplotlib",

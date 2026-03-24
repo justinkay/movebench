@@ -1,0 +1,499 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+import json
+from pathlib import Path
+from typing import Any
+
+from movebench.datasets.deepssf_wds_cache import read_deepssf_wds_manifest
+from movebench.features.manifest import read_manifest
+import movebench.paths as paths
+from movebench.study import Study
+
+import movebench.bench_v2.config as bench_config
+from movebench.bench_v2.mlflow import search_latest_runs_by_key
+
+PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
+
+
+def _study_dir(study_id: str) -> Path:
+    return paths.study_dir(study_id)
+
+
+def _load_module_from_path(module_path: str | Path):
+    path = Path(module_path)
+    if not path.exists():
+        candidate = paths.repo_root() / path
+        if candidate.exists():
+            path = candidate
+    if not path.exists():
+        raise FileNotFoundError(f"Experiment module not found: {module_path}")
+    spec = importlib.util.spec_from_file_location(
+        f"movebench_bench_v2_{path.stem}",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load module spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, path.resolve()
+
+
+def _resolve_studies(
+    experiment: dict[str, object],
+    studies_override: list[str] | None = None,
+) -> list[str]:
+    if studies_override:
+        studies = [str(study_id).strip() for study_id in studies_override if str(study_id).strip()]
+        if len(studies) == 1 and studies[0].lower() == "all":
+            return Study.list_available()
+        if not studies:
+            raise ValueError("No studies resolved from --studies")
+        return studies
+
+    studies = experiment.get("studies", "all")
+    if studies == "all":
+        resolved = Study.list_available()
+        if not resolved:
+            raise ValueError(
+                "No studies resolved. Set MOVEBENCH_DATA_ROOT or pass --studies."
+            )
+        return resolved
+
+    if not isinstance(studies, list) or not studies:
+        raise ValueError("Experiment 'studies' must be 'all' or a non-empty list")
+    return [str(study_id) for study_id in studies]
+
+
+def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
+    study_dir = _study_dir(study_id)
+    path = study_dir / "trajectories.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Study trajectories.csv not found: {path}")
+
+    seen: list[str] = []
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if "set" not in reader.fieldnames:
+            raise ValueError(f"Study trajectories.csv missing 'set' column: {path}")
+        for row in reader:
+            split = str(row.get("set", "")).strip()
+            if split and split not in seen:
+                seen.append(split)
+
+    extras = [
+        split
+        for split in seen
+        if split not in {"train", *PREFERRED_EARLY_STOP_SPLITS}
+    ]
+    ordered = [
+        split for split in PREFERRED_EARLY_STOP_SPLITS if split in seen
+    ] + extras
+    return {
+        "has_train": "train" in seen,
+        "held_out_splits": ordered,
+    }
+
+
+def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
+    timescale = bench_config.resolve_timescale(timescale_key)
+    manifest_path = (
+        _study_dir(study_id)
+        / "features"
+        / "points"
+        / str(split)
+        / str(timescale["rasters_hash"])
+        / str(timescale["sampler_hash"])
+        / "manifest.json"
+    )
+    if not manifest_path.exists():
+        return {
+            "available": False,
+            "reason": f"missing point store manifest for {split}",
+            "manifest_path": manifest_path,
+        }
+    manifest = read_manifest(manifest_path)
+    if manifest.study_id != study_id or manifest.split != split:
+        raise ValueError(f"Point store manifest metadata mismatch: {manifest_path}")
+    return {
+        "available": True,
+        "manifest_path": manifest_path,
+    }
+
+
+def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
+    cache_hash = bench_config.deepssf_cache_hash_for_split(timescale_key, split)
+    cache_dir = _study_dir(study_id) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {
+            "available": False,
+            "reason": f"missing deepSSF cache manifest for {split}",
+            "manifest_path": manifest_path,
+        }
+    shards_dir = cache_dir / "shards"
+    if not shards_dir.exists() or not any(shards_dir.iterdir()):
+        return {
+            "available": False,
+            "reason": f"missing deepSSF shards for {split}",
+            "manifest_path": manifest_path,
+        }
+    read_deepssf_wds_manifest(manifest_path)
+    return {
+        "available": True,
+        "manifest_path": manifest_path,
+    }
+
+
+def _preferred_split(splits: list[str]) -> str | None:
+    if not splits:
+        return None
+    for split in PREFERRED_EARLY_STOP_SPLITS:
+        if split in splits:
+            return split
+    return splits[0]
+
+
+def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, object]:
+    split_info = _study_split_keys(study_id)
+    held_out_splits = list(split_info["held_out_splits"])
+    train_points = _point_store_state(study_id, timescale_key, "train")
+    point_splits_available = [
+        split
+        for split in held_out_splits
+        if _point_store_state(study_id, timescale_key, split)["available"]
+    ]
+    train_cache = _deepssf_cache_state(study_id, timescale_key, "train")
+    raster_splits_available = [
+        split
+        for split in held_out_splits
+        if _deepssf_cache_state(study_id, timescale_key, split)["available"]
+    ]
+
+    point_ready = bool(train_points["available"]) and bool(point_splits_available)
+    raster_ready = bool(train_cache["available"]) and bool(raster_splits_available)
+    fully_runnable = point_ready and raster_ready
+
+    blocked_reasons: list[str] = []
+    if not split_info["has_train"]:
+        blocked_reasons.append("study has no train split")
+    if not train_points["available"]:
+        blocked_reasons.append(str(train_points["reason"]))
+    if not point_splits_available:
+        blocked_reasons.append("no held-out point stores available")
+    if not train_cache["available"]:
+        blocked_reasons.append(str(train_cache["reason"]))
+    if not raster_splits_available:
+        blocked_reasons.append("no held-out deepSSF caches available")
+
+    return {
+        "study_id": study_id,
+        "timescale": timescale_key,
+        "held_out_splits": held_out_splits,
+        "available_point_splits": point_splits_available,
+        "available_raster_splits": raster_splits_available,
+        "early_stop_point_split": _preferred_split(point_splits_available),
+        "early_stop_raster_split": _preferred_split(
+            [split for split in point_splits_available if split in raster_splits_available]
+        ),
+        "point_ready": point_ready,
+        "raster_ready": raster_ready,
+        "fully_runnable": fully_runnable,
+        "blocked_reasons": blocked_reasons,
+    }
+
+
+def _blocked_reason(
+    readiness: dict[str, object],
+    *,
+    method_key: str,
+) -> str:
+    if bench_config.METHODS[method_key]["artifact_requirement"] == "points_and_rasters":
+        if not readiness["point_ready"]:
+            return str(readiness["blocked_reasons"][0])
+        if not readiness["raster_ready"]:
+            return "missing deepSSF cache prerequisites"
+    return str(readiness["blocked_reasons"][0])
+
+
+def _run_key(run_payload: dict[str, object]) -> str:
+    return (
+        f"study={run_payload['study_id']}"
+        f"__ts={run_payload['timescale']}"
+        f"__cov={run_payload['covariate_set']}"
+        f"__method={run_payload['method']}"
+        f"__seed={run_payload['seed']}"
+    )
+
+
+def load_experiment(module_path: str) -> dict[str, object]:
+    module, path = _load_module_from_path(module_path)
+    if not hasattr(module, "EXPERIMENT"):
+        raise ValueError(f"Experiment module must export EXPERIMENT: {path}")
+    return bench_config.normalize_experiment(module.EXPERIMENT, source_path=path)
+
+
+def expand_experiment(
+    experiment: dict[str, object],
+    studies_override: list[str] | None = None,
+) -> list[dict[str, object]]:
+    normalized = bench_config.normalize_experiment(
+        experiment,
+        source_path=experiment.get("source_path"),
+    )
+    experiment.clear()
+    experiment.update(normalized)
+
+    studies = _resolve_studies(experiment, studies_override)
+    blocked: list[dict[str, object]] = []
+    runs: list[dict[str, object]] = []
+    readiness_map: dict[str, dict[str, object]] = {}
+
+    for study_id in studies:
+        for timescale_key in experiment["timescales"]:
+            readiness = _study_timescale_readiness(study_id, str(timescale_key))
+            readiness_map[f"{study_id}:{timescale_key}"] = readiness
+            for covariate_set_key in experiment["covariate_sets"]:
+                band_ids = bench_config.resolve_covariate_band_ids(
+                    str(timescale_key),
+                    str(covariate_set_key),
+                )
+                timescale = bench_config.resolve_timescale(str(timescale_key))
+                for method_key in experiment["methods"]:
+                    method = bench_config.METHODS[str(method_key)]
+                    if method["artifact_requirement"] == "points_and_rasters":
+                        evaluation_splits = list(readiness["available_raster_splits"])
+                        early_stop_split_key = readiness["early_stop_raster_split"]
+                        runnable = bool(readiness["point_ready"]) and bool(
+                            readiness["raster_ready"]
+                        )
+                    else:
+                        evaluation_splits = list(readiness["available_point_splits"])
+                        early_stop_split_key = readiness["early_stop_point_split"]
+                        runnable = bool(readiness["point_ready"])
+
+                    if not runnable or early_stop_split_key is None:
+                        blocked.append(
+                            {
+                                "study_id": study_id,
+                                "timescale": str(timescale_key),
+                                "covariate_set": str(covariate_set_key),
+                                "method": str(method_key),
+                                "reason": _blocked_reason(readiness, method_key=str(method_key)),
+                            }
+                        )
+                        continue
+
+                    run_payload = {
+                        "study_id": study_id,
+                        "timescale": str(timescale_key),
+                        "step_time_s": int(timescale["step_time_s"]),
+                        "layers_config": str(timescale["layers_config"]),
+                        "rasters_hash": str(timescale["rasters_hash"]),
+                        "sampler_config": str(timescale["sampler_config"]),
+                        "sampler_hash": str(timescale["sampler_hash"]),
+                        "covariate_set": str(covariate_set_key),
+                        "band_ids": band_ids,
+                        "method": str(method_key),
+                        "artifact_requirement": str(method["artifact_requirement"]),
+                        "executor": str(method["executor"]),
+                        "method_model": dict(method.get("model", {})),
+                        "method_hparams": dict(method.get("hparams", {})),
+                        "seed": int(experiment["seed"]),
+                        "experiment_name": str(experiment["name"]),
+                        "experiment_kind": str(experiment["kind"]),
+                        "early_stop_split_key": str(early_stop_split_key),
+                        "evaluation_split_keys": evaluation_splits,
+                    }
+                    run_payload["run_key"] = _run_key(run_payload)
+                    runs.append(run_payload)
+
+    experiment["resolved_studies"] = studies
+    experiment["blocked"] = blocked
+    experiment["study_readiness"] = readiness_map
+    experiment["planning_summary"] = {
+        "planned_runs": len(runs),
+        "blocked_runs": len(blocked),
+        "studies": len(studies),
+        "study_timescale_pairs": len(studies) * len(experiment["timescales"]),
+    }
+    return runs
+
+
+def _manifest_payload(
+    experiment: dict[str, object],
+    runs: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "experiment": {
+            key: value
+            for key, value in experiment.items()
+            if key
+            not in {"blocked", "planning_summary", "study_readiness"}
+        },
+        "summary": dict(experiment.get("planning_summary", {})),
+        "blocked": list(experiment.get("blocked", [])),
+        "runs": runs,
+    }
+
+
+def write_resolved_manifest(
+    experiment: dict[str, object],
+    runs: list[dict[str, object]],
+) -> Path:
+    out_dir = paths.repo_root() / "results" / "bench_v2" / "resolved_experiments"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{experiment['name']}.json"
+    manifest = _manifest_payload(experiment, runs)
+
+    if out_path.exists():
+        existing = json.loads(out_path.read_text(encoding="utf-8"))
+        existing_runs = {
+            str(run["run_key"]): bench_config.stable_payload(run)
+            for run in existing.get("runs", [])
+        }
+        for run in runs:
+            run_key = str(run["run_key"])
+            payload = bench_config.stable_payload(run)
+            if run_key in existing_runs and existing_runs[run_key] != payload:
+                raise ValueError(
+                    f"Existing run_key {run_key!r} resolves to a different payload"
+                )
+
+    out_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return out_path
+
+
+def _load_resolved_manifests() -> list[dict[str, object]]:
+    manifest_dir = paths.repo_root() / "results" / "bench_v2" / "resolved_experiments"
+    if not manifest_dir.exists():
+        return []
+    manifests: list[dict[str, object]] = []
+    for path in sorted(manifest_dir.glob("*.json")):
+        manifests.append(json.loads(path.read_text(encoding="utf-8")))
+    return manifests
+
+
+def status_snapshot() -> dict[str, object]:
+    studies = Study.list_available()
+    study_entries: list[dict[str, object]] = []
+
+    ssf_ready_pairs = 0
+    raster_ready_pairs = 0
+    fully_runnable_pairs = 0
+    blocked_pairs = 0
+    blocked_studies = 0
+
+    for study_id in studies:
+        timescale_entries: list[dict[str, object]] = []
+        study_has_blocked_pair = False
+        for timescale_key in bench_config.TIMESCALES:
+            readiness = _study_timescale_readiness(study_id, timescale_key)
+            timescale_entries.append(readiness)
+            if readiness["point_ready"]:
+                ssf_ready_pairs += 1
+            if readiness["raster_ready"]:
+                raster_ready_pairs += 1
+            if readiness["fully_runnable"]:
+                fully_runnable_pairs += 1
+            else:
+                blocked_pairs += 1
+                study_has_blocked_pair = True
+        if study_has_blocked_pair:
+            blocked_studies += 1
+        study_entries.append({"study_id": study_id, "timescales": timescale_entries})
+
+    manifests = _load_resolved_manifests()
+    planned_runs = [
+        run
+        for manifest in manifests
+        for run in manifest.get("runs", [])
+    ]
+    planned_keys = [str(run["run_key"]) for run in planned_runs]
+    latest_runs = search_latest_runs_by_key(planned_keys)
+    completed_runs = [
+        run_key
+        for run_key, run in latest_runs.items()
+        if str(getattr(run.data, "tags", {}).get("status", "")) == "completed"
+    ]
+
+    return {
+        "counts": {
+            "studies": len(studies),
+            "study_timescale_pairs": len(studies) * len(bench_config.TIMESCALES),
+            "blocked_studies": blocked_studies,
+            "ssf_ready_pairs": ssf_ready_pairs,
+            "raster_ready_pairs": raster_ready_pairs,
+            "fully_runnable_pairs": fully_runnable_pairs,
+            "blocked_pairs": blocked_pairs,
+            "planned_runs": len(planned_keys),
+            "completed_runs": len(completed_runs),
+        },
+        "studies": study_entries,
+        "planned_run_keys": planned_keys,
+        "completed_run_keys": completed_runs,
+        "resolved_experiment_count": len(manifests),
+    }
+
+
+def _render_status_text(snapshot: dict[str, object]) -> str:
+    counts = snapshot["counts"]
+    lines = [
+        f"Studies: {counts['studies']}",
+        f"Blocked studies: {counts['blocked_studies']}",
+        f"SSF-ready pairs: {counts['ssf_ready_pairs']}",
+        f"Raster-ready pairs: {counts['raster_ready_pairs']}",
+        f"Fully runnable pairs: {counts['fully_runnable_pairs']}",
+        f"Blocked pairs: {counts['blocked_pairs']}",
+        f"Planned runs: {counts['planned_runs']}",
+        f"Completed runs: {counts['completed_runs']}",
+    ]
+    for study in snapshot["studies"]:
+        for readiness in study["timescales"]:
+            parts: list[str] = []
+            if readiness["point_ready"]:
+                parts.append("ssf-ready")
+            if readiness["raster_ready"]:
+                parts.append("raster-ready")
+            if readiness["fully_runnable"]:
+                parts.append("fully-runnable")
+            else:
+                parts.append("blocked")
+            lines.append(
+                f"{study['study_id']} / {readiness['timescale']}: {', '.join(parts)}"
+            )
+    return "\n".join(lines)
+
+
+def _command_plan(args: argparse.Namespace) -> int:
+    experiment = load_experiment(args.experiment_module)
+    runs = expand_experiment(experiment, studies_override=args.studies)
+    manifest_path = write_resolved_manifest(experiment, runs)
+    print(f"Planned runs: {len(runs)}")
+    print(f"Blocked runs: {len(experiment['blocked'])}")
+    print(f"Resolved manifest: {manifest_path}")
+    return 0
+
+
+def _command_status(args: argparse.Namespace) -> int:
+    if args.format != "text":
+        raise ValueError(f"Unsupported status format: {args.format}")
+    print(_render_status_text(status_snapshot()))
+    return 0
+
+
+def register(subparsers) -> None:
+    parser = subparsers.add_parser("bench", help="Plan and inspect the v2 benchmark runtime")
+    bench_subparsers = parser.add_subparsers(dest="bench_command", required=True)
+
+    plan_parser = bench_subparsers.add_parser("plan", help="Plan a benchmark experiment")
+    plan_parser.add_argument("experiment_module")
+    plan_parser.add_argument("--studies", nargs="+", default=None)
+    plan_parser.set_defaults(func=_command_plan)
+
+    status_parser = bench_subparsers.add_parser("status", help="Inspect artifact and run readiness")
+    status_parser.add_argument("--format", choices=["text"], default="text")
+    status_parser.set_defaults(func=_command_status)

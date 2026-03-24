@@ -18,10 +18,10 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 - [x] (2026-03-24 17:30Z) Verified that the existing point-store layout already exposes stable manifests and tensor files under split-specific directories, which is sufficient for runtime validation and loading.
 - [x] (2026-03-24 17:40Z) Verified that most studies have both `test-temporal` and `test-individual`, but some studies have only one held-out split and must be supported without special casing in experiment configs.
 - [x] (2026-03-24 17:50Z) Verified that the current deepSSF WebDataset cache helpers already define a stable on-disk manifest and shard layout that the new runtime can treat as a prerequisite.
-- [ ] Create the `movebench/bench_v2/` package skeleton, dependency updates, and CLI entrypoint.
-- [ ] Implement plain Python experiment config validation and concrete-run planning.
-- [ ] Implement MLflow bootstrap plus lightweight query helpers.
-- [ ] Implement study readiness scanning and `movebench bench status`.
+- [x] (2026-03-24 21:10Z) Created the `movebench/bench_v2/` package skeleton, added the `bench` extra with `mlflow`, added `experiments/v2/` experiment modules, and registered the `bench` CLI entrypoint in [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py).
+- [x] (2026-03-24 21:10Z) Implemented plain Python experiment config normalization, timescale and covariate expansion, blocked-run detection, stable `run_key` generation, and resolved manifest writing under `results/bench_v2/resolved_experiments/`.
+- [x] (2026-03-24 21:10Z) Implemented MLflow bootstrap and query helpers for experiment creation, run startup, full run search, and latest-run lookup by `run_key`.
+- [x] (2026-03-24 21:10Z) Implemented study-timescale readiness scanning plus `movebench bench status --format text`, then verified the scoped runtime with `python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status`.
 
 ## Surprises & Discoveries
 
@@ -36,6 +36,9 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 
 - Observation: the project does not currently have an experiment-planning abstraction at all.
   Evidence: [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) registers only `download`, `extract`, and `ingest`.
+
+- Observation: the current local environment cannot import the repository’s raster stack because the installed `rasterio` binary expects a newer `libstdc++` ABI than the host provides.
+  Evidence: the first scoped test run failed while importing `movebench` with `ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version 'CXXABI_1.3.15' not found ... libgdal.so.38`.
 
 ## Decision Log
 
@@ -61,7 +64,13 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 
 ## Outcomes & Retrospective
 
-This plan should leave the repository with a new benchmark control plane and no ambiguity about what work exists. If successful, the later implementation plans can focus on method execution and reporting instead of rebuilding split logic, run identity, or database shape from scratch.
+This plan now leaves the repository with a working benchmark control plane under `movebench/bench_v2/`: plain Python experiment modules, concrete-run planning, resolved manifest writing, MLflow setup helpers, a study-timescale readiness scanner, and CLI registration for `movebench bench plan` and `movebench bench status`.
+
+The scoped verification passed with:
+
+    python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status
+
+The later implementation plans can now focus on method execution and reporting instead of rebuilding split logic, run identity, or readiness accounting. The only validation gap in this environment is the final smoke CLI command from this plan, which was not run because the existing repository import path still trips an unrelated `rasterio` / `libgdal` ABI mismatch before the CLI can fully import.
 
 ## Context and Orientation
 
@@ -142,6 +151,10 @@ When the status scanner exists, add tests for the readiness categories using tem
 
     python -m unittest -v tests.bench_v2.test_status
 
+After the scoped implementation is in place, rerun the targeted suite together. The passing command in this environment was:
+
+    python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status
+
 The final smoke command for this plan is:
 
     movebench bench plan experiments/v2/main_results.py --studies all
@@ -185,3 +198,5 @@ Define in `movebench/bench_v2/run.py`:
     def status_snapshot() -> dict[str, object]: ...
 
 Plan creation note (2026-03-24 / assistant): initial draft written after validating the current artifact contracts and the absence of an existing planning layer in the repository.
+
+Revision note (2026-03-24 / assistant): updated the living sections after implementing the scoped `bench_v2` runtime, recording the passing targeted test command, and documenting the unrelated local `rasterio` ABI import failure that prevented running the final smoke CLI command in this environment.
