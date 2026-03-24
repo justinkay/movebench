@@ -1,4 +1,4 @@
-# Build Exact Energy-Score Evaluation, Reporting, and Daily Automation
+# Build Exact Energy-Score Evaluation and Reporting
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
@@ -8,7 +8,7 @@ This plan depends on [execplans/benchmark_rewrite_core_runtime_execplan.md](/dat
 
 ## Purpose / Big Picture
 
-After this change, every finished run will have exact final energy scores on every available held-out split, those metrics will be queryable from MLflow, and `movebench bench report` will regenerate a static HTML dashboard showing progress and plots for main results and covariate comparisons. The visible proof is that a user can run the daily automation commands and then open `results/bench_v2/report/index.html` to inspect both status and completed benchmark plots.
+After this change, every finished run will have exact final energy scores on every available held-out split, those metrics will be queryable from MLflow, and `movebench bench report` will regenerate a static HTML dashboard showing progress and plots for main results and covariate comparisons. The visible proof is that a user can run `movebench bench report` and then open `results/bench_v2/report/index.html` to inspect both status and completed benchmark plots.
 
 This plan is the user-facing finish of the rewrite. It turns run artifacts into trustworthy metrics and an operational dashboard.
 
@@ -16,13 +16,12 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 
 - [x] (2026-03-24 17:10Z) Located the existing energy-score implementation in `scripts/slurm/compare_outputs.py` and confirmed the exact formula used there.
 - [x] (2026-03-24 17:20Z) Verified that candidate-based methods must remove the true endpoint candidate and renormalize probabilities before final held-out energy evaluation.
-- [x] (2026-03-24 17:25Z) Verified that deepSSF’s final metric should not discard out-of-bounds targets even though training and early stopping losses do.
+- [x] (2026-03-24 17:25Z) Verified that benchmark support is shared across method families, so endpoints outside that support should be excluded from final evaluation consistently for every method.
 - [x] (2026-03-24 17:35Z) Confirmed that the current app is unrelated to benchmark reporting, making a generated static HTML report the simplest and safest presentation layer.
 - [ ] Implement exact energy-score evaluation for deterministic, candidate-based, and grid-based methods.
 - [ ] Implement final-evaluation orchestration and MLflow logging.
 - [ ] Implement plot generation for main results and covariate comparisons.
 - [ ] Implement static HTML report generation and status snapshots.
-- [ ] Implement daily automation commands and wrapper scripts.
 - [ ] Perform the final legacy cutover after the new report layer is validated.
 
 ## Surprises & Discoveries
@@ -60,12 +59,12 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
   Rationale: this is simpler to regenerate daily, easy to browse from shared storage, and avoids coupling benchmark reporting to the unrelated interactive app.
   Date/Author: 2026-03-24 / assistant
 
-- Decision: daily automation will call the same library-backed CLI commands as manual usage, with only thin shell or Python wrappers for scheduling convenience.
-  Rationale: the daily path should not become a second implementation of the runtime.
+- Decision: final evaluation excludes out-of-support steps for every method family.
+  Rationale: all methods are scored on the same benchmark support defined by the existing extraction buffers and prepared artifacts, so endpoints outside that support should be excluded uniformly rather than treated as a deepSSF-only corner case.
   Date/Author: 2026-03-24 / assistant
 
-- Decision: the automation layer begins after extraction and cache building.
-  Rationale: this rewrite is intentionally scoped to post-extraction benchmark execution and reporting, so missing artifacts should be reported as blocked prerequisites rather than triggering extraction here.
+- Decision: per-step evaluation artifacts should default to gzipped CSV, not parquet.
+  Rationale: this avoids adding a parquet-only dependency surface for a single reporting artifact. Parquet can be introduced later only if profiling shows CSV is an actual bottleneck.
   Date/Author: 2026-03-24 / assistant
 
 ## Outcomes & Retrospective
@@ -91,9 +90,9 @@ where `X` and `X'` are independent draws from the predictive distribution and `y
 
 ## Plan of Work
 
-Create a new evaluation package under `movebench/bench_v2/evaluation/` with at least `types.py`, `energy.py`, `runner.py`, and `artifacts.py`.
+Create a new evaluation package under `movebench/bench_v2/evaluation/` with `energy.py` and `runner.py`.
 
-Implement `types.py` first. Define a small number of standardized prediction-artifact shapes that method executors must emit. At minimum there should be one deterministic point prediction type, one discrete-support prediction type with coordinates and probabilities, and one dense-grid prediction type with probability map, pixel size, and origin or grid-coordinate tensors. These types should be plain dataclasses or typed dictionaries that can be serialized to disk and loaded again without importing model code.
+Do not add a separate `types.py`. Keep the evaluation boundary simpler than that. Instead, define one small documented artifact contract in `runner.py`: each prediction artifact must include a `prediction_kind` field with value `deterministic`, `discrete`, or `grid`, plus the minimal fields needed by that scorer. Methods may keep whatever internal output format they want during training; they only need to convert their final predictions into one of those three artifact schemas at the evaluation boundary.
 
 Implement `energy.py` next. Add one exact function per prediction family. For deterministic point predictions, return the Euclidean distance to the observed endpoint. For discrete-support predictions, compute
 
@@ -101,9 +100,17 @@ Implement `energy.py` next. Add one exact function per prediction family. For de
 
 exactly with vectorized tensor code. This path covers `baseline_randomwalk`, `issf_linear`, `issf_mlp`, and `moveformer`. Require that the discrete-support artifact already excludes the true endpoint candidate from its support; if the artifact still includes it, fail loudly. For dense-grid predictions, compute the first term directly over the full grid, then compute the pairwise term by convolving the probability map with itself against a precomputed distance kernel using FFT. The implementation must be numerically tested against a brute-force small-grid reference.
 
-Implement `runner.py` after the metric core exists. This module should load one completed concrete run, detect which held-out splits are available from the run metadata and existing artifacts, materialize the standardized prediction artifact for each split, compute per-step energy scores, write one artifact such as `energy_by_step.parquet` or `energy_by_step.csv.gz`, and then write an aggregated summary JSON. Log final aggregate metrics back to MLflow, for example `energy_score.test_temporal` and `energy_score.test_individual`, plus optional counts such as `n_steps.test_temporal` and `n_steps.test_individual`. The per-step file belongs in the run artifact directory.
+Implement `runner.py` after the metric core exists. This module should load one completed concrete run, detect which held-out splits are available from the run metadata and existing artifacts, load the method’s prediction artifact, dispatch on `prediction_kind`, compute per-step energy scores, write `energy_by_step.csv.gz`, and then write an aggregated summary JSON. Log final aggregate metrics back to MLflow, including the total energy score and its two named components for each split, where `accuracy` means the `E ||X - y||` term and `calibration` means the `E ||X - X'||` term, for example:
 
-The evaluation runner must treat out-of-bounds deepSSF targets correctly. The model distribution is still defined on the chip grid, and the observed endpoint can lie outside that grid. The energy score remains valid because it only needs the true endpoint coordinate in meters relative to the start point, not a one-hot target pixel.
+    energy_score.test_temporal
+    energy_score.accuracy.test_temporal
+    energy_score.calibration.test_temporal
+    n_steps_scored.test_temporal
+    n_steps_excluded_out_of_support.test_temporal
+
+and the analogous `test_individual` metrics when that split exists. The per-step file belongs in the run artifact directory.
+
+The evaluation runner must exclude out-of-support endpoints before scoring any method. This support should be defined once from the existing benchmark artifact metadata, using the same buffer and support rules that governed earlier downloads and feature preparation. The important rule is not “special-case deepSSF,” but rather “score all methods on the same eligible subset.” Report the number of excluded steps in the summary JSON and in MLflow.
 
 Implement reporting inside `movebench/bench_v2/report.py`. Keep it simple: one file may internally define `load_main_results(...)`, `load_covariate_results(...)`, plotting helpers, HTML generation, and status rendering. These functions should:
 
@@ -122,14 +129,6 @@ Generate `results/bench_v2/report/index.html` plus an `assets/` directory of PNG
 
 Have `report.py` also emit a machine-readable snapshot of study readiness, planned runs, completed runs, blocked studies, and missing artifacts. `movebench bench status --format text` from the core plan can call a small helper in `run.py`, and `movebench bench status --format html` can delegate to `report.py`.
 
-Implement the automation layer last in `movebench/bench_v2/automation/`. Add library functions for two actions: running newly ready experiments and regenerating the report. The readiness input should come from the artifact-validation logic in `run.py`; do not add any extraction orchestration here. Then add thin CLI or shell wrappers. A reasonable interface is:
-
-    movebench bench run experiments/v2/main_results.py --selection runnable
-    movebench bench run experiments/v2/covariate_comparison.py --selection runnable
-    movebench bench report
-
-Also add one convenience script such as `scripts/daily/run_bench_v2_daily.sh` that calls those commands in order and writes a log file under `results/bench_v2/logs/`.
-
 Finish with the cutover described in the overview plan. Once the report is correct and the new CLI covers daily operations, remove or convert the old benchmark-only scripts that would otherwise confuse future contributors.
 
 ## Concrete Steps
@@ -146,7 +145,6 @@ Create a new test package for evaluation and reporting:
       test_report_queries.py
       test_report_plots.py
       test_report_html.py
-      test_daily_automation.py
 
 Start with energy-score tests. Use tiny handcrafted supports where the exact answer can be computed manually and small grids where the FFT path can be compared to a brute-force pairwise sum. Run:
 
@@ -159,10 +157,6 @@ Add evaluation-runner tests that read fake run artifacts and write final metrics
 Add report-query and plot tests using a temporary MLflow backend, for example a temporary SQLite-backed tracking URI, populated with a few fake completed runs. Run:
 
     python -m unittest -v tests.bench_v2.test_report_queries tests.bench_v2.test_report_plots tests.bench_v2.test_report_html
-
-Add automation tests that verify the wrapper commands call the underlying library functions and respect ready-versus-blocked status. Run:
-
-    python -m unittest -v tests.bench_v2.test_daily_automation
 
 The final smoke commands for this plan are:
 
@@ -179,9 +173,9 @@ First, the energy-score unit tests prove exactness. The deterministic path must 
 
 Second, candidate-based final evaluation must fail if the prediction artifact still contains the true endpoint in its support. This is an intentional guardrail against leakage.
 
-Third, `movebench bench report` must generate plots for every finished run and must not crash when some studies are blocked or have only one held-out split. The HTML should include visible counts for completed, pending, failed, blocked, and not-applicable cases.
+Third, the evaluation runner must exclude out-of-support endpoints consistently across method families, write the excluded counts into the run summary, and log those counts plus the two raw energy-score components to MLflow.
 
-Fourth, the daily wrapper should be able to run twice in a row without duplicating completed work. The second run should report mostly skips and a freshly regenerated report.
+Fourth, `movebench bench report` must generate plots for every finished run and must not crash when some studies are blocked or have only one held-out split. The HTML should include visible counts for completed, pending, failed, blocked, and not-applicable cases.
 
 Fifth, after the cutover, the legacy benchmark entrypoints must no longer be the default path. A user following the repository should naturally discover `movebench bench ...` and the static report instead of the old YAML benchmark flow.
 
@@ -191,18 +185,16 @@ Final evaluation must be safe to rerun. If the latest MLflow run for a `run_key`
 
 Report generation must be fully regenerable from MLflow and run artifacts. The `report/` directory may be deleted and rebuilt from scratch without retraining models.
 
-The daily wrapper must continue past individual study failures and end by producing a report that records those failures rather than hiding them.
-
 ## Artifacts and Notes
 
 A finished run should eventually contain evaluation artifacts like:
 
     results/bench_v2/runs/<run_key>/final_metrics/
       test-temporal/
-        energy_by_step.parquet
+        energy_by_step.csv.gz
         summary.json
       test-individual/
-        energy_by_step.parquet
+        energy_by_step.csv.gz
         summary.json
 
 The report root should look like:
@@ -218,29 +210,24 @@ The HTML does not need client-side interactivity. Clarity and robustness matter 
 
 ## Interfaces and Dependencies
 
-Define in `movebench/bench_v2/evaluation/types.py`:
-
-    @dataclass(frozen=True)
-    class DeterministicPrediction:
-        dx_m: float
-        dy_m: float
-
-    @dataclass(frozen=True)
-    class DiscreteSupportPrediction:
-        coords_m: np.ndarray
-        probs: np.ndarray
-
-    @dataclass(frozen=True)
-    class GridPrediction:
-        probs_hw: np.ndarray
-        x_coords_m: np.ndarray
-        y_coords_m: np.ndarray
-
 Define in `movebench/bench_v2/evaluation/energy.py`:
 
-    def energy_score_deterministic(pred: DeterministicPrediction, truth_xy_m: np.ndarray) -> float: ...
-    def energy_score_discrete(pred: DiscreteSupportPrediction, truth_xy_m: np.ndarray) -> float: ...
-    def energy_score_grid(pred: GridPrediction, truth_xy_m: np.ndarray) -> float: ...
+    def energy_score_deterministic(pred: dict[str, object], truth_xy_m: np.ndarray) -> float: ...
+    def energy_score_discrete(pred: dict[str, object], truth_xy_m: np.ndarray) -> float: ...
+    def energy_score_grid(pred: dict[str, object], truth_xy_m: np.ndarray) -> float: ...
+
+Define in `movebench/bench_v2/evaluation/runner.py` a small documented dispatcher contract such as:
+
+    prediction_kind == "deterministic":
+        {"prediction_kind": "deterministic", "dx_m": ..., "dy_m": ...}
+
+    prediction_kind == "discrete":
+        {"prediction_kind": "discrete", "coords_m": ..., "probs": ...}
+
+    prediction_kind == "grid":
+        {"prediction_kind": "grid", "probs_hw": ..., "x_coords_m": ..., "y_coords_m": ...}
+
+Keep this as documentation plus validation logic in `runner.py`, not as a separate abstraction layer.
 
 Keep plotting dependencies minimal. Use `matplotlib` and standard library HTML generation unless a truly necessary requirement appears later.
 

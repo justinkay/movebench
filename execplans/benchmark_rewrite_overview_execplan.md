@@ -22,7 +22,7 @@ Today the benchmark flow is split across [movebench/benchmark.py](/data/vision/b
 - [x] (2026-03-24 17:30Z) Reviewed the current point-store and deepSSF WebDataset cache path contracts and confirmed that the new runtime can treat them as prerequisites instead of rebuilding them.
 - [x] (2026-03-24 17:40Z) Verified that some studies expose only one held-out split, so planning, execution, and reporting must treat the missing split as not applicable rather than as an error.
 - [x] (2026-03-24 18:20Z) Chose the replacement architecture: plain Python experiment modules, a compact `movebench/bench_v2/` runtime package, MLflow-only tracking, exact final energy-score evaluation, and a generated static HTML report.
-- [x] (2026-03-24 18:45Z) Authored the coordinated ExecPlans for the core runtime, method runtime, and evaluation/reporting/automation layers.
+- [x] (2026-03-24 18:45Z) Authored the coordinated ExecPlans for the core runtime, method runtime, and evaluation/reporting layers.
 - [ ] Implement [execplans/benchmark_rewrite_core_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_core_runtime_execplan.md).
 - [ ] Implement [execplans/benchmark_rewrite_method_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_method_runtime_execplan.md).
 - [ ] Implement [execplans/benchmark_rewrite_evaluation_reporting_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_evaluation_reporting_execplan.md).
@@ -105,7 +105,7 @@ Milestone 1 builds the new control plane described in [execplans/benchmark_rewri
 
 Milestone 2 builds the reusable method runtime described in [execplans/benchmark_rewrite_method_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_method_runtime_execplan.md). That means one shared step-based trainer for trainable models, artifact-consuming executors for every method family, superset artifact reuse for covariate subsets, and the new `bench run` execution path. At the end of this milestone the repository should be able to train every requested method and produce prediction artifacts for later evaluation using only the artifacts that already exist on disk.
 
-Milestone 3 implements the exact energy-score evaluator, reporting layer, and daily automation described in [execplans/benchmark_rewrite_evaluation_reporting_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_evaluation_reporting_execplan.md). At the end of this milestone the repository should be able to compute final metrics on all available held-out splits, log them to MLflow, regenerate plots, and write a browsable HTML report, all without invoking extraction code.
+Milestone 3 implements the exact energy-score evaluator and reporting layer described in [execplans/benchmark_rewrite_evaluation_reporting_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_evaluation_reporting_execplan.md). At the end of this milestone the repository should be able to compute final metrics on all available held-out splits, log them to MLflow, regenerate plots, and write a browsable HTML report, all without invoking extraction code.
 
 Milestone 4 performs the cutover. Only after the first three milestones pass their validations should the implementer remove the old YAML benchmark configs, old benchmark-specific training loops, and obsolete Slurm wrappers. The cutover should preserve the old low-level reusable modules that are still imported by `bench_v2`, but it should remove entrypoints that encourage future contributors to use the legacy pipeline.
 
@@ -200,7 +200,7 @@ Do not put evaluation split into that key.
 
 ## Interfaces and Dependencies
 
-The rewrite should add a `bench` optional dependency group in [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) that includes at least `mlflow`, `matplotlib`, and `pyarrow`. `moveformer` remains a separate optional dependency because only one method family requires it.
+The rewrite should add a `bench` optional dependency group in [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) that includes at least `mlflow` and `matplotlib`. `moveformer` remains a separate optional dependency because only one method family requires it.
 
 The top-level CLI should be extended in [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) to register the `bench` subcommands directly from the small `bench_v2` modules. There is no need for a second CLI module.
 

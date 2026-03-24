@@ -56,7 +56,7 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the study readiness scanner will operate per study and per timescale, not only per study.
-  Rationale: point stores and deepSSF caches can exist for some timescales but not others, and the user wants operational visibility that is detailed enough for daily automation.
+  Rationale: point stores and deepSSF caches can exist for some timescales but not others, and the user wants operational visibility that is detailed enough for reporting and batch experiment management.
   Date/Author: 2026-03-24 / assistant
 
 ## Outcomes & Retrospective
@@ -80,7 +80,7 @@ The planning/runtime layer should assume that benchmark-ready artifacts already 
 
 ## Plan of Work
 
-Start by creating the new package structure under `movebench/bench_v2/` with at least `__init__.py`, `config.py`, `run.py`, `report.py`, and `mlflow.py`. Update [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) to add a `bench` extra containing `mlflow`, `pyarrow`, and any small helper dependency that is truly required. Do not add Hydra, OmegaConf, Alembic, or any web server framework.
+Start by creating the new package structure under `movebench/bench_v2/` with at least `__init__.py`, `config.py`, `run.py`, `report.py`, and `mlflow.py`. Update [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) to add a `bench` extra containing `mlflow` and any small helper dependency that is truly required. Do not add Hydra, OmegaConf, Alembic, any parquet-only dependency, or any web server framework.
 
 Keep file count low. `config.py` should hold the benchmark definitions and run-expansion helpers. `run.py` should hold planning-oriented commands such as `plan` and `status`, plus any small helpers that do not justify their own module. `report.py` is reserved for the later reporting plan. `mlflow.py` should contain only MLflow setup and search helpers. There is no need for a second CLI module; [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) can register the new commands directly from these modules.
 
