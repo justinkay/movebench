@@ -228,6 +228,14 @@ def _run_key(run_payload: dict[str, object]) -> str:
     )
 
 
+def _canonical_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in run_payload.items()
+        if key not in {"experiment_name", "experiment_kind"}
+    }
+
+
 def load_experiment(module_path: str) -> dict[str, object]:
     module, path = _load_module_from_path(module_path)
     if not hasattr(module, "EXPERIMENT"):
@@ -302,8 +310,6 @@ def expand_experiment(
                         "method_model": dict(method.get("model", {})),
                         "method_hparams": dict(method.get("hparams", {})),
                         "seed": int(experiment["seed"]),
-                        "experiment_name": str(experiment["name"]),
-                        "experiment_kind": str(experiment["kind"]),
                         "early_stop_split_key": str(early_stop_split_key),
                         "evaluation_split_keys": evaluation_splits,
                     }
@@ -349,19 +355,24 @@ def write_resolved_manifest(
     out_path = out_dir / f"{experiment['name']}.json"
     manifest = _manifest_payload(experiment, runs)
 
-    if out_path.exists():
-        existing = json.loads(out_path.read_text(encoding="utf-8"))
-        existing_runs = {
-            str(run["run_key"]): bench_config.stable_payload(run)
-            for run in existing.get("runs", [])
-        }
-        for run in runs:
-            run_key = str(run["run_key"])
-            payload = bench_config.stable_payload(run)
+    existing_runs: dict[str, str] = {}
+    for existing_manifest in _load_resolved_manifests():
+        for existing_run in existing_manifest.get("runs", []):
+            run_key = str(existing_run["run_key"])
+            payload = bench_config.stable_payload(_canonical_run_payload(existing_run))
             if run_key in existing_runs and existing_runs[run_key] != payload:
                 raise ValueError(
-                    f"Existing run_key {run_key!r} resolves to a different payload"
+                    f"Existing resolved manifests contain conflicting payloads for run_key {run_key!r}"
                 )
+            existing_runs[run_key] = payload
+
+    for run in runs:
+        run_key = str(run["run_key"])
+        payload = bench_config.stable_payload(_canonical_run_payload(run))
+        if run_key in existing_runs and existing_runs[run_key] != payload:
+            raise ValueError(
+                f"Existing run_key {run_key!r} resolves to a different payload"
+            )
 
     out_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return out_path
@@ -407,12 +418,15 @@ def status_snapshot() -> dict[str, object]:
         study_entries.append({"study_id": study_id, "timescales": timescale_entries})
 
     manifests = _load_resolved_manifests()
-    planned_runs = [
-        run
-        for manifest in manifests
-        for run in manifest.get("runs", [])
-    ]
-    planned_keys = [str(run["run_key"]) for run in planned_runs]
+    planned_keys: list[str] = []
+    seen_planned_keys: set[str] = set()
+    for manifest in manifests:
+        for run in manifest.get("runs", []):
+            run_key = str(run["run_key"])
+            if run_key in seen_planned_keys:
+                continue
+            seen_planned_keys.add(run_key)
+            planned_keys.append(run_key)
     latest_runs = search_latest_runs_by_key(planned_keys)
     completed_runs = [
         run_key
@@ -462,6 +476,8 @@ def _render_status_text(snapshot: dict[str, object]) -> str:
                 parts.append("fully-runnable")
             else:
                 parts.append("blocked")
+            if readiness["blocked_reasons"]:
+                parts.append(f"reasons={'; '.join(readiness['blocked_reasons'])}")
             lines.append(
                 f"{study['study_id']} / {readiness['timescale']}: {', '.join(parts)}"
             )

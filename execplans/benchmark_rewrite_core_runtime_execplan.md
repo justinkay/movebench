@@ -22,6 +22,7 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 - [x] (2026-03-24 21:10Z) Implemented plain Python experiment config normalization, timescale and covariate expansion, blocked-run detection, stable `run_key` generation, and resolved manifest writing under `results/bench_v2/resolved_experiments/`.
 - [x] (2026-03-24 21:10Z) Implemented MLflow bootstrap and query helpers for experiment creation, run startup, full run search, and latest-run lookup by `run_key`.
 - [x] (2026-03-24 21:10Z) Implemented study-timescale readiness scanning plus `movebench bench status --format text`, then verified the scoped runtime with `python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status`.
+- [x] (2026-03-24 22:05Z) Fixed `bench status` planned-run deduplication across resolved manifests and expanded text output to include concrete blocked prerequisites, then re-verified with `python -m unittest -v tests.bench_v2.test_status`.
 
 ## Surprises & Discoveries
 
@@ -55,7 +56,7 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the planner should raise an error if an existing `run_key` resolves to a different materialized payload than before.
-  Rationale: this prevents accidentally mutating the meaning of a finished run while reusing its key.
+  Rationale: this prevents accidentally mutating the meaning of a finished run while reusing its key. The comparison must use the canonical concrete-run payload across all resolved experiment manifests, not experiment-specific metadata.
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the study readiness scanner will operate per study and per timescale, not only per study.
@@ -97,7 +98,7 @@ Build the lightweight config layer in `movebench/bench_v2/config.py`. Keep this 
 
 Create `experiments/v2/main_results.py` and `experiments/v2/covariate_comparison.py` once `config.py` exists. Each file should export one plain `EXPERIMENT` dictionary. `main_results.py` should include all methods and only the `all` covariate set. `covariate_comparison.py` should include `issf_linear`, `issf_mlp`, `deepssf`, and `moveformer`, with covariate sets `all`, `all_environmental`, `alphaearth_only`, and `lite`.
 
-Implement planning inside `movebench/bench_v2/run.py` next. This code should validate an `EXPERIMENT` dictionary, resolve the target studies, inspect existing point-store and deepSSF-cache manifests to detect blocked or missing studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when the required held-out artifacts exist there and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the concrete run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`.
+Implement planning inside `movebench/bench_v2/run.py` next. This code should validate an `EXPERIMENT` dictionary, resolve the target studies, inspect existing point-store and deepSSF-cache manifests to detect blocked or missing studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when the required held-out artifacts exist there and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the canonical concrete-run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`. Experiment membership stays in the resolved manifest metadata; per-run payloads must not include `experiment_name` or `experiment_kind`.
 
 Implement the MLflow helper layer in one compact module, `movebench/bench_v2/mlflow.py`. It should configure MLflow against a backend URI, create or fetch the global MLflow experiment `movebench_bench_v2`, and expose helper functions for:
 
@@ -114,7 +115,6 @@ Every concrete run should be represented in MLflow by params and tags, not by a 
       timescale
       covariate_set
       method
-      experiment_kind
       early_stop_split
       status
 
@@ -124,6 +124,8 @@ Every concrete run should be represented in MLflow by params and tags, not by a 
       any method hparams needed to reproduce the run
 
 The planner itself should not write anything to MLflow. Planning writes only the resolved manifest. Training and evaluation create MLflow runs.
+
+Planner validation must be global across `results/bench_v2/resolved_experiments/`. If two manifests contain the same `run_key`, their canonical run payloads must match exactly. This is what allows `main_results` and `covariate_comparison` to share runs intentionally while still rejecting accidental drift.
 
 Implement status reporting inside `movebench/bench_v2/run.py` as well. It should scan every available study and every configured timescale, check for existing point-store manifests and deepSSF-cache manifests, and summarize which study-timescale pairs are SSF-ready, raster-ready, or blocked by missing prerequisites. It should also compare planned run keys from the resolved experiment manifests against MLflow runs. The simplest rule is: search MLflow for all runs in the benchmark experiment, group them by `tags.run_key`, keep the newest run for each `run_key`, and treat `tags.status == completed` as finished.
 
@@ -173,11 +175,15 @@ Second, `movebench bench status --format text` must print counts for blocked stu
 
 Planning writes only manifests, so rerunning the planner is safe. MLflow writes happen later during execution, keyed operationally by the `run_key` tag.
 
+Two different experiment manifests may legitimately reference the same concrete run. That is not duplication. The error case is only when the same `run_key` points at a different canonical concrete-run payload in another resolved manifest.
+
 The status scanner must never mutate training state. It may write a status cache later, but the first version should be read-only.
 
 ## Artifacts and Notes
 
 The resolved experiment manifest should include both the experiment metadata and the fully materialized concrete runs. That manifest is the easiest artifact for a later reviewer to inspect when checking whether planning is correct.
+
+Those stored runs should be canonical concrete-run payloads. Experiment metadata such as experiment name and experiment kind belongs only in the top-level manifest metadata.
 
 The status output for one study should be detailed enough to answer questions such as “the 1d point store exists but the 7d deepSSF cache is missing.”
 

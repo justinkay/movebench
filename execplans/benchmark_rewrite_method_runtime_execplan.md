@@ -123,7 +123,7 @@ Implement the deepSSF executor in `methods/deepssf.py`. Reuse the existing model
 
 Implement the MoveFormer executor in `methods/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model. Run it through the shared step loop using a MoveFormer runtime object that owns batch fetching, optimizer state, and scheduler updates.
 
-Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, step-indexed history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, `experiment_kind`, and `status`.
+Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, step-indexed history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, and `status`.
 
 Extend [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) with `bench run` after the runtime exists. `run` should accept an experiment module, optional study filters, optional method filters, and a `--max-runs` limit for smoke testing.
 
@@ -197,6 +197,8 @@ The run directory for a trainable method should look like:
       predictions/
 
 The point-store manifest should record the full band order so that covariate subset views can validate their indices against it.
+
+The stored `resolved_run.json` should represent the canonical concrete-run payload, not experiment-specific membership metadata.
 
 The deepSSF cache manifest should record the full channel order and enough metadata to prove that two subset covariate runs are reading slices of the same cached tensors.
 

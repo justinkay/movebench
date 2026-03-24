@@ -54,7 +54,6 @@ def start_benchmark_run(run_payload: dict[str, object]) -> object:
         "timescale": str(run_payload["timescale"]),
         "covariate_set": str(run_payload["covariate_set"]),
         "method": str(run_payload["method"]),
-        "experiment_kind": str(run_payload["experiment_kind"]),
         "early_stop_split": str(run_payload["early_stop_split_key"]),
         "status": str(run_payload.get("status", "running")),
     }

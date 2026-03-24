@@ -53,7 +53,7 @@ Today the benchmark flow is split across [movebench/benchmark.py](/data/vision/b
   Date/Author: 2026-03-24 / assistant
 
 - Decision: one concrete run is identified by study, timescale, method, covariate set, and fixed training settings, and it produces metrics for every available held-out split.
-  Rationale: `main_results` and `covariate_comparison` must be able to share the `all` runs; evaluation split is an output of a run, not part of the run identity.
+  Rationale: `main_results` and `covariate_comparison` must be able to share the `all` runs; evaluation split is an output of a run, not part of the run identity. Experiment membership belongs to the resolved experiment manifest, not to the concrete run identity itself.
   Date/Author: 2026-03-24 / assistant
 
 - Decision: MLflow alone will be the tracking system in v1.
@@ -92,6 +92,8 @@ A “covariate set” means a named subset of the full extracted feature channel
 A “concrete run” means one trainable or non-trainable method evaluated for one study, one timescale, and one covariate set. `test-temporal` and `test-individual` are evaluation outputs of that run.
 
 A “run attempt” means one execution of a concrete run. There may be several attempts if a job crashes and resumes.
+
+A resolved experiment manifest may therefore reference concrete runs that also appear in other experiment manifests. That is expected when two experiment families share the same concrete run.
 
 A “benchmark-ready point store” means an existing point-store layout under `features/points/<split>/<rasters_hash>/<sampler_hash>/` with a valid `manifest.json`, `shared.pt`, and any referenced band tensors already on disk.
 
@@ -145,7 +147,7 @@ When the cutover is complete, the legacy benchmark path should be gone or turned
 
 The rewrite is complete when all of the following are true.
 
-First, `movebench bench plan experiments/v2/main_results.py` imports the experiment config, expands it into concrete runs, writes a resolved manifest, and prints counts for planned, existing, and blocked runs. Re-running the same command must report the same run count without creating duplicates.
+First, `movebench bench plan experiments/v2/main_results.py` imports the experiment config, expands it into concrete runs, writes a resolved manifest, and prints counts for planned, existing, and blocked runs. Re-running the same command must report the same run count without creating duplicates. Planning a second experiment that shares concrete runs with the first must reuse those `run_key` values without error when the canonical run payload matches exactly.
 
 Second, `movebench bench run experiments/v2/main_results.py --studies <study_id>` must train or execute every requested method for one study, write MLflow runs and local artifacts, log step-indexed training and validation metrics to MLflow with `step=global_step`, and record final energy scores for every available held-out split as MLflow metrics. If a required point store, normalization artifact, or deepSSF cache is missing, the affected run must be skipped with a recorded blocked or missing-prerequisite status rather than crashing the whole command.
 
@@ -157,7 +159,7 @@ Fifth, the old path must no longer be the preferred way to run benchmarks. The r
 
 ## Idempotence and Recovery
 
-Every planner action must be idempotent. Planning the same experiment twice must not duplicate rows. Running the same concrete run twice must either skip the completed run or create a new run attempt linked to the same concrete run.
+Every planner action must be idempotent. Planning the same experiment twice must not duplicate rows. Planning two different experiments may point at the same concrete run, but a shared `run_key` must always resolve to the same canonical run payload across all resolved experiment manifests. Running the same concrete run twice must either skip the completed run or create a new run attempt linked to the same concrete run.
 
 If a study is missing required point stores, normalization stats, or deepSSF caches, it must be surfaced as blocked in command output and in the HTML report, and later reruns should continue past it. If a training attempt crashes, the MLflow run should be marked failed and later retries should simply create a newer MLflow run with the same `run_key` tag.
 

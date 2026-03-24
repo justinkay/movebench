@@ -123,6 +123,8 @@ Implement reporting inside `movebench/bench_v2/report.py`. Keep it simple: one f
 
 Keep these queries explicit and easy to read. Do not query MLflow’s raw SQL tables directly.
 
+Experiment association for reporting should come from the resolved experiment manifests and their planned `run_key` sets, not from an MLflow experiment-membership tag on each run attempt.
+
 Generate the required figures in `report.py`. For main results, create one plot per study and per held-out split, with ordered x-axis `[1h, 12h, 1d, 7d]`, y-axis equal to mean energy score, and one line color per method. For covariate comparisons, create one figure per study and per held-out split that is faceted by method, with one line color per covariate set and the same ordered x-axis. Only draw data points that exist. If a study lacks one held-out split, omit that split’s figure and mark it “not applicable” in the HTML.
 
 Generate `results/bench_v2/report/index.html` plus an `assets/` directory of PNGs and a `status_report.json` summary from the same `report.py` module. The HTML should contain, in order, a global summary section, a study readiness section, a completed-runs section, a main-results section, and a covariate-comparison section. The page may use simple inline CSS and no JavaScript. The only requirement is that it is easy to scan quickly from disk or over shared storage.
