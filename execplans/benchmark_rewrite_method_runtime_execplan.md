@@ -8,7 +8,7 @@ This plan depends on [execplans/benchmark_rewrite_core_runtime_execplan.md](/dat
 
 ## Purpose / Big Picture
 
-After this change, a user will be able to run `movebench bench run ...` through one clean runtime that validates and reuses shared artifacts already on disk, trains or executes every requested method, logs per-epoch statistics to MLflow, and produces prediction artifacts for exact evaluation. The visible proof is a smoke experiment that trains at least one iSSF model, one deepSSF model, and one MoveFormer model through the same CLI and writes run directories plus MLflow runs without using `movebench/benchmark.py`.
+After this change, a user will be able to run `movebench bench run ...` through one clean runtime that validates and reuses shared artifacts already on disk, trains or executes every requested method, logs step-indexed statistics to MLflow, and produces prediction artifacts for exact evaluation. The visible proof is a smoke experiment that trains at least one iSSF model, one deepSSF model, and one MoveFormer model through the same CLI and writes run directories plus MLflow runs without using `movebench/benchmark.py`.
 
 This plan is about execution, not reporting. It standardizes how runs are resolved, trained, resumed, and logged.
 
@@ -48,11 +48,11 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 
 ## Decision Log
 
-- Decision: standardize new training schedules on epochs, not on the legacy mixture of steps and epochs.
-  Rationale: the user asked for per-epoch statistics in MLflow, and epoch-based schedules are easier to explain and compare across methods.
+- Decision: standardize new training schedules on optimizer steps, not on epochs.
+  Rationale: studies vary substantially in size, and the existing iSSF path already trains by `max_steps`, `eval_interval`, and patience on evaluation windows. Step-based control is the more comparable and operationally stable framework here.
   Date/Author: 2026-03-24 / assistant
 
-- Decision: use one shared `EpochTrainer` lifecycle and method-specific executor objects.
+- Decision: use one shared `StepTrainer` lifecycle and method-specific executor objects.
   Rationale: optimizer stepping, early stopping, checkpoint restore, and metric logging are shared behaviors even though batch structure differs by method family.
   Date/Author: 2026-03-24 / assistant
 
@@ -68,7 +68,7 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
   Rationale: this matches the user’s request while remaining workable for studies that lack `test-temporal`.
   Date/Author: 2026-03-24 / assistant
 
-- Decision: baselines will execute through the same concrete-run layer as trainable methods, but they will record zero epochs.
+- Decision: baselines will execute through the same concrete-run layer as trainable methods, but they will record zero training steps.
   Rationale: they still need run identity, MLflow artifacts, final metrics, and report visibility.
   Date/Author: 2026-03-24 / assistant
 
@@ -101,11 +101,11 @@ A “superset artifact” means an existing artifact built once using the full `
 
 ## Plan of Work
 
-Keep the runtime compact. Put orchestration in `movebench/bench_v2/run.py`, the shared epoch loop in `movebench/bench_v2/train.py`, and family-specific code in `movebench/bench_v2/methods/`. Do not add `prepare.py` in this scope; artifact discovery and validation can stay in `run.py` or the method modules unless duplication proves otherwise.
+Keep the runtime compact. Put orchestration in `movebench/bench_v2/run.py`, the shared step-based loop in `movebench/bench_v2/train.py`, and family-specific code in `movebench/bench_v2/methods/`. Do not add `prepare.py` in this scope; artifact discovery and validation can stay in `run.py` or the method modules unless duplication proves otherwise.
 
-Implement the shared trainer first in `movebench/bench_v2/train.py`. Define one `EpochTrainer` that is independent of any specific batch shape. It should own seed setup, epoch loops, best-checkpoint tracking, early-stopping decisions, per-epoch metric logging, and final restore of the best checkpoint. It may use a very small method-facing interface, but do not over-abstract it. The trainer must log per-epoch metrics to MLflow with `step=epoch` for trainable methods and none for baselines. It should also write a small `epoch_history.json` artifact so later debugging does not depend on MLflow API calls alone.
+Implement the shared trainer first in `movebench/bench_v2/train.py`. Define one `StepTrainer` that is independent of any specific batch shape. It should own seed setup, step loops, best-checkpoint tracking, early-stopping decisions, step-indexed metric logging, and final restore of the best checkpoint. It may use a very small method-facing interface, but do not over-abstract it. The trainer must log trainable-method metrics to MLflow with `step=global_step` and none for baselines. It should also write a small `history.json` artifact so later debugging does not depend on MLflow API calls alone. If later reporting still wants epoch-like progress, record a derived `epoch_fraction` or `passes_completed` field in that history, but do not use epochs for control flow.
 
-Use epoch schedules everywhere in the new runtime. The method catalog should expose defaults like `max_epochs`, `eval_every_epochs`, and `patience_epochs` instead of the legacy `max_steps` vocabulary. Preserve method-specific optimizer and scheduler details inside the method executor, not inside the trainer.
+Use step schedules everywhere in the new runtime. The method catalog should expose defaults like `max_steps`, `eval_every_steps`, and `patience_evals` instead of an epoch vocabulary. Preserve method-specific optimizer and scheduler details inside the method executor, not inside the trainer.
 
 Implement read-only artifact resolution next. This logic should locate point-store manifests via `load_point_store_manifest(...)`, `shared.pt`, and train normalization stats under the existing `features/points/<split>/<rasters_hash>/<sampler_hash>/` layout. It should also locate deepSSF cache manifests under `cache/deepssf_wds/<split>/<cache_hash>/`. If a required manifest, shard set, or normalization file is missing, the resolver should return a concise blocked reason and the runner should skip that concrete run instead of trying to build missing artifacts.
 
@@ -117,13 +117,13 @@ Implement deepSSF cache consumption in the same compact style. The runtime shoul
 
 Implement the three baseline executors in `methods/baselines.py`. The no-move baseline predicts the start point exactly. The constant-velocity baseline uses the previous observed step length and current bearing exactly as in the old comparison script. The random-walk baseline uses the same discrete pseudo-candidate support built for the point store and treats those pseudo-candidates as a uniform predictive distribution. The baseline executor does not train, but it must still create an MLflow run, write a prediction artifact placeholder, and mark the run completed.
 
-Implement the iSSF executor in `methods/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module. Build a pre-materialized `(N,C,P)` tensor cache from the point store and the selected covariate view, keyed by the point-store identity plus the covariate-set key. The tensor cache is a runtime optimization, not a replacement for the extracted point store, and may live under `results/bench_v2/cache/issf_tensor/<run_key>/` or a similarly isolated runtime cache root. Training should use the shared `EpochTrainer`, an Adam optimizer, and the same candidate-cross-entropy objective as the existing code. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per epoch.
+Implement the iSSF executor in `methods/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module, and it should explicitly reuse the current `iSSFDataset.build_expanded_x(...)` style of materialization from [movebench/datasets/ssf.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/ssf.py). The “pre-materialized `(N,C,P)` tensor cache” in this plan means that existing design tensor: one full feature tensor per split, built from the point store and the selected covariate view, then reused across training and repeated validation passes so Python-level dataset work is not repeated every step. By default this can stay in memory for the current run. Persistent disk caching should be treated as an optional later optimization only if profiling shows that repeated `build_expanded_x(...)` work dominates retries or resume paths. Conceptually it is keyed by the underlying point-store identity and the covariate-set selection so incompatible tensors are never mixed, but it is not a new extracted artifact family. Training should use the shared `StepTrainer`, an Adam optimizer, and the same candidate-cross-entropy objective as the existing code. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per evaluation.
 
 Implement the deepSSF executor in `methods/deepssf.py`. Reuse the existing model definition and the existing WebDataset loader path where possible, but add a thin adapter that slices cached spatial channels to the requested covariate set and exposes a deterministic early-stopping subset. Keep the current cross-entropy-on-grid loss for training and early stopping. Log the number of valid in-bounds held-out targets used by early stopping because that count can differ across studies and timescales.
 
 Implement the MoveFormer executor in `methods/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model.
 
-Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, per-epoch history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, `experiment_kind`, and `status`.
+Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, step-indexed history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, `experiment_kind`, and `status`.
 
 Extend [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) with `bench run` after the runtime exists. `run` should accept an experiment module, optional study filters, optional method filters, and a `--max-runs` limit for smoke testing.
 
@@ -143,7 +143,7 @@ Create a new test package for runtime and method behavior:
       test_moveformer_runtime.py
       test_runner.py
 
-Start with the shared trainer tests using a fake `EpochJob` that has a predictable loss curve. The tests must prove best-checkpoint restore and early stopping. Run:
+Start with the shared trainer tests using a fake `TrainJob` that has a predictable loss curve. The tests must prove best-checkpoint restore and early stopping. Run:
 
     python -m unittest -v tests.bench_v2.test_trainer
 
@@ -171,9 +171,9 @@ Acceptance for this plan is reached when the following behaviors are observable.
 
 First, `movebench bench run experiments/v2/smoke_one_study.py --max-runs 3` must resolve the required point stores, normalization stats, and deepSSF caches from their existing on-disk locations before execution begins. If any required artifact is missing, the affected run must be marked blocked with a concise reason and skipped.
 
-Second, trainable methods log per-epoch metrics to MLflow with `step=epoch`, restore the best checkpoint before writing their final training summary, and store the preferred held-out split used for early stopping in their run payload and MLflow tags.
+Second, trainable methods log step-indexed metrics to MLflow with `step=global_step`, restore the best checkpoint before writing their final training summary, and store the preferred held-out split used for early stopping in their run payload and MLflow tags.
 
-Third, baseline methods create completed runs with zero epochs, no checkpoint files, and standardized prediction artifacts that later evaluation code can read.
+Third, baseline methods create completed runs with zero training steps, no checkpoint files, and standardized prediction artifacts that later evaluation code can read.
 
 Fourth, covariate-subset runs reuse the existing `all` point-store and deepSSF-cache artifacts at read time instead of requiring new extracted artifacts on disk.
 
@@ -204,8 +204,8 @@ The deepSSF cache manifest should record the full channel order and enough metad
 
 Define in `movebench/bench_v2/train.py`:
 
-    class EpochJob(Protocol):
-        def train_one_epoch(self, epoch: int) -> dict[str, float]: ...
+    class TrainJob(Protocol):
+        def train_one_step(self, step: int) -> dict[str, float]: ...
         def evaluate_subset(self, split_key: str) -> dict[str, float]: ...
         def state_dict(self) -> dict[str, object]: ...
         def load_state_dict(self, state: dict[str, object]) -> None: ...
@@ -213,13 +213,13 @@ Define in `movebench/bench_v2/train.py`:
 
     @dataclass
     class TrainerConfig:
-        max_epochs: int
-        eval_every_epochs: int
-        patience_epochs: int
+        max_steps: int
+        eval_every_steps: int
+        patience_evals: int
         seed: int
 
-    class EpochTrainer:
-        def fit(self, job: EpochJob, config: TrainerConfig, tracker: object) -> dict[str, object]: ...
+    class StepTrainer:
+        def fit(self, job: TrainJob, config: TrainerConfig, tracker: object) -> dict[str, object]: ...
 
 If a formal protocol is useful, keep it tiny. A simple pair of callables such as `resolve_inputs(run)` and `execute(resolved_run)` is enough.
 
