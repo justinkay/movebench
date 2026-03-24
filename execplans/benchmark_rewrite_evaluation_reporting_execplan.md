@@ -40,7 +40,7 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
   Evidence: the current `app/` directory is a trajectory viewer, not an experiment dashboard, and the user wants an always-updated HTML file that can be checked quickly.
 
 - Observation: some studies have only one held-out split, so the report layer must treat missing plots as “not applicable,” not as failures.
-  Evidence: the cleaned split inventory includes studies with only `test-temporal` or only `test-individual`.
+  Evidence: the existing study inventories and artifact layouts include studies with only `test-temporal` or only `test-individual`.
 
 ## Decision Log
 
@@ -62,6 +62,10 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 
 - Decision: daily automation will call the same library-backed CLI commands as manual usage, with only thin shell or Python wrappers for scheduling convenience.
   Rationale: the daily path should not become a second implementation of the runtime.
+  Date/Author: 2026-03-24 / assistant
+
+- Decision: the automation layer begins after extraction and cache building.
+  Rationale: this rewrite is intentionally scoped to post-extraction benchmark execution and reporting, so missing artifacts should be reported as blocked prerequisites rather than triggering extraction here.
   Date/Author: 2026-03-24 / assistant
 
 ## Outcomes & Retrospective
@@ -97,11 +101,11 @@ Implement `energy.py` next. Add one exact function per prediction family. For de
 
 exactly with vectorized tensor code. This path covers `baseline_randomwalk`, `issf_linear`, `issf_mlp`, and `moveformer`. Require that the discrete-support artifact already excludes the true endpoint candidate from its support; if the artifact still includes it, fail loudly. For dense-grid predictions, compute the first term directly over the full grid, then compute the pairwise term by convolving the probability map with itself against a precomputed distance kernel using FFT. The implementation must be numerically tested against a brute-force small-grid reference.
 
-Implement `runner.py` after the metric core exists. This module should load one completed concrete run, detect which held-out splits are available from the run metadata and prepared artifacts, materialize the standardized prediction artifact for each split, compute per-step energy scores, write one artifact such as `energy_by_step.parquet` or `energy_by_step.csv.gz`, and then write an aggregated summary JSON. Log final aggregate metrics back to MLflow, for example `energy_score.test_temporal` and `energy_score.test_individual`, plus optional counts such as `n_steps.test_temporal` and `n_steps.test_individual`. The per-step file belongs in the run artifact directory.
+Implement `runner.py` after the metric core exists. This module should load one completed concrete run, detect which held-out splits are available from the run metadata and existing artifacts, materialize the standardized prediction artifact for each split, compute per-step energy scores, write one artifact such as `energy_by_step.parquet` or `energy_by_step.csv.gz`, and then write an aggregated summary JSON. Log final aggregate metrics back to MLflow, for example `energy_score.test_temporal` and `energy_score.test_individual`, plus optional counts such as `n_steps.test_temporal` and `n_steps.test_individual`. The per-step file belongs in the run artifact directory.
 
 The evaluation runner must treat out-of-bounds deepSSF targets correctly. The model distribution is still defined on the chip grid, and the observed endpoint can lie outside that grid. The energy score remains valid because it only needs the true endpoint coordinate in meters relative to the start point, not a one-hot target pixel.
 
-Implement `movebench/bench_v2/reporting/` next with `queries.py`, `plots.py`, `html.py`, and `status.py`. `queries.py` should expose simple MLflow-backed functions such as `load_main_results(split_key: str) -> pd.DataFrame` and `load_covariate_results(split_key: str) -> pd.DataFrame`. These functions should:
+Implement reporting inside `movebench/bench_v2/report.py`. Keep it simple: one file may internally define `load_main_results(...)`, `load_covariate_results(...)`, plotting helpers, HTML generation, and status rendering. These functions should:
 
 1. load the resolved experiment manifests,
 2. gather the planned `run_key` values for the requested experiment kind,
@@ -112,17 +116,16 @@ Implement `movebench/bench_v2/reporting/` next with `queries.py`, `plots.py`, `h
 
 Keep these queries explicit and easy to read. Do not query MLflow’s raw SQL tables directly.
 
-In `plots.py`, generate the required figures. For main results, create one plot per study and per held-out split, with ordered x-axis `[1h, 12h, 1d, 7d]`, y-axis equal to mean energy score, and one line color per method. For covariate comparisons, create one figure per study and per held-out split that is faceted by method, with one line color per covariate set and the same ordered x-axis. Only draw data points that exist. If a study lacks one held-out split, omit that split’s figure and mark it “not applicable” in the HTML.
+Generate the required figures in `report.py`. For main results, create one plot per study and per held-out split, with ordered x-axis `[1h, 12h, 1d, 7d]`, y-axis equal to mean energy score, and one line color per method. For covariate comparisons, create one figure per study and per held-out split that is faceted by method, with one line color per covariate set and the same ordered x-axis. Only draw data points that exist. If a study lacks one held-out split, omit that split’s figure and mark it “not applicable” in the HTML.
 
-In `html.py`, generate `results/bench_v2/report/index.html` plus an `assets/` directory of PNGs and a `status_report.json` summary. The HTML should contain, in order, a global summary section, a study readiness section, a completed-runs section, a main-results section, and a covariate-comparison section. The page may use simple inline CSS and no JavaScript. The only requirement is that it is easy to scan quickly from disk or over shared storage.
+Generate `results/bench_v2/report/index.html` plus an `assets/` directory of PNGs and a `status_report.json` summary from the same `report.py` module. The HTML should contain, in order, a global summary section, a study readiness section, a completed-runs section, a main-results section, and a covariate-comparison section. The page may use simple inline CSS and no JavaScript. The only requirement is that it is easy to scan quickly from disk or over shared storage.
 
-Implement `movebench/bench_v2/status.py` or a similarly named module that emits a machine-readable snapshot of study readiness, planned runs, completed runs, blocked studies, and missing artifacts. `movebench bench status --format text` from the core plan should reuse this module, and `movebench bench status --format html` can later delegate to the report generator.
+Have `report.py` also emit a machine-readable snapshot of study readiness, planned runs, completed runs, blocked studies, and missing artifacts. `movebench bench status --format text` from the core plan can call a small helper in `run.py`, and `movebench bench status --format html` can delegate to `report.py`.
 
-Implement the automation layer last in `movebench/bench_v2/automation/`. Add library functions for three actions: preparing newly download-complete studies, running newly ready experiments, and regenerating the report. Then add thin CLI or shell wrappers. A reasonable interface is:
+Implement the automation layer last in `movebench/bench_v2/automation/`. Add library functions for two actions: running newly ready experiments and regenerating the report. The readiness input should come from the artifact-validation logic in `run.py`; do not add any extraction orchestration here. Then add thin CLI or shell wrappers. A reasonable interface is:
 
-    movebench bench prepare --selection ready-for-extraction
-    movebench bench run experiments/v2/main_results.py --selection ready-for-experiment
-    movebench bench run experiments/v2/covariate_comparison.py --selection ready-for-experiment
+    movebench bench run experiments/v2/main_results.py --selection runnable
+    movebench bench run experiments/v2/covariate_comparison.py --selection runnable
     movebench bench report
 
 Also add one convenience script such as `scripts/daily/run_bench_v2_daily.sh` that calls those commands in order and writes a log file under `results/bench_v2/logs/`.
@@ -238,8 +241,6 @@ Define in `movebench/bench_v2/evaluation/energy.py`:
     def energy_score_deterministic(pred: DeterministicPrediction, truth_xy_m: np.ndarray) -> float: ...
     def energy_score_discrete(pred: DiscreteSupportPrediction, truth_xy_m: np.ndarray) -> float: ...
     def energy_score_grid(pred: GridPrediction, truth_xy_m: np.ndarray) -> float: ...
-
-Define in `movebench/bench_v2/reporting/queries.py` a small set of explicit data loaders rather than one generic query builder.
 
 Keep plotting dependencies minimal. Use `matplotlib` and standard library HTML generation unless a truly necessary requirement appears later.
 

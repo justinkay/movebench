@@ -8,48 +8,39 @@ This plan is the first implementation stage of [execplans/benchmark_rewrite_over
 
 ## Purpose / Big Picture
 
-After this change, a user will be able to express the benchmark suite in plain Python, expand it into stable concrete runs, write resolved run manifests, and inspect which studies are blocked or ready before any model training begins. The visible proof is that `movebench bench plan ...` and `movebench bench status` work against the new `bench_v2` runtime and no longer depend on legacy YAML benchmark files.
+After this change, a user will be able to express the benchmark suite in plain Python, expand it into stable concrete runs, write resolved run manifests, and inspect which studies and timescales are runnable from existing artifacts before any model training begins. The visible proof is that `movebench bench plan ...` and `movebench bench status` work against the new `bench_v2` runtime and no longer depend on legacy YAML benchmark files.
 
-This plan does not train any models yet. It builds the control plane: a temporary split override shim for `cleaned-v2-splits/`, split-correct step selection for preparation, plain Python experiment configs, concrete run planning, MLflow bootstrapping, and readiness scanning.
+This plan does not train any models yet. It builds the control plane: plain Python experiment configs, concrete run planning, MLflow bootstrapping, and readiness scanning over pre-existing point stores and deepSSF caches. Extraction, split correction, and cache building are outside the scope of this plan.
 
 ## Progress
 
-- [x] (2026-03-24 17:10Z) Reviewed the current benchmark runner, `Study` API, point-store extraction code, dataset wrappers, and the cleaned split files to identify the existing control-plane responsibilities.
-- [x] (2026-03-24 17:30Z) Verified that the cleaned split files use the `event-id` column present in `trajectories.csv`, making an exact overlay join possible.
+- [x] (2026-03-24 17:10Z) Reviewed the current benchmark runner, `Study` API, point-store loaders, and deepSSF cache helpers to identify the control-plane responsibilities that must be replaced.
+- [x] (2026-03-24 17:30Z) Verified that the existing point-store layout already exposes stable manifests and tensor files under split-specific directories, which is sufficient for runtime validation and loading.
 - [x] (2026-03-24 17:40Z) Verified that most studies have both `test-temporal` and `test-individual`, but some studies have only one held-out split and must be supported without special casing in experiment configs.
-- [x] (2026-03-24 17:50Z) Verified that the current point extractor can consume an explicit step dataframe, which means split-correct in-memory step selection can drive extraction without reusing the old split-selection wrapper.
+- [x] (2026-03-24 17:50Z) Verified that the current deepSSF WebDataset cache helpers already define a stable on-disk manifest and shard layout that the new runtime can treat as a prerequisite.
 - [ ] Create the `movebench/bench_v2/` package skeleton, dependency updates, and CLI entrypoint.
-- [ ] Implement the temporary split override loader against `cleaned-v2-splits/`.
-- [ ] Implement split-correct in-memory step selection for preparation and evaluation.
 - [ ] Implement plain Python experiment config validation and concrete-run planning.
 - [ ] Implement MLflow bootstrap plus lightweight query helpers.
 - [ ] Implement study readiness scanning and `movebench bench status`.
 
 ## Surprises & Discoveries
 
-- Observation: the cleaned split files already carry a `set` column with the exact labels needed by the new runtime.
-  Evidence: sample files in `cleaned-v2-splits/` contain `train`, `test-temporal`, `test-individual`, and `unused`, matching the user’s requested terminology.
-
-- Observation: the existing `trajectories.csv` files usually contain the same `event-id` column as the cleaned split files.
-  Evidence: sample study files under `/archive/vision/beery/movebench/studies/<study_id>/trajectories.csv` include `event-id`, making a direct overlay safer than fuzzy matching on timestamp and coordinates.
+- Observation: the existing point-store layout already encodes split membership in the directory structure.
+  Evidence: [movebench/features/points.py](/data/vision/beery/scratch/justin/movebench/movebench/features/points.py) resolves stores under `features/points/<split>/<rasters_hash>/<sampler_hash>/` and loads them by manifest plus `shared.pt`.
 
 - Observation: the current benchmark code assumes only `train` and `test`.
   Evidence: [movebench/benchmark.py](/data/vision/beery/scratch/justin/movebench/movebench/benchmark.py) passes `splits=["train", "test"]` into preparation functions.
 
-- Observation: studies with invalid cleaned split overrides are rare enough that they should be blocked explicitly rather than tolerated by lossy joins.
-  Evidence: 146 of 148 inspected studies were full bijections by `event-id`. That makes “fail closed” the safer default.
+- Observation: deepSSF caches already have a readably structured manifest and directory contract.
+  Evidence: [movebench/datasets/deepssf_wds_cache.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/deepssf_wds_cache.py) stores caches under `cache/deepssf_wds/<split>/<cache_hash>/` with a manifest plus shard directory, which is enough for readiness checks.
 
 - Observation: the project does not currently have an experiment-planning abstraction at all.
   Evidence: [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) registers only `download`, `extract`, and `ingest`.
 
 ## Decision Log
 
-- Decision: the cleaned split handling should be a small temporary adapter, not a persisted feature with its own artifact format.
-  Rationale: the corrected split labels are expected to move into the normal study directory later, so the implementation should be easy to delete when that happens.
-  Date/Author: 2026-03-24 / assistant
-
-- Decision: there should be no standalone step-table artifact.
-  Rationale: the step-level data already effectively lives in the point stores and related caches. The runtime only needs a split-correct helper used during extraction and dataset construction.
+- Decision: the new benchmark runtime starts after extraction and cache building.
+  Rationale: the user explicitly wants this rewrite to consume existing point stores and WDS caches on disk, not redesign or orchestrate extraction.
   Date/Author: 2026-03-24 / assistant
 
 - Decision: experiments will be ordinary Python modules under `experiments/v2/`, each exporting one plain Python `EXPERIMENT` dictionary.
@@ -65,7 +56,7 @@ This plan does not train any models yet. It builds the control plane: a temporar
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the study readiness scanner will operate per study and per timescale, not only per study.
-  Rationale: downloads, point stores, and deepSSF caches can finish at different times across timescales, and the user wants operational visibility that is detailed enough for daily automation.
+  Rationale: point stores and deepSSF caches can exist for some timescales but not others, and the user wants operational visibility that is detailed enough for daily automation.
   Date/Author: 2026-03-24 / assistant
 
 ## Outcomes & Retrospective
@@ -80,29 +71,24 @@ Relevant existing files are:
 
 - [movebench/benchmark.py](/data/vision/beery/scratch/justin/movebench/movebench/benchmark.py), which currently validates YAML and dispatches per-method runs.
 - [movebench/study.py](/data/vision/beery/scratch/justin/movebench/movebench/study.py), which exposes the current high-level study API.
-- [movebench/trajectories.py](/data/vision/beery/scratch/justin/movebench/movebench/trajectories.py), which provides the step-selection logic that the new split-correct helper must reuse carefully.
-- [movebench/features/points.py](/data/vision/beery/scratch/justin/movebench/movebench/features/points.py), whose `extract_split_feature_store(...)` helper can later be reused once the split-correct step rows are available.
-- [cleaned-v2-splits/](/data/vision/beery/scratch/justin/movebench/cleaned-v2-splits), which is the authoritative source for train and held-out membership.
+- [movebench/features/points.py](/data/vision/beery/scratch/justin/movebench/movebench/features/points.py), whose point-store layout is the main artifact contract the new runtime should build around.
+- [movebench/datasets/deepssf_wds_cache.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/deepssf_wds_cache.py), whose cache-manifest layout is the raster artifact contract the new runtime should validate.
 
-Two rules are crucial here.
+One design constraint is crucial here.
 
-First, benchmark code must load trajectories through one tiny helper that replaces the `set` column from `cleaned-v2-splits/<study_id>.csv` when that file exists. This helper should validate unique `event-id` values on both sides and fail loudly on mismatches. It should not write a new on-disk overlay format.
-
-Second, benchmark step selection must be done on the full split-corrected trajectory dataframe, but a step only belongs to split `X` when both the step start point and the step endpoint are in `X`. The previous point may be outside `X` because `start_bearing` depends on it. This logic should live in a helper used during extraction and dataset construction, not in a separate persisted artifact.
+The planning/runtime layer should assume that benchmark-ready artifacts already exist at their current on-disk locations. This plan must not add split-overlay logic, point-store extraction, or WDS-cache building. It should only validate and consume those artifacts.
 
 ## Plan of Work
 
-Start by creating the new package structure under `movebench/bench_v2/` with at least `__init__.py`, `cli.py`, `config.py`, `data.py`, `plan.py`, `mlflow.py`, and `status.py`. Update [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) to add a `bench` extra containing `mlflow`, `pyarrow`, and any small helper dependency that is truly required. Do not add Hydra, OmegaConf, Alembic, or any web server framework.
+Start by creating the new package structure under `movebench/bench_v2/` with at least `__init__.py`, `config.py`, `run.py`, `report.py`, and `mlflow.py`. Update [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) to add a `bench` extra containing `mlflow`, `pyarrow`, and any small helper dependency that is truly required. Do not add Hydra, OmegaConf, Alembic, or any web server framework.
 
-Implement `movebench/bench_v2/data.py` first. Keep this module small. It should expose `load_benchmark_trajectories(study_id)` and one helper for split-correct step selection. `load_benchmark_trajectories(study_id)` should load `trajectories.csv`, look for `cleaned-v2-splits/<study_id>.csv`, and if that file exists replace the `set` column by joining `event-id -> set`. Validate uniqueness on both sides and require a full row-count match. On mismatch, raise a clear error such as “cleaned split file does not match trajectories.csv for study X.” Do not write an overlay artifact to disk. The point of this helper is to be temporary and easy to delete later.
+Keep file count low. `config.py` should hold the benchmark definitions and run-expansion helpers. `run.py` should hold planning-oriented commands such as `plan` and `status`, plus any small helpers that do not justify their own module. `report.py` is reserved for the later reporting plan. `mlflow.py` should contain only MLflow setup and search helpers. There is no need for a second CLI module; [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) can register the new commands directly from these modules.
 
-The split-correct step-selection helper should take the full split-corrected dataframe and a requested split name, call the existing interval step-selection logic on the full dataframe, and then keep only rows whose start point and endpoint both belong to the requested split. This is the only subtle split rule the rest of the runtime needs. Keep it as a normal function and do not introduce a standalone step-table artifact.
-
-Build the lightweight config layer in `movebench/bench_v2/config.py`. Keep this file simple and explicit. It should define dictionaries for the current timescales, covariate sets, and methods. A timescale entry should carry the user-facing key such as `1d`, the numeric `step_time_s`, and the layer-config paths needed later by extraction. A covariate-set entry should describe how to pick band ids from the full extracted feature list. A method entry should state whether the method trains and where its executor lives.
+Build the lightweight config layer in `movebench/bench_v2/config.py`. Keep this file simple and explicit. It should define dictionaries for the current timescales, covariate sets, and methods, plus one helper that expands an experiment dictionary into concrete run dictionaries. A timescale entry should carry the user-facing key such as `1d`, the numeric `step_time_s`, and the artifact identifiers needed later to locate existing point stores and deepSSF caches. A covariate-set entry should describe how to pick band ids from the full extracted feature list. A method entry should state whether the method trains, whether it requires point-store artifacts only or raster artifacts as well, and where its executor lives.
 
 Create `experiments/v2/main_results.py` and `experiments/v2/covariate_comparison.py` once `config.py` exists. Each file should export one plain `EXPERIMENT` dictionary. `main_results.py` should include all methods and only the `all` covariate set. `covariate_comparison.py` should include `issf_linear`, `issf_mlp`, `deepssf`, and `moveformer`, with covariate sets `all`, `all_environmental`, `alphaearth_only`, and `lite`.
 
-Implement `movebench/bench_v2/plan.py` next. This module should validate an `EXPERIMENT` dictionary, resolve the target studies, call `load_benchmark_trajectories(study_id)` to detect blocked studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when present and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the concrete run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`.
+Implement planning inside `movebench/bench_v2/run.py` next. This code should validate an `EXPERIMENT` dictionary, resolve the target studies, inspect existing point-store and deepSSF-cache manifests to detect blocked or missing studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when the required held-out artifacts exist there and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the concrete run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`.
 
 Implement the MLflow helper layer in one compact module, `movebench/bench_v2/mlflow.py`. It should configure MLflow against a backend URI, create or fetch the global MLflow experiment `movebench_bench_v2`, and expose helper functions for:
 
@@ -130,11 +116,9 @@ Every concrete run should be represented in MLflow by params and tags, not by a 
 
 The planner itself should not write anything to MLflow. Planning writes only the resolved manifest. Training and evaluation create MLflow runs.
 
-Implement `movebench/bench_v2/status.py` last in this plan. This module should scan every available study and every configured timescale, use `load_benchmark_trajectories(study_id)` to identify blocked studies, check whether the requested raster downloads appear complete, and check for the later point-store and deepSSF-cache markers. Return a structured object that later report code can render directly. The first version may compute readiness live from the filesystem without persisting anything.
+Implement status reporting inside `movebench/bench_v2/run.py` as well. It should scan every available study and every configured timescale, check for existing point-store manifests and deepSSF-cache manifests, and summarize which study-timescale pairs are SSF-ready, raster-ready, or blocked by missing prerequisites. It should also compare planned run keys from the resolved experiment manifests against MLflow runs. The simplest rule is: search MLflow for all runs in the benchmark experiment, group them by `tags.run_key`, keep the newest run for each `run_key`, and treat `tags.status == completed` as finished.
 
-`status.py` should also be able to compare planned run keys from the resolved experiment manifests against MLflow runs. The simplest rule is: search MLflow for all runs in the benchmark experiment, group them by `tags.run_key`, keep the newest run for each `run_key`, and treat `tags.status == completed` as finished. This is enough to answer “how many planned runs are complete?” without custom tables.
-
-Extend `movebench/cli/main.py` only after the `bench_v2` modules are in place. Register a `bench` subcommand group implemented in `movebench/bench_v2/cli.py` with at least `plan` and `status`. `plan` must support `--studies` overrides. `status` must support a text output mode before the later HTML report exists.
+Extend [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) only after the `bench_v2` modules are in place. Register a `bench` subcommand group there directly. `plan` must support `--studies` overrides. `status` must support a text output mode before the later HTML report exists.
 
 ## Concrete Steps
 
@@ -146,20 +130,11 @@ Add the new dependency group and package skeleton first, then create a new test 
 
     tests/bench_v2/
       __init__.py
-      test_data.py
       test_plan.py
       test_mlflow.py
       test_status.py
 
-Start with the temporary split-override tests. Use tiny synthetic CSV fixtures created under `tests/fixtures/bench_v2/` or in temporary directories. Run:
-
-    python -m unittest -v tests.bench_v2.test_data
-
-Add tests that prove the split-correct step-selection rule and previous-point context rule. The smallest useful fixture has at least one step whose previous point lies outside the target partition and one step whose endpoint crosses into a different partition. Run:
-
-    python -m unittest -v tests.bench_v2.test_data
-
-When the planner and MLflow helper layer exist, add tests that prove deduplication, simple run planning, and grouping latest MLflow runs by `run_key`. Run:
+Start with config and planning tests using tiny fixture experiment dictionaries and fake artifact roots. Run:
 
     python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow
 
@@ -177,17 +152,11 @@ That command should write a resolved run manifest and print planned counts witho
 
 Acceptance for this plan is reached when the following behaviors are observable.
 
-First, a study with a perfectly matching cleaned split file loads successfully through `load_benchmark_trajectories(study_id)`, while a deliberately mismatched fixture raises a clear error that the status command reports as blocked.
+First, `movebench bench plan experiments/v2/main_results.py --studies all` creates one concrete run per valid combination of study, timescale, method, and covariate set. Running it a second time must not change the resolved run keys unless the experiment definition itself changed.
 
-Second, a step-selection fixture shows the intended eligibility behavior. A step whose start point is `train` and endpoint is `test-temporal` must not be included in the `train` extraction set or the `test-temporal` extraction set. A step whose previous point is outside `train` but whose start and endpoint are both `train` must remain eligible for `train`.
-
-Third, `movebench bench plan experiments/v2/main_results.py --studies all` creates one concrete run per valid combination of study, timescale, method, and covariate set. Running it a second time must not change the resolved run keys unless the experiment definition itself changed.
-
-Fourth, `movebench bench status --format text` must print counts for blocked studies, ready-for-extraction studies, ready-for-SSF studies, ready-for-raster studies, and planned benchmark runs.
+Second, `movebench bench status --format text` must print counts for blocked studies, SSF-ready studies, raster-ready studies, fully runnable study-timescale pairs, and planned versus completed benchmark runs.
 
 ## Idempotence and Recovery
-
-The split override helper must be safe to call repeatedly because it writes nothing. If the cleaned split file changes, the next call should simply reflect the new labels or error out if the file no longer matches.
 
 Planning writes only manifests, so rerunning the planner is safe. MLflow writes happen later during execution, keyed operationally by the `run_key` tag.
 
@@ -201,15 +170,18 @@ The status output for one study should be detailed enough to answer questions su
 
 ## Interfaces and Dependencies
 
-Define in `movebench/bench_v2/data.py`:
+Define in `movebench/bench_v2/config.py`:
 
-    def load_benchmark_trajectories(study_id: str) -> pd.DataFrame: ...
-    def select_steps_for_split(df: pd.DataFrame, *, split: str, step_time_s: int, gap_q: float, step_q: float, max_step_q: float, step_multiplier: float) -> pd.DataFrame: ...
+    EXPERIMENT_DEFAULTS: dict[str, object]
+    TIMESCALES: dict[str, dict[str, object]]
+    COVARIATE_SETS: dict[str, dict[str, object]]
+    METHODS: dict[str, dict[str, object]]
 
-Define in `movebench/bench_v2/plan.py`:
+Define in `movebench/bench_v2/run.py`:
 
     def load_experiment(module_path: str) -> dict[str, object]: ...
     def expand_experiment(experiment: dict[str, object], studies_override: list[str] | None = None) -> list[dict[str, object]]: ...
     def write_resolved_manifest(experiment: dict[str, object], runs: list[dict[str, object]]) -> Path: ...
+    def status_snapshot() -> dict[str, object]: ...
 
-Plan creation note (2026-03-24 / assistant): initial draft written after validating the cleaned split files, the step-selection semantics, and the absence of an existing planning layer in the repository.
+Plan creation note (2026-03-24 / assistant): initial draft written after validating the current artifact contracts and the absence of an existing planning layer in the repository.
