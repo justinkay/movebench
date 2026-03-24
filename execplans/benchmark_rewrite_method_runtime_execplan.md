@@ -19,7 +19,7 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 - [x] (2026-03-24 17:50Z) Verified that the point-store loading helpers and dataset wrappers already provide a usable read path for SSF-style methods, so the new runtime can start from existing artifacts instead of rebuilding them.
 - [x] (2026-03-24 18:00Z) Verified that the current deepSSF cache design is keyed too narrowly to reuse superset artifacts for subset covariate experiments.
 - [x] (2026-03-24 18:10Z) Verified that MoveFormer evaluation already uses a loss mask and therefore fits naturally with split-aware token masking in the new runtime.
-- [ ] Implement the shared trainer lifecycle and stable runtime interfaces under `movebench/bench_v2/`.
+- [ ] Implement the shared training lifecycle helper and per-method runtime pattern under `movebench/bench_v2/`.
 - [ ] Implement read-only artifact resolution for point stores, normalization stats, and deepSSF caches.
 - [ ] Implement the three simple baselines inside the new runtime.
 - [ ] Implement iSSF linear and iSSF MLP executors against the new artifact layer.
@@ -52,8 +52,8 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
   Rationale: studies vary substantially in size, and the existing iSSF path already trains by `max_steps`, `eval_interval`, and patience on evaluation windows. Step-based control is the more comparable and operationally stable framework here.
   Date/Author: 2026-03-24 / assistant
 
-- Decision: use one shared `StepTrainer` lifecycle and method-specific executor objects.
-  Rationale: optimizer stepping, early stopping, checkpoint restore, and metric logging are shared behaviors even though batch structure differs by method family.
+- Decision: use one shared step-loop helper in `train.py` and one small runtime object per method family.
+  Rationale: the current duplication is mostly in the outer training lifecycle, not in the batch and loss math. A shared loop removes that duplication while keeping method-specific data flow and optimization details where they belong.
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the new runtime will reuse superset covariate artifacts for `all` and derive subset views at read time wherever possible.
@@ -103,9 +103,9 @@ A “superset artifact” means an existing artifact built once using the full `
 
 Keep the runtime compact. Put orchestration in `movebench/bench_v2/run.py`, the shared step-based loop in `movebench/bench_v2/train.py`, and family-specific code in `movebench/bench_v2/methods/`. Do not add `prepare.py` in this scope; artifact discovery and validation can stay in `run.py` or the method modules unless duplication proves otherwise.
 
-Implement the shared trainer first in `movebench/bench_v2/train.py`. Define one `StepTrainer` that is independent of any specific batch shape. It should own seed setup, step loops, best-checkpoint tracking, early-stopping decisions, step-indexed metric logging, and final restore of the best checkpoint. It may use a very small method-facing interface, but do not over-abstract it. The trainer must log trainable-method metrics to MLflow with `step=global_step` and none for baselines. It should also write a small `history.json` artifact so later debugging does not depend on MLflow API calls alone. If later reporting still wants epoch-like progress, record a derived `epoch_fraction` or `passes_completed` field in that history, but do not use epochs for control flow.
+Implement the shared training lifecycle first in `movebench/bench_v2/train.py`. Define one helper such as `run_training_loop(...)` that owns seed setup, step loops, periodic evaluation, best-checkpoint tracking, early-stopping decisions, step-indexed metric logging, and final restore of the best checkpoint. Do not wrap this in a formal `Protocol`, abstract base class, or callback soup. Instead, each method executor should construct one small runtime object that the loop can call by duck typing. The shared loop must log trainable-method metrics to MLflow with `step=global_step` and none for baselines. It should also write a small `history.json` artifact so later debugging does not depend on MLflow API calls alone. If later reporting still wants epoch-like progress, record a derived `epoch_fraction` or `passes_completed` field in that history, but do not use epochs for control flow.
 
-Use step schedules everywhere in the new runtime. The method catalog should expose defaults like `max_steps`, `eval_every_steps`, and `patience_evals` instead of an epoch vocabulary. Preserve method-specific optimizer and scheduler details inside the method executor, not inside the trainer.
+Use step schedules everywhere in the new runtime. The method catalog should expose defaults like `max_steps`, `eval_every_steps`, and `patience_evals` instead of an epoch vocabulary. Preserve method-specific optimizer and scheduler details inside the method runtime object, not inside the shared loop.
 
 Implement read-only artifact resolution next. This logic should locate point-store manifests via `load_point_store_manifest(...)`, `shared.pt`, and train normalization stats under the existing `features/points/<split>/<rasters_hash>/<sampler_hash>/` layout. It should also locate deepSSF cache manifests under `cache/deepssf_wds/<split>/<cache_hash>/`. If a required manifest, shard set, or normalization file is missing, the resolver should return a concise blocked reason and the runner should skip that concrete run instead of trying to build missing artifacts.
 
@@ -117,11 +117,11 @@ Implement deepSSF cache consumption in the same compact style. The runtime shoul
 
 Implement the three baseline executors in `methods/baselines.py`. The no-move baseline predicts the start point exactly. The constant-velocity baseline uses the previous observed step length and current bearing exactly as in the old comparison script. The random-walk baseline uses the same discrete pseudo-candidate support built for the point store and treats those pseudo-candidates as a uniform predictive distribution. The baseline executor does not train, but it must still create an MLflow run, write a prediction artifact placeholder, and mark the run completed.
 
-Implement the iSSF executor in `methods/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module, and it should explicitly reuse the current `iSSFDataset.build_expanded_x(...)` style of materialization from [movebench/datasets/ssf.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/ssf.py). The “pre-materialized `(N,C,P)` tensor cache” in this plan means that existing design tensor: one full feature tensor per split, built from the point store and the selected covariate view, then reused across training and repeated validation passes so Python-level dataset work is not repeated every step. By default this can stay in memory for the current run. Persistent disk caching should be treated as an optional later optimization only if profiling shows that repeated `build_expanded_x(...)` work dominates retries or resume paths. Conceptually it is keyed by the underlying point-store identity and the covariate-set selection so incompatible tensors are never mixed, but it is not a new extracted artifact family. Training should use the shared `StepTrainer`, an Adam optimizer, and the same candidate-cross-entropy objective as the existing code. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per evaluation.
+Implement the iSSF executor in `methods/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module, and it should explicitly reuse the current `iSSFDataset.build_expanded_x(...)` style of materialization from [movebench/datasets/ssf.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/ssf.py). The “pre-materialized `(N,C,P)` tensor cache” in this plan means that existing design tensor: one full feature tensor per split, built from the point store and the selected covariate view, then reused across training and repeated validation passes so Python-level dataset work is not repeated every step. By default this can stay in memory for the current run. Persistent disk caching should be treated as an optional later optimization only if profiling shows that repeated `build_expanded_x(...)` work dominates retries or resume paths. Conceptually it is keyed by the underlying point-store identity and the covariate-set selection so incompatible tensors are never mixed, but it is not a new extracted artifact family. Training should run through the shared step loop using an iSSF runtime object that owns minibatch sampling, the optimizer, and the candidate-cross-entropy objective. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per evaluation.
 
-Implement the deepSSF executor in `methods/deepssf.py`. Reuse the existing model definition and the existing WebDataset loader path where possible, but add a thin adapter that slices cached spatial channels to the requested covariate set and exposes a deterministic early-stopping subset. Keep the current cross-entropy-on-grid loss for training and early stopping. Log the number of valid in-bounds held-out targets used by early stopping because that count can differ across studies and timescales.
+Implement the deepSSF executor in `methods/deepssf.py`. Reuse the existing model definition and the existing WebDataset loader path where possible, but add a thin adapter that slices cached spatial channels to the requested covariate set and exposes a deterministic early-stopping subset. Keep the current cross-entropy-on-grid loss for training and early stopping. Run it through the shared step loop using a deepSSF runtime object that owns loader iteration, optimizer configuration, and any scheduler behavior. Log the number of valid in-bounds held-out targets used by early stopping because that count can differ across studies and timescales.
 
-Implement the MoveFormer executor in `methods/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model.
+Implement the MoveFormer executor in `methods/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model. Run it through the shared step loop using a MoveFormer runtime object that owns batch fetching, optimizer state, and scheduler updates.
 
 Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, step-indexed history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, `experiment_kind`, and `status`.
 
@@ -143,7 +143,7 @@ Create a new test package for runtime and method behavior:
       test_moveformer_runtime.py
       test_runner.py
 
-Start with the shared trainer tests using a fake `TrainJob` that has a predictable loss curve. The tests must prove best-checkpoint restore and early stopping. Run:
+Start with the shared training-loop tests using a fake runtime object that has a predictable loss curve. The tests must prove best-checkpoint restore and early stopping. Run:
 
     python -m unittest -v tests.bench_v2.test_trainer
 
@@ -204,13 +204,6 @@ The deepSSF cache manifest should record the full channel order and enough metad
 
 Define in `movebench/bench_v2/train.py`:
 
-    class TrainJob(Protocol):
-        def train_one_step(self, step: int) -> dict[str, float]: ...
-        def evaluate_subset(self, split_key: str) -> dict[str, float]: ...
-        def state_dict(self) -> dict[str, object]: ...
-        def load_state_dict(self, state: dict[str, object]) -> None: ...
-        def close(self) -> None: ...
-
     @dataclass
     class TrainerConfig:
         max_steps: int
@@ -218,10 +211,16 @@ Define in `movebench/bench_v2/train.py`:
         patience_evals: int
         seed: int
 
-    class StepTrainer:
-        def fit(self, job: TrainJob, config: TrainerConfig, tracker: object) -> dict[str, object]: ...
+    def run_training_loop(runtime: object, config: TrainerConfig, tracker: object) -> dict[str, object]: ...
 
-If a formal protocol is useful, keep it tiny. A simple pair of callables such as `resolve_inputs(run)` and `execute(resolved_run)` is enough.
+The shared loop should expect the runtime object to provide, by duck typing:
+
+    train_step(step: int) -> dict[str, float]
+    evaluate(split_key: str) -> dict[str, float]
+    state_dict() -> dict[str, object]
+    load_state_dict(state: dict[str, object]) -> None
+
+Optionally, the runtime object may also expose `close()` for cleanup. Keep this as a documented convention in `train.py`, not as a formal `Protocol`, ABC, or registry.
 
 Define stable method keys exactly as:
 
