@@ -7,9 +7,17 @@ import importlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 
 from movebench.datasets.deepssf_wds_cache import read_deepssf_wds_manifest
 from movebench.features.manifest import read_manifest
+from movebench.features.normalization import load_points_normalization_mean_std
+from movebench.features.points import (
+    point_store_dir,
+    point_store_manifest_path,
+    point_store_train_stats_path,
+)
+from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
 from movebench.study import Study
 
@@ -104,14 +112,11 @@ def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
 
 def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
     timescale = bench_config.resolve_timescale(timescale_key)
-    manifest_path = (
-        paths.study_dir(study_id)
-        / "features"
-        / "points"
-        / str(split)
-        / str(timescale["rasters_hash"])
-        / str(timescale["sampler_hash"])
-        / "manifest.json"
+    manifest_path = point_store_manifest_path(
+        study_dir=paths.study_dir(study_id),
+        split=str(split),
+        rasters_hash=str(timescale["rasters_hash"]),
+        sampler_hash=str(timescale["sampler_hash"]),
     )
     if not manifest_path.exists():
         return {
@@ -119,9 +124,16 @@ def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[st
             "reason": f"missing point store manifest for {split}",
             "manifest_path": manifest_path,
         }
-    manifest = read_manifest(manifest_path)
-    if manifest.study_id != study_id or manifest.split != split:
-        raise ValueError(f"Point store manifest metadata mismatch: {manifest_path}")
+    try:
+        manifest = read_manifest(manifest_path)
+        if manifest.study_id != study_id or manifest.split != split:
+            raise ValueError("manifest metadata mismatch")
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"invalid point store manifest for {split}: {exc}",
+            "manifest_path": manifest_path,
+        }
     return {
         "available": True,
         "manifest_path": manifest_path,
@@ -145,7 +157,14 @@ def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[
             "reason": f"missing deepSSF shards for {split}",
             "manifest_path": manifest_path,
         }
-    read_deepssf_wds_manifest(manifest_path)
+    try:
+        read_deepssf_wds_manifest(manifest_path)
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
+            "manifest_path": manifest_path,
+        }
     return {
         "available": True,
         "manifest_path": manifest_path,
@@ -177,16 +196,24 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
     split_info = _study_split_keys(study_id)
     held_out_splits = list(split_info["held_out_splits"])
     train_points = _point_store_state(study_id, timescale_key, "train")
+    held_out_point_states = {
+        split: _point_store_state(study_id, timescale_key, split)
+        for split in held_out_splits
+    }
     point_splits_available = [
         split
-        for split in held_out_splits
-        if _point_store_state(study_id, timescale_key, split)["available"]
+        for split, state in held_out_point_states.items()
+        if state["available"]
     ]
     train_cache = _deepssf_cache_state(study_id, timescale_key, "train")
+    held_out_raster_states = {
+        split: _deepssf_cache_state(study_id, timescale_key, split)
+        for split in held_out_splits
+    }
     raster_splits_available = [
         split
-        for split in held_out_splits
-        if _deepssf_cache_state(study_id, timescale_key, split)["available"]
+        for split, state in held_out_raster_states.items()
+        if state["available"]
     ]
 
     point_ready = bool(train_points["available"]) and bool(point_splits_available)
@@ -201,11 +228,29 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
     if not train_points["available"]:
         point_blocked_reasons.append(str(train_points["reason"]))
     if not point_splits_available:
-        point_blocked_reasons.append("no held-out point stores available")
+        point_blocked_reasons.append(
+            next(
+                (
+                    str(state["reason"])
+                    for state in held_out_point_states.values()
+                    if not state["available"]
+                ),
+                "no held-out point stores available",
+            )
+        )
     if not train_cache["available"]:
         raster_blocked_reasons.append(str(train_cache["reason"]))
     if not raster_splits_available:
-        raster_blocked_reasons.append("no held-out deepSSF caches available")
+        raster_blocked_reasons.append(
+            next(
+                (
+                    str(state["reason"])
+                    for state in held_out_raster_states.values()
+                    if not state["available"]
+                ),
+                "no held-out deepSSF caches available",
+            )
+        )
 
     return {
         "study_id": study_id,
@@ -418,27 +463,13 @@ def _load_resolved_manifests() -> list[dict[str, object]]:
     return manifests
 
 
-def _point_store_dir(run_payload: dict[str, object], split: str) -> Path:
-    return (
-        paths.study_dir(str(run_payload["study_id"]))
-        / "features"
-        / "points"
-        / str(split)
-        / str(run_payload["rasters_hash"])
-        / str(run_payload["sampler_hash"])
-    )
-
-
-def _point_stats_path(run_payload: dict[str, object]) -> Path:
-    return _point_store_dir(run_payload, "train") / "train_stats.json"
-
-
 def _resolve_point_artifacts(
     run_payload: dict[str, object],
     *,
     method: dict[str, object],
     timescale: dict[str, object],
 ) -> dict[str, object]:
+    study_dir = paths.study_dir(str(run_payload["study_id"]))
     all_band_ids = list(timescale["all_band_ids"])
     band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
     missing_band_ids = [band_id for band_id in band_ids if band_id not in all_band_ids]
@@ -451,8 +482,18 @@ def _resolve_point_artifacts(
 
     point_stores: dict[str, dict[str, object]] = {}
     for split in ["train", *list(run_payload["evaluation_split_keys"])]:
-        store_dir = _point_store_dir(run_payload, str(split))
-        manifest_path = store_dir / "manifest.json"
+        store_dir = point_store_dir(
+            study_dir=study_dir,
+            split=str(split),
+            rasters_hash=str(run_payload["rasters_hash"]),
+            sampler_hash=str(run_payload["sampler_hash"]),
+        )
+        manifest_path = point_store_manifest_path(
+            study_dir=study_dir,
+            split=str(split),
+            rasters_hash=str(run_payload["rasters_hash"]),
+            sampler_hash=str(run_payload["sampler_hash"]),
+        )
         if not manifest_path.exists():
             return {
                 "status": "blocked",
@@ -489,19 +530,33 @@ def _resolve_point_artifacts(
 
     normalization_stats_path: Path | None = None
     if bool(method.get("requires_normalization_stats", False)):
-        normalization_stats_path = _point_stats_path(run_payload)
+        normalization_stats_path = point_store_train_stats_path(
+            study_dir=study_dir,
+            rasters_hash=str(run_payload["rasters_hash"]),
+            sampler_hash=str(run_payload["sampler_hash"]),
+        )
         if not normalization_stats_path.exists():
             return {
                 "status": "blocked",
                 "reason": "missing normalization stats for train",
             }
+        try:
+            load_points_normalization_mean_std(
+                study_dir=study_dir,
+                plan=_subset_layer_plan(timescale["plan"], band_ids),
+                sampler_config=timescale["sampler"],
+            )
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "reason": f"invalid normalization stats for train: {exc}",
+            }
 
     return {
         "status": "resolved",
         "artifact_requirement": "points",
-        "study_dir": paths.study_dir(str(run_payload["study_id"])),
-        "trajectories_path": paths.study_dir(str(run_payload["study_id"]))
-        / "trajectories.csv",
+        "study_dir": study_dir,
+        "trajectories_path": study_dir / "trajectories.csv",
         "plan": timescale["plan"],
         "sampler": timescale["sampler"],
         "all_band_ids": all_band_ids,
@@ -593,6 +648,28 @@ def _load_executor(executor_ref: str):
     return getattr(module, func_name)
 
 
+def _subset_layer_plan(plan: LayerPlan, band_ids: list[str]) -> LayerPlan:
+    wanted = set(band_ids)
+    channels = [channel for channel in plan.channels if channel.band_id in wanted]
+    layers_in_order: list[str] = []
+    seen_layers: set[str] = set()
+    for channel in channels:
+        if channel.layer in seen_layers:
+            continue
+        seen_layers.add(channel.layer)
+        layers_in_order.append(channel.layer)
+    return LayerPlan(
+        rasters_hash=str(plan.rasters_hash),
+        layers_in_order=layers_in_order,
+        channels=channels,
+        chip_groups={key: dict(value) for key, value in plan.chip_groups.items()},
+        derived_dependencies={
+            key: list(value) for key, value in plan.derived_dependencies.items()
+        },
+        step=plan.step,
+    )
+
+
 class _RunTracker:
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = run_dir
@@ -640,6 +717,19 @@ def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]
     )
 
 
+def _clear_runtime_outputs(run_dir: Path) -> None:
+    for path in (
+        run_dir / "training_summary.json",
+        run_dir / "history.json",
+        run_dir / "checkpoint_best.pt",
+    ):
+        if path.exists():
+            path.unlink()
+    predictions_dir = run_dir / "predictions"
+    if predictions_dir.exists():
+        shutil.rmtree(predictions_dir)
+
+
 def _write_blocked_run(
     run_payload: dict[str, object],
     *,
@@ -661,8 +751,13 @@ def _write_blocked_run(
 
 
 def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
+    """
+    Note this deletes existing artifacts! It should only be called when you *really* want to execute the run;
+    that's why it is a private method.
+    """
     run_dir = _run_dir(str(run_payload["run_key"]))
     run_dir.mkdir(parents=True, exist_ok=True)
+    _clear_runtime_outputs(run_dir)
     _write_json(run_dir / "resolved_run.json", _canonical_run_payload(run_payload))
 
     if str(run_payload["method"]) not in _SUPPORTED_METHODS:
@@ -734,7 +829,7 @@ def run_experiment(
         latest_status = _latest_run_status(
             latest_runs.get(str(run_payload["run_key"]))
         )
-        if latest_status in {"completed", "blocked", "running"}:
+        if latest_status == "completed":
             skipped_runs += 1
             continue
         pending_runs.append(run_payload)

@@ -2,7 +2,7 @@
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-This document must be maintained in accordance with [PLANS.MD](/data/vision/beery/scratch/justin/movebench/PLANS.MD).
+This document must be maintained in accordance with [PLANS.md](/data/vision/beery/scratch/justin/movebench/PLANS.md).
 
 This plan depends on [execplans/benchmark_rewrite_core_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_core_runtime_execplan.md). Do not begin this plan until the planner and MLflow helper layer exist.
 
@@ -254,3 +254,5 @@ Do not invent alternate user-facing names.
 Plan creation note (2026-03-24 / assistant): initial draft written after confirming which existing model definitions can be reused, which artifact-loading paths are salvageable, and which legacy dataset wrappers are too tied to the old split semantics to keep.
 
 Revision note (2026-03-25 / assistant): updated the living sections after completing the shared trainer, read-only artifact resolution, baseline executors, iSSF executors, and baseline + iSSF `bench run` integration, and recorded the passing targeted test command for this scoped pass.
+
+Revision note (2026-03-25 / assistant): deduplicated `movebench/bench_v2/run.py` point-store path handling to reuse the shared helpers in `movebench/features/points.py`, then reran the targeted artifact-resolution and runner tests.
