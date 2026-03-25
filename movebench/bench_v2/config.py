@@ -130,7 +130,7 @@ METHODS: dict[str, dict[str, object]] = {
     "deepssf": {
         "key": "deepssf",
         "trains": True,
-        "artifact_requirement": "points_and_rasters",
+        "artifact_requirement": "deepssf_cache",
         "executor": "movebench.bench_v2.methods.deepssf:run",
         "model": {
             "image_dim": 101,

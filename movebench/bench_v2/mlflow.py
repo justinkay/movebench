@@ -12,12 +12,19 @@ MLFLOW_EXPERIMENT_NAME = "movebench_bench_v2"
 MLFLOW_TRACKING_URI_ENV = "MOVEBENCH_BENCH_V2_MLFLOW_TRACKING_URI"
 
 
-def _tracking_uri() -> str:
+def _default_db_path() -> Path:
+    return paths.repo_root() / "results" / "bench_v2" / "mlflow.db"
+
+
+def _tracking_uri(*, create: bool) -> str | None:
     env_value = os.environ.get(MLFLOW_TRACKING_URI_ENV)
     if env_value:
         return env_value
-    db_path = paths.repo_root() / "results" / "bench_v2" / "mlflow.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path = _default_db_path()
+    if create:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    elif not db_path.exists():
+        return None
     return f"sqlite:///{db_path.as_posix()}"
 
 
@@ -27,14 +34,17 @@ def _artifacts_root() -> Path:
     return root
 
 
-def _client():
-    tracking_uri = _tracking_uri()
+def _client(*, create: bool):
+    tracking_uri = _tracking_uri(create=create)
+    if tracking_uri is None:
+        return None
     mlflow.set_tracking_uri(tracking_uri)
     return mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
 
 
 def get_or_create_experiment() -> str:
-    client = _client()
+    client = _client(create=True)
+    assert client is not None
     existing = client.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
     if existing is not None:
         return str(existing.experiment_id)
@@ -44,6 +54,16 @@ def get_or_create_experiment() -> str:
             artifact_location=_artifacts_root().as_uri(),
         )
     )
+
+
+def get_existing_experiment_id() -> str | None:
+    client = _client(create=False)
+    if client is None:
+        return None
+    existing = client.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
+    if existing is None:
+        return None
+    return str(existing.experiment_id)
 
 
 def start_benchmark_run(run_payload: dict[str, object]) -> object:
@@ -72,8 +92,11 @@ def start_benchmark_run(run_payload: dict[str, object]) -> object:
 
 
 def search_all_benchmark_runs(filter_string: str | None = None) -> list[object]:
-    client = _client()
-    experiment_id = get_or_create_experiment()
+    experiment_id = get_existing_experiment_id()
+    if experiment_id is None:
+        return []
+    client = _client(create=False)
+    assert client is not None
     runs = client.search_runs(
         [experiment_id],
         filter_string=filter_string,

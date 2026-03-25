@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
-from typing import Any
 
 from movebench.datasets.deepssf_wds_cache import read_deepssf_wds_manifest
 from movebench.features.manifest import read_manifest
@@ -16,10 +16,6 @@ import movebench.bench_v2.config as bench_config
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
 PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
-
-
-def _study_dir(study_id: str) -> Path:
-    return paths.study_dir(study_id)
 
 
 def _load_module_from_path(module_path: str | Path):
@@ -68,7 +64,7 @@ def _resolve_studies(
 
 
 def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
-    study_dir = _study_dir(study_id)
+    study_dir = paths.study_dir(study_id)
     path = study_dir / "trajectories.csv"
     if not path.exists():
         raise FileNotFoundError(f"Study trajectories.csv not found: {path}")
@@ -100,7 +96,7 @@ def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
 def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
     timescale = bench_config.resolve_timescale(timescale_key)
     manifest_path = (
-        _study_dir(study_id)
+        paths.study_dir(study_id)
         / "features"
         / "points"
         / str(split)
@@ -125,7 +121,7 @@ def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[st
 
 def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
     cache_hash = bench_config.deepssf_cache_hash_for_split(timescale_key, split)
-    cache_dir = _study_dir(study_id) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
+    cache_dir = paths.study_dir(study_id) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.exists():
         return {
@@ -156,6 +152,18 @@ def _preferred_split(splits: list[str]) -> str | None:
     return splits[0]
 
 
+def _dedupe_reasons(*reason_groups: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for reasons in reason_groups:
+        for reason in reasons:
+            if reason in seen:
+                continue
+            out.append(reason)
+            seen.add(reason)
+    return out
+
+
 def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, object]:
     split_info = _study_split_keys(study_id)
     held_out_splits = list(split_info["held_out_splits"])
@@ -176,17 +184,19 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
     raster_ready = bool(train_cache["available"]) and bool(raster_splits_available)
     fully_runnable = point_ready and raster_ready
 
-    blocked_reasons: list[str] = []
+    point_blocked_reasons: list[str] = []
+    raster_blocked_reasons: list[str] = []
     if not split_info["has_train"]:
-        blocked_reasons.append("study has no train split")
+        point_blocked_reasons.append("study has no train split")
+        raster_blocked_reasons.append("study has no train split")
     if not train_points["available"]:
-        blocked_reasons.append(str(train_points["reason"]))
+        point_blocked_reasons.append(str(train_points["reason"]))
     if not point_splits_available:
-        blocked_reasons.append("no held-out point stores available")
+        point_blocked_reasons.append("no held-out point stores available")
     if not train_cache["available"]:
-        blocked_reasons.append(str(train_cache["reason"]))
+        raster_blocked_reasons.append(str(train_cache["reason"]))
     if not raster_splits_available:
-        blocked_reasons.append("no held-out deepSSF caches available")
+        raster_blocked_reasons.append("no held-out deepSSF caches available")
 
     return {
         "study_id": study_id,
@@ -195,13 +205,16 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
         "available_point_splits": point_splits_available,
         "available_raster_splits": raster_splits_available,
         "early_stop_point_split": _preferred_split(point_splits_available),
-        "early_stop_raster_split": _preferred_split(
-            [split for split in point_splits_available if split in raster_splits_available]
-        ),
+        "early_stop_raster_split": _preferred_split(raster_splits_available),
         "point_ready": point_ready,
         "raster_ready": raster_ready,
         "fully_runnable": fully_runnable,
-        "blocked_reasons": blocked_reasons,
+        "point_blocked_reasons": point_blocked_reasons,
+        "raster_blocked_reasons": raster_blocked_reasons,
+        "blocked_reasons": _dedupe_reasons(
+            point_blocked_reasons,
+            raster_blocked_reasons,
+        ),
     }
 
 
@@ -210,21 +223,26 @@ def _blocked_reason(
     *,
     method_key: str,
 ) -> str:
-    if bench_config.METHODS[method_key]["artifact_requirement"] == "points_and_rasters":
-        if not readiness["point_ready"]:
-            return str(readiness["blocked_reasons"][0])
-        if not readiness["raster_ready"]:
-            return "missing deepSSF cache prerequisites"
-    return str(readiness["blocked_reasons"][0])
+    requirement = str(bench_config.METHODS[method_key]["artifact_requirement"])
+    if requirement == "deepssf_cache":
+        reasons = list(readiness.get("raster_blocked_reasons", []))
+    elif requirement == "points":
+        reasons = list(readiness.get("point_blocked_reasons", []))
+    else:
+        raise ValueError(f"Unsupported artifact requirement: {requirement!r}")
+    return reasons[0] if reasons else "missing prerequisites"
 
 
 def _run_key(run_payload: dict[str, object]) -> str:
+    payload = bench_config.stable_payload(_canonical_run_payload(run_payload))
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return (
         f"study={run_payload['study_id']}"
         f"__ts={run_payload['timescale']}"
         f"__cov={run_payload['covariate_set']}"
         f"__method={run_payload['method']}"
         f"__seed={run_payload['seed']}"
+        f"__k={payload_hash}"
     )
 
 
@@ -232,7 +250,7 @@ def _canonical_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in run_payload.items()
-        if key not in {"experiment_name", "experiment_kind"}
+        if key not in {"experiment_name", "experiment_kind", "run_key"}
     }
 
 
@@ -271,16 +289,19 @@ def expand_experiment(
                 timescale = bench_config.resolve_timescale(str(timescale_key))
                 for method_key in experiment["methods"]:
                     method = bench_config.METHODS[str(method_key)]
-                    if method["artifact_requirement"] == "points_and_rasters":
+                    requirement = str(method["artifact_requirement"])
+                    if requirement == "deepssf_cache":
                         evaluation_splits = list(readiness["available_raster_splits"])
                         early_stop_split_key = readiness["early_stop_raster_split"]
-                        runnable = bool(readiness["point_ready"]) and bool(
-                            readiness["raster_ready"]
-                        )
-                    else:
+                        runnable = bool(readiness["raster_ready"])
+                    elif requirement == "points":
                         evaluation_splits = list(readiness["available_point_splits"])
                         early_stop_split_key = readiness["early_stop_point_split"]
                         runnable = bool(readiness["point_ready"])
+                    else:
+                        raise ValueError(
+                            f"Unsupported artifact requirement for method {method_key!r}: {requirement!r}"
+                        )
 
                     if not runnable or early_stop_split_key is None:
                         blocked.append(
@@ -459,7 +480,7 @@ def _render_status_text(snapshot: dict[str, object]) -> str:
         f"Studies: {counts['studies']}",
         f"Blocked studies: {counts['blocked_studies']}",
         f"SSF-ready pairs: {counts['ssf_ready_pairs']}",
-        f"Raster-ready pairs: {counts['raster_ready_pairs']}",
+        f"deepSSF-cache-ready pairs: {counts['raster_ready_pairs']}",
         f"Fully runnable pairs: {counts['fully_runnable_pairs']}",
         f"Blocked pairs: {counts['blocked_pairs']}",
         f"Planned runs: {counts['planned_runs']}",
@@ -471,7 +492,7 @@ def _render_status_text(snapshot: dict[str, object]) -> str:
             if readiness["point_ready"]:
                 parts.append("ssf-ready")
             if readiness["raster_ready"]:
-                parts.append("raster-ready")
+                parts.append("deepSSF-cache-ready")
             if readiness["fully_runnable"]:
                 parts.append("fully-runnable")
             else:

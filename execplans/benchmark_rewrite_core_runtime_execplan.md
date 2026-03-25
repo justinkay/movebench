@@ -23,6 +23,7 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 - [x] (2026-03-24 21:10Z) Implemented MLflow bootstrap and query helpers for experiment creation, run startup, full run search, and latest-run lookup by `run_key`.
 - [x] (2026-03-24 21:10Z) Implemented study-timescale readiness scanning plus `movebench bench status --format text`, then verified the scoped runtime with `python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status`.
 - [x] (2026-03-24 22:05Z) Fixed `bench status` planned-run deduplication across resolved manifests and expanded text output to include concrete blocked prerequisites, then re-verified with `python -m unittest -v tests.bench_v2.test_status`.
+- [x] (2026-03-24 23:45Z) Corrected the runtime contract so deepSSF planning depends on existing deepSSF WDS caches rather than point stores, made `run_key` derive from the canonical concrete-run payload, and made MLflow status queries read-only.
 
 ## Surprises & Discoveries
 
@@ -34,6 +35,9 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 
 - Observation: deepSSF caches already have a readably structured manifest and directory contract.
   Evidence: [movebench/datasets/deepssf_wds_cache.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/deepssf_wds_cache.py) stores caches under `cache/deepssf_wds/<split>/<cache_hash>/` with a manifest plus shard directory, which is enough for readiness checks.
+
+- Observation: deepSSF training consumes prebuilt caches or raster-backed chip datasets, not point stores directly.
+  Evidence: [movebench/benchmark.py](/data/vision/beery/scratch/justin/movebench/movebench/benchmark.py) uses `make_deepssf_wds_train_test_loaders(...)` or `study.deepssf_dataset(...)`, and [movebench/features/normalization.py](/data/vision/beery/scratch/justin/movebench/movebench/features/normalization.py) shows the only point-store dependency is normalization-stat generation during cache or chip-dataset preparation.
 
 - Observation: the project does not currently have an experiment-planning abstraction at all.
   Evidence: [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) registers only `download`, `extract`, and `ingest`.
@@ -57,6 +61,10 @@ This plan does not train any models yet. It builds the control plane: plain Pyth
 
 - Decision: the planner should raise an error if an existing `run_key` resolves to a different materialized payload than before.
   Rationale: this prevents accidentally mutating the meaning of a finished run while reusing its key. The comparison must use the canonical concrete-run payload across all resolved experiment manifests, not experiment-specific metadata.
+  Date/Author: 2026-03-24 / assistant
+
+- Decision: deepSSF planning should validate only deepSSF cache artifacts, while point-store readiness remains specific to SSF and MoveFormer style methods.
+  Rationale: this runtime stage begins after cache building, and the existing deepSSF execution path consumes WDS caches or raster-backed chip datasets rather than point stores directly.
   Date/Author: 2026-03-24 / assistant
 
 - Decision: the study readiness scanner will operate per study and per timescale, not only per study.
@@ -94,11 +102,11 @@ Start by creating the new package structure under `movebench/bench_v2/` with at 
 
 Keep file count low. `config.py` should hold the benchmark definitions and run-expansion helpers. `run.py` should hold planning-oriented commands such as `plan` and `status`, plus any small helpers that do not justify their own module. `report.py` is reserved for the later reporting plan. `mlflow.py` should contain only MLflow setup and search helpers. There is no need for a second CLI module; [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) can register the new commands directly from these modules.
 
-Build the lightweight config layer in `movebench/bench_v2/config.py`. Keep this file simple and explicit. It should define dictionaries for the current timescales, covariate sets, and methods, plus one helper that expands an experiment dictionary into concrete run dictionaries. A timescale entry should carry the user-facing key such as `1d`, the numeric `step_time_s`, and the artifact identifiers needed later to locate existing point stores and deepSSF caches. A covariate-set entry should describe how to pick band ids from the full extracted feature list. A method entry should state whether the method trains, whether it requires point-store artifacts only or raster artifacts as well, and where its executor lives.
+Build the lightweight config layer in `movebench/bench_v2/config.py`. Keep this file simple and explicit. It should define dictionaries for the current timescales, covariate sets, and methods, plus one helper that expands an experiment dictionary into concrete run dictionaries. A timescale entry should carry the user-facing key such as `1d`, the numeric `step_time_s`, and the artifact identifiers needed later to locate existing point stores and deepSSF caches. A covariate-set entry should describe how to pick band ids from the full extracted feature list. A method entry should state whether the method trains, which artifact family it requires (`points` versus existing deepSSF caches), and where its executor lives.
 
 Create `experiments/v2/main_results.py` and `experiments/v2/covariate_comparison.py` once `config.py` exists. Each file should export one plain `EXPERIMENT` dictionary. `main_results.py` should include all methods and only the `all` covariate set. `covariate_comparison.py` should include `issf_linear`, `issf_mlp`, `deepssf`, and `moveformer`, with covariate sets `all`, `all_environmental`, `alphaearth_only`, and `lite`.
 
-Implement planning inside `movebench/bench_v2/run.py` next. This code should validate an `EXPERIMENT` dictionary, resolve the target studies, inspect existing point-store and deepSSF-cache manifests to detect blocked or missing studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when the required held-out artifacts exist there and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the canonical concrete-run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`. Experiment membership stays in the resolved manifest metadata; per-run payloads must not include `experiment_name` or `experiment_kind`.
+Implement planning inside `movebench/bench_v2/run.py` next. This code should validate an `EXPERIMENT` dictionary, resolve the target studies, inspect existing point-store and deepSSF-cache manifests to detect blocked or missing studies early, and expand the experiment into concrete run dictionaries. Every concrete run must include the resolved `early_stop_split_key`, which should be `test-temporal` when the required held-out artifacts for that method exist there and otherwise the sole available held-out split. The planner should compute a stable `run_key` from the canonical concrete-run payload and write `results/bench_v2/resolved_experiments/<experiment_name>.json`. Experiment membership stays in the resolved manifest metadata; per-run payloads must not include `experiment_name` or `experiment_kind`.
 
 Implement the MLflow helper layer in one compact module, `movebench/bench_v2/mlflow.py`. It should configure MLflow against a backend URI, create or fetch the global MLflow experiment `movebench_bench_v2`, and expose helper functions for:
 
@@ -127,7 +135,7 @@ The planner itself should not write anything to MLflow. Planning writes only the
 
 Planner validation must be global across `results/bench_v2/resolved_experiments/`. If two manifests contain the same `run_key`, their canonical run payloads must match exactly. This is what allows `main_results` and `covariate_comparison` to share runs intentionally while still rejecting accidental drift.
 
-Implement status reporting inside `movebench/bench_v2/run.py` as well. It should scan every available study and every configured timescale, check for existing point-store manifests and deepSSF-cache manifests, and summarize which study-timescale pairs are SSF-ready, raster-ready, or blocked by missing prerequisites. It should also compare planned run keys from the resolved experiment manifests against MLflow runs. The simplest rule is: search MLflow for all runs in the benchmark experiment, group them by `tags.run_key`, keep the newest run for each `run_key`, and treat `tags.status == completed` as finished.
+Implement status reporting inside `movebench/bench_v2/run.py` as well. It should scan every available study and every configured timescale, check for existing point-store manifests and deepSSF-cache manifests, and summarize which study-timescale pairs are SSF-ready, deepSSF-cache-ready, or blocked by missing prerequisites. It should also compare planned run keys from the resolved experiment manifests against MLflow runs. The simplest rule is: search MLflow for all runs in the benchmark experiment, group them by `tags.run_key`, keep the newest run for each `run_key`, and treat `tags.status == completed` as finished. These status queries must be read-only; if no MLflow experiment exists yet, they should report zero completed runs rather than creating one.
 
 Extend [movebench/cli/main.py](/data/vision/beery/scratch/justin/movebench/movebench/cli/main.py) only after the `bench_v2` modules are in place. Register a `bench` subcommand group there directly. `plan` must support `--studies` overrides. `status` must support a text output mode before the later HTML report exists.
 
@@ -169,7 +177,7 @@ Acceptance for this plan is reached when the following behaviors are observable.
 
 First, `movebench bench plan experiments/v2/main_results.py --studies all` creates one concrete run per valid combination of study, timescale, method, and covariate set. Running it a second time must not change the resolved run keys unless the experiment definition itself changed.
 
-Second, `movebench bench status --format text` must print counts for blocked studies, SSF-ready studies, raster-ready studies, fully runnable study-timescale pairs, and planned versus completed benchmark runs.
+Second, `movebench bench status --format text` must print counts for blocked studies, SSF-ready studies, deepSSF-cache-ready studies, fully runnable study-timescale pairs, and planned versus completed benchmark runs.
 
 ## Idempotence and Recovery
 
@@ -206,3 +214,5 @@ Define in `movebench/bench_v2/run.py`:
 Plan creation note (2026-03-24 / assistant): initial draft written after validating the current artifact contracts and the absence of an existing planning layer in the repository.
 
 Revision note (2026-03-24 / assistant): updated the living sections after implementing the scoped `bench_v2` runtime, recording the passing targeted test command, and documenting the unrelated local `rasterio` ABI import failure that prevented running the final smoke CLI command in this environment.
+
+Revision note (2026-03-24 / assistant): clarified that deepSSF planning depends on prebuilt WDS caches rather than point stores, that `run_key` must derive from the canonical concrete-run payload, and that MLflow status queries are read-only.
