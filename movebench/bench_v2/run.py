@@ -32,6 +32,7 @@ _SUPPORTED_METHODS = {
     "baseline_randomwalk",
     "issf_linear",
     "issf_mlp",
+    "deepssf",
 }
 
 

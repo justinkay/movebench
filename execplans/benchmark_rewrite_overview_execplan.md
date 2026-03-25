@@ -176,7 +176,7 @@ The intended new package shape is intentionally small:
       report.py
       train.py
       mlflow.py
-      methods/
+      executors/
       evaluation/
 
 The intended new experiment surface is:

@@ -21,10 +21,12 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 - [x] (2026-03-24 18:10Z) Verified that MoveFormer evaluation already uses a loss mask and therefore fits naturally with split-aware token masking in the new runtime.
 - [x] (2026-03-25 13:34Z) Implemented `movebench/bench_v2/train.py` with the shared step-based training loop, best-state restore, tracker-backed history writing, and the small iSSF runtime object pattern.
 - [x] (2026-03-25 13:34Z) Implemented read-only artifact resolution for point stores, train normalization stats, and deepSSF cache manifests, including subset-view index resolution against the `all` covariate artifact.
-- [x] (2026-03-25 13:34Z) Implemented `baseline_nomove`, `baseline_constvel`, and `baseline_randomwalk` under `movebench/bench_v2/methods/baselines.py`, each writing standardized prediction artifacts with zero training steps.
-- [x] (2026-03-25 13:34Z) Implemented `issf_linear` and `issf_mlp` under `movebench/bench_v2/methods/issf.py`, reusing `build_expanded_x(...)`, shared-loop training, best-checkpoint writing, and discrete prediction artifact writing.
-- [ ] Implement deepSSF and MoveFormer executors against the new artifact layer.
-- [ ] Implement `movebench bench run` for deepSSF and MoveFormer (completed in this scoped pass: baseline + iSSF execution, status-based skipping, blocked-run marking, and run-directory / MLflow integration).
+- [x] (2026-03-25 13:34Z) Implemented `baseline_nomove`, `baseline_constvel`, and `baseline_randomwalk` under `movebench/bench_v2/executors/baselines.py`, each writing standardized prediction artifacts with zero training steps.
+- [x] (2026-03-25 13:34Z) Implemented `issf_linear` and `issf_mlp` under `movebench/bench_v2/executors/issf.py`, reusing `build_expanded_x(...)`, shared-loop training, best-checkpoint writing, and discrete prediction artifact writing.
+- [x] (2026-03-25 15:54Z) Implemented `movebench/bench_v2/executors/deepssf.py` with shared-loop training from existing WDS caches, `all`-cache channel slicing for covariate subsets, grid prediction artifacts, and held-out `n_valid` logging.
+- [x] (2026-03-25 18:34Z) Renamed `movebench/bench_v2/methods/` to `movebench/bench_v2/executors/`, updated executor import strings and current ExecPlan references, and reran the targeted runtime import/runner tests.
+- [ ] Implement MoveFormer executor against the new artifact layer.
+- [ ] Implement `movebench bench run` for MoveFormer (completed in this scoped pass: baseline + iSSF + deepSSF execution, status-based skipping, blocked-run marking, and run-directory / MLflow integration).
 
 ## Surprises & Discoveries
 
@@ -48,6 +50,9 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 
 - Observation: the existing point-store manifest schema does not record an explicit full band-order field.
   Evidence: [movebench/features/manifest.py](/data/vision/beery/scratch/justin/movebench/movebench/features/manifest.py) validates only the `bands` mapping, so the scoped runtime had to derive stable subset indices from the timescale layer plan’s `all_band_ids` rather than from manifest JSON alone.
+
+- Observation: the existing deepSSF WDS cache schema records grid metadata but not step identifiers.
+  Evidence: [movebench/datasets/deepssf_wds_cache.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/deepssf_wds_cache.py) writes manifests with `output_hw`, `pixel_size_m`, `env_channels`, and `num_samples`, while each cached sample decodes only to `(spatial, scalars, bearing, target)`.
 
 ## Decision Log
 
@@ -83,13 +88,21 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
   Rationale: autoregressive forecasting legitimately conditions on observed history, but benchmark metrics must only score the intended held-out steps.
   Date/Author: 2026-03-24 / assistant
 
+- Decision: the scoped deepSSF executor will write grid-score prediction artifacts in cache iteration order instead of reaching back into point stores for step ids.
+  Rationale: the user explicitly scoped deepSSF execution to existing WDS caches and cache reuse. The cache format does not expose point ids, and adding point-store coupling here would expand scope into artifact design and evaluation semantics.
+  Date/Author: 2026-03-25 / assistant
+
+- Decision: rename `movebench/bench_v2/methods/` to `movebench/bench_v2/executors/`.
+  Rationale: these modules adapt reusable model families into benchmark execution, artifact resolution, and run outputs. The new name makes that role explicit and avoids conflating them with `movebench/models/`.
+  Date/Author: 2026-03-25 / assistant
+
 ## Outcomes & Retrospective
 
-This scoped pass now leaves the repository with the shared trainer, read-only artifact resolution, three baseline executors, iSSF linear and MLP executors, and `bench run` support for those methods. The targeted verification passed with:
+This scoped pass now leaves the repository with the shared trainer, read-only artifact resolution, three baseline executors, iSSF linear and MLP executors, the deepSSF executor, and `bench run` support for baseline + iSSF + deepSSF methods. The targeted verification for the deepSSF scope passed with:
 
-    python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status tests.bench_v2.test_trainer tests.bench_v2.test_artifact_resolution tests.bench_v2.test_issf_runtime tests.bench_v2.test_runner
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench_v2.test_artifact_resolution tests.bench_v2.test_deepssf_runtime tests.bench_v2.test_runner
 
-deepSSF and MoveFormer execution remain for the next stage of this plan. The later evaluation and report plan can already rely on the new baseline + iSSF prediction artifacts and run-directory layout.
+MoveFormer execution remains for the next stage of this plan. The later evaluation and report plan can now rely on the baseline, iSSF, and deepSSF run-directory layout and prediction artifacts, while still needing a follow-up pass to tighten deepSSF evaluation semantics around step identity if reporting requires it.
 
 ## Context and Orientation
 
@@ -112,7 +125,7 @@ A “superset artifact” means an existing artifact built once using the full `
 
 ## Plan of Work
 
-Keep the runtime compact. Put orchestration in `movebench/bench_v2/run.py`, the shared step-based loop in `movebench/bench_v2/train.py`, and family-specific code in `movebench/bench_v2/methods/`. Do not add `prepare.py` in this scope; artifact discovery and validation can stay in `run.py` or the method modules unless duplication proves otherwise.
+Keep the runtime compact. Put orchestration in `movebench/bench_v2/run.py`, the shared step-based loop in `movebench/bench_v2/train.py`, and family-specific execution code in `movebench/bench_v2/executors/`. Do not add `prepare.py` in this scope; artifact discovery and validation can stay in `run.py` or the executor modules unless duplication proves otherwise.
 
 Implement the shared training lifecycle first in `movebench/bench_v2/train.py`. Define one helper such as `run_training_loop(...)` that owns seed setup, step loops, periodic evaluation, best-checkpoint tracking, early-stopping decisions, step-indexed metric logging, and final restore of the best checkpoint. Do not wrap this in a formal `Protocol`, abstract base class, or callback soup. Instead, each method executor should construct one small runtime object that the loop can call by duck typing. The shared loop must log trainable-method metrics to MLflow with `step=global_step` and none for baselines. It should also write a small `history.json` artifact so later debugging does not depend on MLflow API calls alone. If later reporting still wants epoch-like progress, record a derived `epoch_fraction` or `passes_completed` field in that history, but do not use epochs for control flow.
 
@@ -126,13 +139,13 @@ Keep normalization handling read-only in this plan. It should load normalization
 
 Implement deepSSF cache consumption in the same compact style. The runtime should resolve the existing `all` cache manifests for the needed split, output grid shape, and normalization policy, and then slice channel indices out of the cached tensors before they reach the model. This is the mechanism that lets `all_environmental`, `alphaearth_only`, and `lite` reuse the `all` deepSSF cache without building duplicates. If the needed superset cache is missing, mark the run blocked.
 
-Implement the three baseline executors in `methods/baselines.py`. The no-move baseline predicts the start point exactly. The constant-velocity baseline uses the previous observed step length and current bearing exactly as in the old comparison script. The random-walk baseline uses the same discrete pseudo-candidate support built for the point store and treats those pseudo-candidates as a uniform predictive distribution. The baseline executor does not train, but it must still create an MLflow run, write a prediction artifact placeholder, and mark the run completed.
+Implement the three baseline executors in `executors/baselines.py`. The no-move baseline predicts the start point exactly. The constant-velocity baseline uses the previous observed step length and current bearing exactly as in the old comparison script. The random-walk baseline uses the same discrete pseudo-candidate support built for the point store and treats those pseudo-candidates as a uniform predictive distribution. The baseline executor does not train, but it must still create an MLflow run, write a prediction artifact placeholder, and mark the run completed.
 
-Implement the iSSF executor in `methods/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module, and it should explicitly reuse the current `iSSFDataset.build_expanded_x(...)` style of materialization from [movebench/datasets/ssf.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/ssf.py). The “pre-materialized `(N,C,P)` tensor cache” in this plan means that existing design tensor: one full feature tensor per split, built from the point store and the selected covariate view, then reused across training and repeated validation passes so Python-level dataset work is not repeated every step. By default this can stay in memory for the current run. Persistent disk caching should be treated as an optional later optimization only if profiling shows that repeated `build_expanded_x(...)` work dominates retries or resume paths. Conceptually it is keyed by the underlying point-store identity and the covariate-set selection so incompatible tensors are never mixed, but it is not a new extracted artifact family. Training should run through the shared step loop using an iSSF runtime object that owns minibatch sampling, the optimizer, and the candidate-cross-entropy objective. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per evaluation.
+Implement the iSSF executor in `executors/issf.py`. It should reuse `LinearStepSelect` and `MLPStepSelect` from the existing model module, and it should explicitly reuse the current `iSSFDataset.build_expanded_x(...)` style of materialization from [movebench/datasets/ssf.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/ssf.py). The “pre-materialized `(N,C,P)` tensor cache” in this plan means that existing design tensor: one full feature tensor per split, built from the point store and the selected covariate view, then reused across training and repeated validation passes so Python-level dataset work is not repeated every step. By default this can stay in memory for the current run. Persistent disk caching should be treated as an optional later optimization only if profiling shows that repeated `build_expanded_x(...)` work dominates retries or resume paths. Conceptually it is keyed by the underlying point-store identity and the covariate-set selection so incompatible tensors are never mixed, but it is not a new extracted artifact family. Training should run through the shared step loop using an iSSF runtime object that owns minibatch sampling, the optimizer, and the candidate-cross-entropy objective. The early-stopping subset must be a deterministic subset of the preferred held-out split, not a random sample per evaluation.
 
-Implement the deepSSF executor in `methods/deepssf.py`. Reuse the existing model definition and the existing WebDataset loader path where possible, but add a thin adapter that slices cached spatial channels to the requested covariate set and exposes a deterministic early-stopping subset. Keep the current cross-entropy-on-grid loss for training and early stopping. Run it through the shared step loop using a deepSSF runtime object that owns loader iteration, optimizer configuration, and any scheduler behavior. Log the number of valid in-bounds held-out targets used by early stopping because that count can differ across studies and timescales.
+Implement the deepSSF executor in `executors/deepssf.py`. Reuse the existing model definition and the existing WebDataset loader path where possible, but add a thin adapter that slices cached spatial channels to the requested covariate set and exposes a deterministic early-stopping subset. Keep the current cross-entropy-on-grid loss for training and early stopping. Run it through the shared step loop using a deepSSF runtime object that owns loader iteration, optimizer configuration, and any scheduler behavior. Log the number of valid in-bounds held-out targets used by early stopping because that count can differ across studies and timescales.
 
-Implement the MoveFormer executor in `methods/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model. Run it through the shared step loop using a MoveFormer runtime object that owns batch fetching, optimizer state, and scheduler updates.
+Implement the MoveFormer executor in `executors/moveformer.py`. Reuse `build_moveformer_selection_model(...)`, but replace only the old sequence-construction path that still depends on `trajectories.csv` split labels. The new sequence builder should start from split-resolved point-store artifacts and shared tensors directly. Training sequences should contain only train tokens in the loss mask. Evaluation sequences for `test-temporal` or `test-individual` may include earlier same-individual context from the same split-resolved representation, but the `loss_mask` must be true only for the target tokens being scored. Preserve the candidate permutation that makes the true endpoint the target index expected by the model. Run it through the shared step loop using a MoveFormer runtime object that owns batch fetching, optimizer state, and scheduler updates.
 
 Implement `movebench/bench_v2/run.py` last in this plan. This module should load the concrete runs from the planner, create MLflow runs, resolve and validate existing artifacts, dispatch to the method executors, and write a run directory such as `results/bench_v2/runs/<run_key>/`. The directory should contain the resolved payload, checkpoints for trainable methods, step-indexed history, a concise training summary JSON, and standardized prediction artifacts for later exact evaluation. Each MLflow run must be tagged with `run_key`, `study_id`, `timescale`, `covariate_set`, `method`, and `status`.
 
@@ -253,6 +266,10 @@ Do not invent alternate user-facing names.
 
 Plan creation note (2026-03-24 / assistant): initial draft written after confirming which existing model definitions can be reused, which artifact-loading paths are salvageable, and which legacy dataset wrappers are too tied to the old split semantics to keep.
 
-Revision note (2026-03-25 / assistant): updated the living sections after completing the shared trainer, read-only artifact resolution, baseline executors, iSSF executors, and baseline + iSSF `bench run` integration, and recorded the passing targeted test command for this scoped pass.
+Revision note (2026-03-25 / assistant): updated the living sections after completing the shared trainer, read-only artifact resolution, baseline executors, iSSF executors, and baseline + iSSF `bench run` integration, and recorded the passing targeted test command for that scoped pass.
 
 Revision note (2026-03-25 / assistant): deduplicated `movebench/bench_v2/run.py` point-store path handling to reuse the shared helpers in `movebench/features/points.py`, then reran the targeted artifact-resolution and runner tests.
+
+Revision note (2026-03-25 / assistant): completed the scoped deepSSF executor pass, added deepSSF runtime and runner coverage, enabled `bench run` dispatch for `deepssf`, and recorded the passing deepSSF-targeted test command.
+
+Revision note (2026-03-25 / assistant): renamed `movebench/bench_v2/methods/` to `movebench/bench_v2/executors/` and updated the current runtime plans plus executor import strings to match.
