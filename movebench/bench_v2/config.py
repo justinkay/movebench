@@ -96,24 +96,54 @@ COVARIATE_SETS: dict[str, dict[str, object]] = {
 }
 
 METHODS: dict[str, dict[str, object]] = {
+    "baseline_nomove": {
+        "key": "baseline_nomove",
+        "trains": False,
+        "artifact_requirement": "points",
+        "requires_normalization_stats": False,
+        "executor": "movebench.bench_v2.methods.baselines:run_nomove",
+        "model": {},
+        "hparams": {},
+    },
+    "baseline_constvel": {
+        "key": "baseline_constvel",
+        "trains": False,
+        "artifact_requirement": "points",
+        "requires_normalization_stats": False,
+        "executor": "movebench.bench_v2.methods.baselines:run_constvel",
+        "model": {},
+        "hparams": {},
+    },
+    "baseline_randomwalk": {
+        "key": "baseline_randomwalk",
+        "trains": False,
+        "artifact_requirement": "points",
+        "requires_normalization_stats": False,
+        "executor": "movebench.bench_v2.methods.baselines:run_randomwalk",
+        "model": {},
+        "hparams": {},
+    },
     "issf_linear": {
         "key": "issf_linear",
         "trains": True,
         "artifact_requirement": "points",
+        "requires_normalization_stats": True,
         "executor": "movebench.bench_v2.methods.issf:run_linear",
         "model": {},
         "hparams": {
             "lr": 0.01,
             "weight_decay": 0.001,
-            "max_epochs": 50,
-            "eval_every_epochs": 1,
-            "patience_epochs": 5,
+            "batch_size": 256,
+            "max_steps": 2000,
+            "eval_every_steps": 100,
+            "patience_evals": 5,
         },
     },
     "issf_mlp": {
         "key": "issf_mlp",
         "trains": True,
         "artifact_requirement": "points",
+        "requires_normalization_stats": True,
         "executor": "movebench.bench_v2.methods.issf:run_mlp",
         "model": {
             "hidden_dims": [128],
@@ -122,15 +152,17 @@ METHODS: dict[str, dict[str, object]] = {
         "hparams": {
             "lr": 0.001,
             "weight_decay": 0.0001,
-            "max_epochs": 50,
-            "eval_every_epochs": 1,
-            "patience_epochs": 5,
+            "batch_size": 256,
+            "max_steps": 2000,
+            "eval_every_steps": 100,
+            "patience_evals": 5,
         },
     },
     "deepssf": {
         "key": "deepssf",
         "trains": True,
         "artifact_requirement": "deepssf_cache",
+        "requires_normalization_stats": False,
         "executor": "movebench.bench_v2.methods.deepssf:run",
         "model": {
             "image_dim": 101,
@@ -148,6 +180,7 @@ METHODS: dict[str, dict[str, object]] = {
         "key": "moveformer",
         "trains": True,
         "artifact_requirement": "points",
+        "requires_normalization_stats": True,
         "executor": "movebench.bench_v2.methods.moveformer:run",
         "model": {},
         "hparams": {

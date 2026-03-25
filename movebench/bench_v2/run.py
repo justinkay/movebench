@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -12,10 +13,18 @@ from movebench.features.manifest import read_manifest
 import movebench.paths as paths
 from movebench.study import Study
 
+import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.config as bench_config
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
 PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
+_SUPPORTED_METHODS = {
+    "baseline_nomove",
+    "baseline_constvel",
+    "baseline_randomwalk",
+    "issf_linear",
+    "issf_mlp",
+}
 
 
 def _load_module_from_path(module_path: str | Path):
@@ -409,6 +418,352 @@ def _load_resolved_manifests() -> list[dict[str, object]]:
     return manifests
 
 
+def _point_store_dir(run_payload: dict[str, object], split: str) -> Path:
+    return (
+        paths.study_dir(str(run_payload["study_id"]))
+        / "features"
+        / "points"
+        / str(split)
+        / str(run_payload["rasters_hash"])
+        / str(run_payload["sampler_hash"])
+    )
+
+
+def _point_stats_path(run_payload: dict[str, object]) -> Path:
+    return _point_store_dir(run_payload, "train") / "train_stats.json"
+
+
+def _resolve_point_artifacts(
+    run_payload: dict[str, object],
+    *,
+    method: dict[str, object],
+    timescale: dict[str, object],
+) -> dict[str, object]:
+    all_band_ids = list(timescale["all_band_ids"])
+    band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
+    missing_band_ids = [band_id for band_id in band_ids if band_id not in all_band_ids]
+    if missing_band_ids:
+        return {
+            "status": "blocked",
+            "reason": f"unknown point-store band ids: {missing_band_ids}",
+        }
+    band_indices = [all_band_ids.index(band_id) for band_id in band_ids]
+
+    point_stores: dict[str, dict[str, object]] = {}
+    for split in ["train", *list(run_payload["evaluation_split_keys"])]:
+        store_dir = _point_store_dir(run_payload, str(split))
+        manifest_path = store_dir / "manifest.json"
+        if not manifest_path.exists():
+            return {
+                "status": "blocked",
+                "reason": f"missing point store manifest for {split}",
+            }
+        try:
+            manifest = read_manifest(manifest_path)
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "reason": f"invalid point store manifest for {split}: {exc}",
+            }
+        shared_path = store_dir / "shared.pt"
+        if not shared_path.exists():
+            return {
+                "status": "blocked",
+                "reason": f"missing shared.pt for {split}",
+            }
+        missing_manifest_bands = [
+            band_id for band_id in band_ids if band_id not in manifest.bands
+        ]
+        if missing_manifest_bands:
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"point store for {split} is missing bands {missing_manifest_bands}"
+                ),
+            }
+        point_stores[str(split)] = {
+            "store_dir": store_dir,
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+        }
+
+    normalization_stats_path: Path | None = None
+    if bool(method.get("requires_normalization_stats", False)):
+        normalization_stats_path = _point_stats_path(run_payload)
+        if not normalization_stats_path.exists():
+            return {
+                "status": "blocked",
+                "reason": "missing normalization stats for train",
+            }
+
+    return {
+        "status": "resolved",
+        "artifact_requirement": "points",
+        "study_dir": paths.study_dir(str(run_payload["study_id"])),
+        "trajectories_path": paths.study_dir(str(run_payload["study_id"]))
+        / "trajectories.csv",
+        "plan": timescale["plan"],
+        "sampler": timescale["sampler"],
+        "all_band_ids": all_band_ids,
+        "band_ids": band_ids,
+        "band_indices": band_indices,
+        "normalization_stats_path": normalization_stats_path,
+        "point_stores": point_stores,
+    }
+
+
+def _resolve_deepssf_cache_artifacts(
+    run_payload: dict[str, object],
+    *,
+    timescale: dict[str, object],
+) -> dict[str, object]:
+    all_band_ids = list(timescale["all_band_ids"])
+    band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
+    missing_band_ids = [band_id for band_id in band_ids if band_id not in all_band_ids]
+    if missing_band_ids:
+        return {
+            "status": "blocked",
+            "reason": f"unknown deepSSF cache band ids: {missing_band_ids}",
+        }
+    channel_indices = [all_band_ids.index(band_id) for band_id in band_ids]
+
+    cache_manifests: dict[str, dict[str, object]] = {}
+    for split in ["train", *list(run_payload["evaluation_split_keys"])]:
+        cache_hash = bench_config.deepssf_cache_hash_for_split(
+            str(run_payload["timescale"]),
+            str(split),
+        )
+        cache_dir = (
+            paths.study_dir(str(run_payload["study_id"]))
+            / "cache"
+            / "deepssf_wds"
+            / str(split)
+            / str(cache_hash)
+        )
+        manifest_path = cache_dir / "manifest.json"
+        if not manifest_path.exists():
+            return {
+                "status": "blocked",
+                "reason": f"missing deepSSF cache manifest for {split}",
+            }
+        shards_dir = cache_dir / "shards"
+        if not shards_dir.exists() or not any(shards_dir.iterdir()):
+            return {
+                "status": "blocked",
+                "reason": f"missing deepSSF shards for {split}",
+            }
+        try:
+            manifest = read_deepssf_wds_manifest(manifest_path)
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
+            }
+        cache_manifests[str(split)] = {
+            "cache_dir": cache_dir,
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+        }
+
+    return {
+        "status": "resolved",
+        "artifact_requirement": "deepssf_cache",
+        "study_dir": paths.study_dir(str(run_payload["study_id"])),
+        "all_band_ids": all_band_ids,
+        "band_ids": band_ids,
+        "channel_indices": channel_indices,
+        "cache_manifests": cache_manifests,
+    }
+
+
+def _resolve_artifacts_for_run(run_payload: dict[str, object]) -> dict[str, object]:
+    method = bench_config.METHODS[str(run_payload["method"])]
+    timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
+    requirement = str(method["artifact_requirement"])
+    if requirement == "points":
+        return _resolve_point_artifacts(run_payload, method=method, timescale=timescale)
+    if requirement == "deepssf_cache":
+        return _resolve_deepssf_cache_artifacts(run_payload, timescale=timescale)
+    raise ValueError(f"Unsupported artifact requirement: {requirement!r}")
+
+
+def _load_executor(executor_ref: str):
+    module_name, func_name = str(executor_ref).split(":", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, func_name)
+
+
+class _RunTracker:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+
+    def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        log_fn = getattr(bench_mlflow.mlflow, "log_metrics", None)
+        if callable(log_fn):
+            log_fn(dict(metrics), step=int(step))
+
+    def write_history(self, history: list[dict[str, float]]) -> None:
+        history_path = self.run_dir / "history.json"
+        history_path.write_text(
+            json.dumps(history, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+
+def _set_mlflow_tag(key: str, value: object) -> None:
+    set_tag = getattr(bench_mlflow.mlflow, "set_tag", None)
+    if callable(set_tag):
+        set_tag(str(key), value)
+
+
+def _end_mlflow_run(status: str | None) -> None:
+    end_run = getattr(bench_mlflow.mlflow, "end_run", None)
+    if callable(end_run):
+        end_run(status=status)
+
+
+def _latest_run_status(latest_run: object | None) -> str:
+    if latest_run is None:
+        return ""
+    return str(getattr(getattr(latest_run, "data", None), "tags", {}).get("status", ""))
+
+
+def _run_dir(run_key: str) -> Path:
+    return paths.repo_root() / "results" / "bench_v2" / "runs" / str(run_key)
+
+
+def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _write_blocked_run(
+    run_payload: dict[str, object],
+    *,
+    run_dir: Path,
+    reason: str,
+) -> dict[str, object]:
+    bench_mlflow.start_benchmark_run({**run_payload, "status": "blocked"})
+    _set_mlflow_tag("status", "blocked")
+    _set_mlflow_tag("blocked_reason", reason)
+    summary = {
+        "status": "blocked",
+        "reason": reason,
+        "train_steps": 0,
+        "early_stop_split_key": str(run_payload["early_stop_split_key"]),
+    }
+    _write_json(run_dir / "training_summary.json", summary)
+    _end_mlflow_run("FAILED")
+    return summary
+
+
+def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
+    run_dir = _run_dir(str(run_payload["run_key"]))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(run_dir / "resolved_run.json", _canonical_run_payload(run_payload))
+
+    if str(run_payload["method"]) not in _SUPPORTED_METHODS:
+        return _write_blocked_run(
+            run_payload,
+            run_dir=run_dir,
+            reason=f"executor not implemented for method {run_payload['method']}",
+        )
+
+    resolved = _resolve_artifacts_for_run(run_payload)
+    if resolved["status"] != "resolved":
+        return _write_blocked_run(
+            run_payload,
+            run_dir=run_dir,
+            reason=str(resolved["reason"]),
+        )
+
+    bench_mlflow.start_benchmark_run({**run_payload, "status": "running"})
+    tracker = _RunTracker(run_dir)
+    try:
+        executor = _load_executor(str(run_payload["executor"]))
+        summary = dict(
+            executor(
+                run_payload=run_payload,
+                resolved_artifacts=resolved,
+                run_dir=run_dir,
+                tracker=tracker,
+            )
+        )
+        summary.setdefault("status", "completed")
+        _write_json(run_dir / "training_summary.json", summary)
+        _set_mlflow_tag("status", summary["status"])
+        _end_mlflow_run("FINISHED")
+        return summary
+    except Exception as exc:
+        summary = {
+            "status": "failed",
+            "reason": str(exc),
+            "train_steps": 0,
+            "early_stop_split_key": str(run_payload["early_stop_split_key"]),
+        }
+        _write_json(run_dir / "training_summary.json", summary)
+        _set_mlflow_tag("status", "failed")
+        _set_mlflow_tag("failure_reason", str(exc))
+        _end_mlflow_run("FAILED")
+        return summary
+
+
+def run_experiment(
+    experiment_module: str,
+    *,
+    studies_override: list[str] | None = None,
+    methods: list[str] | None = None,
+    max_runs: int | None = None,
+) -> dict[str, object]:
+    experiment = load_experiment(experiment_module)
+    if methods is not None:
+        experiment["methods"] = [str(method) for method in methods]
+
+    runs = expand_experiment(experiment, studies_override=studies_override)
+    manifest_path = write_resolved_manifest(experiment, runs)
+    latest_runs = bench_mlflow.search_latest_runs_by_key(
+        [str(run["run_key"]) for run in runs]
+    )
+
+    pending_runs: list[dict[str, object]] = []
+    skipped_runs = 0
+    for run_payload in runs:
+        latest_status = _latest_run_status(
+            latest_runs.get(str(run_payload["run_key"]))
+        )
+        if latest_status in {"completed", "blocked", "running"}:
+            skipped_runs += 1
+            continue
+        pending_runs.append(run_payload)
+
+    if max_runs is not None:
+        pending_runs = pending_runs[: int(max_runs)]
+
+    executed_runs = 0
+    blocked_runs = 0
+    failed_runs = 0
+    for run_payload in pending_runs:
+        summary = _execute_run(run_payload)
+        executed_runs += 1
+        status = str(summary.get("status", ""))
+        if status == "blocked":
+            blocked_runs += 1
+        elif status == "failed":
+            failed_runs += 1
+
+    return {
+        "manifest_path": manifest_path,
+        "planned_runs": len(runs),
+        "executed_runs": executed_runs,
+        "skipped_runs": skipped_runs,
+        "blocked_runs": blocked_runs,
+        "failed_runs": failed_runs,
+    }
+
+
 def status_snapshot() -> dict[str, object]:
     studies = Study.list_available()
     study_entries: list[dict[str, object]] = []
@@ -522,6 +877,22 @@ def _command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_run(args: argparse.Namespace) -> int:
+    summary = run_experiment(
+        args.experiment_module,
+        studies_override=args.studies,
+        methods=args.methods,
+        max_runs=args.max_runs,
+    )
+    print(f"Planned runs: {summary['planned_runs']}")
+    print(f"Executed runs: {summary['executed_runs']}")
+    print(f"Skipped runs: {summary['skipped_runs']}")
+    print(f"Blocked runs: {summary['blocked_runs']}")
+    print(f"Failed runs: {summary['failed_runs']}")
+    print(f"Resolved manifest: {summary['manifest_path']}")
+    return 0
+
+
 def register(subparsers) -> None:
     parser = subparsers.add_parser("bench", help="Plan and inspect the v2 benchmark runtime")
     bench_subparsers = parser.add_subparsers(dest="bench_command", required=True)
@@ -534,3 +905,10 @@ def register(subparsers) -> None:
     status_parser = bench_subparsers.add_parser("status", help="Inspect artifact and run readiness")
     status_parser.add_argument("--format", choices=["text"], default="text")
     status_parser.set_defaults(func=_command_status)
+
+    run_parser = bench_subparsers.add_parser("run", help="Execute runnable benchmark runs")
+    run_parser.add_argument("experiment_module")
+    run_parser.add_argument("--studies", nargs="+", default=None)
+    run_parser.add_argument("--methods", nargs="+", default=None)
+    run_parser.add_argument("--max-runs", type=int, default=None)
+    run_parser.set_defaults(func=_command_run)

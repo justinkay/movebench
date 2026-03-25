@@ -19,12 +19,12 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 - [x] (2026-03-24 17:50Z) Verified that the point-store loading helpers and dataset wrappers already provide a usable read path for SSF-style methods, so the new runtime can start from existing artifacts instead of rebuilding them.
 - [x] (2026-03-24 18:00Z) Verified that the current deepSSF cache design is keyed too narrowly to reuse superset artifacts for subset covariate experiments.
 - [x] (2026-03-24 18:10Z) Verified that MoveFormer evaluation already uses a loss mask and therefore fits naturally with split-aware token masking in the new runtime.
-- [ ] Implement the shared training lifecycle helper and per-method runtime pattern under `movebench/bench_v2/`.
-- [ ] Implement read-only artifact resolution for point stores, normalization stats, and deepSSF caches.
-- [ ] Implement the three simple baselines inside the new runtime.
-- [ ] Implement iSSF linear and iSSF MLP executors against the new artifact layer.
+- [x] (2026-03-25 13:34Z) Implemented `movebench/bench_v2/train.py` with the shared step-based training loop, best-state restore, tracker-backed history writing, and the small iSSF runtime object pattern.
+- [x] (2026-03-25 13:34Z) Implemented read-only artifact resolution for point stores, train normalization stats, and deepSSF cache manifests, including subset-view index resolution against the `all` covariate artifact.
+- [x] (2026-03-25 13:34Z) Implemented `baseline_nomove`, `baseline_constvel`, and `baseline_randomwalk` under `movebench/bench_v2/methods/baselines.py`, each writing standardized prediction artifacts with zero training steps.
+- [x] (2026-03-25 13:34Z) Implemented `issf_linear` and `issf_mlp` under `movebench/bench_v2/methods/issf.py`, reusing `build_expanded_x(...)`, shared-loop training, best-checkpoint writing, and discrete prediction artifact writing.
 - [ ] Implement deepSSF and MoveFormer executors against the new artifact layer.
-- [ ] Implement `movebench bench run`.
+- [ ] Implement `movebench bench run` for deepSSF and MoveFormer (completed in this scoped pass: baseline + iSSF execution, status-based skipping, blocked-run marking, and run-directory / MLflow integration).
 
 ## Surprises & Discoveries
 
@@ -45,6 +45,9 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 
 - Observation: the current point-store format stores the true endpoint as one candidate among the candidates.
   Evidence: point-store shared tensors include `num_candidates + 1` points per step, and the legacy selection losses assume the true endpoint is the final or first candidate depending on model family. The new runtime must keep this for training but remove the true endpoint from final candidate-based energy evaluation.
+
+- Observation: the existing point-store manifest schema does not record an explicit full band-order field.
+  Evidence: [movebench/features/manifest.py](/data/vision/beery/scratch/justin/movebench/movebench/features/manifest.py) validates only the `bands` mapping, so the scoped runtime had to derive stable subset indices from the timescale layer plan’s `all_band_ids` rather than from manifest JSON alone.
 
 ## Decision Log
 
@@ -72,13 +75,21 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
   Rationale: they still need run identity, MLflow artifacts, final metrics, and report visibility.
   Date/Author: 2026-03-24 / assistant
 
+- Decision: the scoped artifact resolver will treat the timescale layer-plan band order as the canonical `all` channel order for subset slicing.
+  Rationale: changing the extracted point-store or deepSSF-cache manifest format is out of scope here, but subset reuse still needs a stable source of channel indices.
+  Date/Author: 2026-03-25 / assistant
+
 - Decision: MoveFormer evaluation sequences may include earlier same-individual context from outside the target partition, but loss and metrics must apply only to target-partition tokens.
   Rationale: autoregressive forecasting legitimately conditions on observed history, but benchmark metrics must only score the intended held-out steps.
   Date/Author: 2026-03-24 / assistant
 
 ## Outcomes & Retrospective
 
-This plan should leave the repository with one execution path for all methods and one place to inspect per-run artifacts. If successful, the later evaluation and report plan can treat model execution as a solved problem and read standardized prediction artifacts.
+This scoped pass now leaves the repository with the shared trainer, read-only artifact resolution, three baseline executors, iSSF linear and MLP executors, and `bench run` support for those methods. The targeted verification passed with:
+
+    python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status tests.bench_v2.test_trainer tests.bench_v2.test_artifact_resolution tests.bench_v2.test_issf_runtime tests.bench_v2.test_runner
+
+deepSSF and MoveFormer execution remain for the next stage of this plan. The later evaluation and report plan can already rely on the new baseline + iSSF prediction artifacts and run-directory layout.
 
 ## Context and Orientation
 
@@ -159,6 +170,10 @@ Add a runner test that creates concrete runs, executes a fake or tiny real exper
 
     python -m unittest -v tests.bench_v2.test_runner
 
+The passing scoped command in this environment was:
+
+    python -m unittest -v tests.bench_v2.test_plan tests.bench_v2.test_mlflow tests.bench_v2.test_status tests.bench_v2.test_trainer tests.bench_v2.test_artifact_resolution tests.bench_v2.test_issf_runtime tests.bench_v2.test_runner
+
 The final smoke command for this plan is:
 
     movebench bench run experiments/v2/smoke_one_study.py --max-runs 3
@@ -237,3 +252,5 @@ Define stable method keys exactly as:
 Do not invent alternate user-facing names.
 
 Plan creation note (2026-03-24 / assistant): initial draft written after confirming which existing model definitions can be reused, which artifact-loading paths are salvageable, and which legacy dataset wrappers are too tied to the old split semantics to keep.
+
+Revision note (2026-03-25 / assistant): updated the living sections after completing the shared trainer, read-only artifact resolution, baseline executors, iSSF executors, and baseline + iSSF `bench run` integration, and recorded the passing targeted test command for this scoped pass.
