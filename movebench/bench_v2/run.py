@@ -9,7 +9,10 @@ import json
 from pathlib import Path
 import shutil
 
-from movebench.datasets.deepssf_wds_cache import read_deepssf_wds_manifest
+from movebench.datasets.deepssf_wds_cache import (
+    list_deepssf_wds_shards,
+    read_deepssf_wds_manifest,
+)
 from movebench.features.manifest import read_manifest
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (
@@ -151,8 +154,7 @@ def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[
             "reason": f"missing deepSSF cache manifest for {split}",
             "manifest_path": manifest_path,
         }
-    shards_dir = cache_dir / "shards"
-    if not shards_dir.exists() or not any(shards_dir.iterdir()):
+    if not list_deepssf_wds_shards(cache_dir):
         return {
             "available": False,
             "reason": f"missing deepSSF shards for {split}",
@@ -602,8 +604,7 @@ def _resolve_deepssf_cache_artifacts(
                 "status": "blocked",
                 "reason": f"missing deepSSF cache manifest for {split}",
             }
-        shards_dir = cache_dir / "shards"
-        if not shards_dir.exists() or not any(shards_dir.iterdir()):
+        if not list_deepssf_wds_shards(cache_dir):
             return {
                 "status": "blocked",
                 "reason": f"missing deepSSF shards for {split}",
@@ -614,6 +615,15 @@ def _resolve_deepssf_cache_artifacts(
             return {
                 "status": "blocked",
                 "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
+            }
+        env_channels = int(manifest["env_channels"])
+        if channel_indices and max(channel_indices) >= env_channels:
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache for {split} exposes env_channels={env_channels} "
+                    f"but the requested covariate view needs index {max(channel_indices)}"
+                ),
             }
         cache_manifests[str(split)] = {
             "cache_dir": cache_dir,

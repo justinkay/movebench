@@ -117,7 +117,17 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(
             f"manifest.pixel_size_m must be > 0; got {d.get('pixel_size_m')!r}"
         )
+    if int(d.get("env_channels", 0)) <= 0:
+        raise ValueError(
+            f"manifest.env_channels must be > 0; got {d.get('env_channels')!r}"
+        )
     return dict(d)
+
+
+def list_deepssf_wds_shards(cache_dir: str | Path) -> list[Path]:
+    cache_dir = Path(cache_dir)
+    shards_dir = cache_dir / "shards"
+    return sorted([p for p in shards_dir.glob("shard-*.tar*") if p.is_file()])
 
 
 def build_deepssf_wds_cache(
@@ -386,10 +396,9 @@ def make_deepssf_wds_loader(
 ) -> Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     cache_dir = Path(cache_dir)
     _ = read_deepssf_wds_manifest(cache_dir / "manifest.json")
-    shards_dir = cache_dir / "shards"
-    urls = sorted([str(p) for p in shards_dir.glob("shard-*.tar*") if p.is_file()])
+    urls = [str(p) for p in list_deepssf_wds_shards(cache_dir)]
     if not urls:
-        raise FileNotFoundError(f"No shards found under: {shards_dir}")
+        raise FileNotFoundError(f"No shards found under: {cache_dir / 'shards'}")
 
     # WebDataset splits shards across DataLoader workers. If num_workers exceeds
     # the number of shards, some workers would receive no shards and can error

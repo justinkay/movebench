@@ -13,6 +13,8 @@ from movebench.datasets.deepssf_wds_cache import (
 )
 from movebench.models.deepssf import DeepSSF
 
+DEFAULT_EVAL_MAX_ITEMS = 2500
+
 
 def _resolve_schedule(
     method_hparams: dict[str, object],
@@ -63,6 +65,14 @@ def _slice_spatial(
     return spatial.index_select(1, channel_indices)
 
 
+def _slice_batch_items(
+    batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    *,
+    num_items: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return tuple(t[: int(num_items)] for t in batch)  # type: ignore[return-value]
+
+
 def _grid_logits_and_targets(
     out: torch.Tensor,
     target: torch.Tensor,
@@ -89,11 +99,28 @@ def _evaluate_loader(
     *,
     device: torch.device,
     channel_indices: torch.Tensor | None,
+    max_items: int | None = None,
 ) -> dict[str, float]:
     model.eval()
     total_nll = 0.0
     total_valid = 0
+    seen_items = 0
+    item_limit = None if max_items is None else int(max_items)
+    if item_limit is not None and item_limit <= 0:
+        raise ValueError(f"max_items must be > 0 or None; got {max_items}")
     for spatial, scalars, bearing, target in loader:
+        if item_limit is not None:
+            remaining = item_limit - seen_items
+            if remaining <= 0:
+                break
+            batch_size = int(spatial.shape[0])
+            if batch_size > remaining:
+                spatial, scalars, bearing, target = _slice_batch_items(
+                    (spatial, scalars, bearing, target),
+                    num_items=remaining,
+                )
+                batch_size = remaining
+            seen_items += batch_size
         spatial = _slice_spatial(
             spatial.to(device=device, dtype=torch.float32),
             channel_indices=channel_indices,
@@ -179,12 +206,14 @@ class _DeepSSFRuntime:
         lr_habitat: float,
         weight_decay: float,
         channel_indices: list[int],
+        eval_max_items: int | None,
     ) -> None:
         self.model = model.to(device)
         self.train_loader = train_loader
         self.eval_loaders = dict(eval_loaders)
         self.early_stop_split_key = str(early_stop_split_key)
         self.device = device
+        self.eval_max_items = eval_max_items
         self._train_iter = iter(self.train_loader)
         self._channel_indices = None
         if channel_indices:
@@ -242,6 +271,7 @@ class _DeepSSFRuntime:
             loader,
             device=self.device,
             channel_indices=self._channel_indices,
+            max_items=self.eval_max_items,
         )
 
     def state_dict(self) -> dict[str, object]:
@@ -264,6 +294,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     batch_size = int(method_hparams.get("batch_size", 32))
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
+    eval_max_items = int(method_hparams.get("max_eval_items", DEFAULT_EVAL_MAX_ITEMS))
 
     train_manifest = dict(resolved_artifacts["cache_manifests"]["train"]["manifest"])
     output_hw = tuple(int(v) for v in train_manifest["output_hw"])
@@ -341,6 +372,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         lr_habitat=float(method_hparams["lr_habitat"]),
         weight_decay=float(method_hparams["weight_decay"]),
         channel_indices=channel_indices,
+        eval_max_items=eval_max_items,
     )
     fit = run_training_loop(
         runtime,
