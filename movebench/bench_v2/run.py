@@ -548,6 +548,17 @@ def _resolve_point_artifacts(
     if str(run_payload["method"]) == "moveformer":
         expected_selected_splits: list[str] | None = None
         for split, store in point_stores.items():
+            shared_metadata_version = store["manifest"].extraction.get(
+                "shared_metadata_version"
+            )
+            if int(shared_metadata_version or -1) != 1:
+                return {
+                    "status": "blocked",
+                    "reason": (
+                        f"point store for {split} is missing "
+                        "extraction.shared_metadata_version=1 required for MoveFormer"
+                    ),
+                }
             selected_splits = store["manifest"].extraction.get("selected_splits")
             if not isinstance(selected_splits, list) or not selected_splits:
                 return {
