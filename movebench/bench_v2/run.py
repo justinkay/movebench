@@ -589,6 +589,8 @@ def _resolve_deepssf_cache_artifacts(
     timescale: dict[str, object],
 ) -> dict[str, object]:
     all_band_ids = list(timescale["all_band_ids"])
+    expected_env_channels = len(all_band_ids)
+    expected_output_hw = tuple(int(v) for v in timescale["output_hw"])
     band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
     missing_band_ids = [band_id for band_id in band_ids if band_id not in all_band_ids]
     if missing_band_ids:
@@ -632,6 +634,15 @@ def _resolve_deepssf_cache_artifacts(
                 "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
             }
         env_channels = int(manifest["env_channels"])
+        if env_channels != expected_env_channels:
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache for {split} exposes env_channels={env_channels} "
+                    f"but timescale {run_payload['timescale']} expects the full-cache "
+                    f"env_channels={expected_env_channels}"
+                ),
+            }
         if channel_indices and max(channel_indices) >= env_channels:
             return {
                 "status": "blocked",
@@ -641,6 +652,15 @@ def _resolve_deepssf_cache_artifacts(
                 ),
             }
         split_output_hw = tuple(int(v) for v in manifest["output_hw"])
+        if split_output_hw != expected_output_hw:
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache for {split} exposes output_hw={list(split_output_hw)} "
+                    f"but timescale {run_payload['timescale']} expects output_hw="
+                    f"{list(expected_output_hw)}"
+                ),
+            }
         split_pixel_size_m = float(manifest["pixel_size_m"])
         if reference_output_hw is None:
             reference_output_hw = split_output_hw
