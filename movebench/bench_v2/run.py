@@ -392,6 +392,18 @@ def expand_experiment(
                         "early_stop_split_key": str(early_stop_split_key),
                         "evaluation_split_keys": evaluation_splits,
                     }
+                    resolved = _resolve_artifacts_for_run(run_payload)
+                    if resolved["status"] != "resolved":
+                        blocked.append(
+                            {
+                                "study_id": study_id,
+                                "timescale": str(timescale_key),
+                                "covariate_set": str(covariate_set_key),
+                                "method": str(method_key),
+                                "reason": str(resolved["reason"]),
+                            }
+                        )
+                        continue
                     run_payload["run_key"] = _run_key(run_payload)
                     runs.append(run_payload)
 
@@ -852,6 +864,7 @@ def run_experiment(
     studies_override: list[str] | None = None,
     methods: list[str] | None = None,
     max_runs: int | None = None,
+    rerun: bool = False,
 ) -> dict[str, object]:
     experiment = load_experiment(experiment_module)
     if methods is not None:
@@ -870,7 +883,7 @@ def run_experiment(
         latest_status = _latest_run_status(
             latest_runs.get(str(run_payload["run_key"]))
         )
-        if latest_status == "completed":
+        if (not bool(rerun)) and latest_status in {"completed", "running"}:
             skipped_runs += 1
             continue
         pending_runs.append(run_payload)
@@ -1019,6 +1032,7 @@ def _command_run(args: argparse.Namespace) -> int:
         studies_override=args.studies,
         methods=args.methods,
         max_runs=args.max_runs,
+        rerun=bool(args.rerun),
     )
     print(f"Planned runs: {summary['planned_runs']}")
     print(f"Executed runs: {summary['executed_runs']}")
@@ -1047,4 +1061,5 @@ def register(subparsers) -> None:
     run_parser.add_argument("--studies", nargs="+", default=None)
     run_parser.add_argument("--methods", nargs="+", default=None)
     run_parser.add_argument("--max-runs", type=int, default=None)
+    run_parser.add_argument("--rerun", action="store_true")
     run_parser.set_defaults(func=_command_run)

@@ -171,9 +171,11 @@ METHODS: dict[str, dict[str, object]] = {
             "lr_movement": 0.00001,
             "lr_habitat": 0.0001,
             "weight_decay": 0.0,
+            "batch_size": 32,
             "max_steps": 100000,
             "eval_every_steps": 1000,
             "patience_evals": 5,
+            "max_eval_items": 2500,
         },
     },
     "moveformer": {

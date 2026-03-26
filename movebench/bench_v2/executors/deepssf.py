@@ -9,9 +9,6 @@ from movebench.bench_v2.train import TrainerConfig, run_training_loop
 from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
 from movebench.models.deepssf import DeepSSF
 
-DEFAULT_EVAL_MAX_ITEMS = 2500
-
-
 def _slice_spatial(
     spatial: torch.Tensor,
     *,
@@ -248,10 +245,10 @@ class _DeepSSFRuntime:
 def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     run_dir = Path(run_dir)
     method_hparams = dict(run_payload.get("method_hparams", {}))
-    batch_size = int(method_hparams.get("batch_size", 32))
+    batch_size = int(method_hparams["batch_size"])
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
-    eval_max_items = int(method_hparams.get("max_eval_items", DEFAULT_EVAL_MAX_ITEMS))
+    eval_max_items = int(method_hparams["max_eval_items"])
 
     train_manifest = dict(resolved_artifacts["cache_manifests"]["train"]["manifest"])
     output_hw = tuple(int(v) for v in train_manifest["output_hw"])
