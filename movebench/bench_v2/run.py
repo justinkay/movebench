@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import shutil
 
@@ -586,6 +587,8 @@ def _resolve_deepssf_cache_artifacts(
     channel_indices = [all_band_ids.index(band_id) for band_id in band_ids]
 
     cache_manifests: dict[str, dict[str, object]] = {}
+    reference_output_hw: tuple[int, int] | None = None
+    reference_pixel_size_m: float | None = None
     for split in ["train", *list(run_payload["evaluation_split_keys"])]:
         cache_hash = bench_config.deepssf_cache_hash_for_split(
             str(run_payload["timescale"]),
@@ -623,6 +626,32 @@ def _resolve_deepssf_cache_artifacts(
                 "reason": (
                     f"deepSSF cache for {split} exposes env_channels={env_channels} "
                     f"but the requested covariate view needs index {max(channel_indices)}"
+                ),
+            }
+        split_output_hw = tuple(int(v) for v in manifest["output_hw"])
+        split_pixel_size_m = float(manifest["pixel_size_m"])
+        if reference_output_hw is None:
+            reference_output_hw = split_output_hw
+            reference_pixel_size_m = split_pixel_size_m
+        elif split_output_hw != reference_output_hw:
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache metadata mismatch for {split}: "
+                    f"output_hw train={list(reference_output_hw)} {split}={list(split_output_hw)}"
+                ),
+            }
+        elif reference_pixel_size_m is not None and not math.isclose(
+            split_pixel_size_m,
+            reference_pixel_size_m,
+            rel_tol=1e-6,
+            abs_tol=0.0,
+        ):
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache metadata mismatch for {split}: "
+                    f"pixel_size_m train={reference_pixel_size_m} {split}={split_pixel_size_m}"
                 ),
             }
         cache_manifests[str(split)] = {
@@ -829,6 +858,7 @@ def run_experiment(
         experiment["methods"] = [str(method) for method in methods]
 
     runs = expand_experiment(experiment, studies_override=studies_override)
+    planner_blocked_runs = len(experiment.get("blocked", []))
     manifest_path = write_resolved_manifest(experiment, runs)
     latest_runs = bench_mlflow.search_latest_runs_by_key(
         [str(run["run_key"]) for run in runs]
@@ -849,23 +879,23 @@ def run_experiment(
         pending_runs = pending_runs[: int(max_runs)]
 
     executed_runs = 0
-    blocked_runs = 0
+    executor_blocked_runs = 0
     failed_runs = 0
     for run_payload in pending_runs:
         summary = _execute_run(run_payload)
         executed_runs += 1
         status = str(summary.get("status", ""))
         if status == "blocked":
-            blocked_runs += 1
+            executor_blocked_runs += 1
         elif status == "failed":
             failed_runs += 1
 
     return {
         "manifest_path": manifest_path,
-        "planned_runs": len(runs),
+        "planned_runs": len(runs) + planner_blocked_runs,
         "executed_runs": executed_runs,
         "skipped_runs": skipped_runs,
-        "blocked_runs": blocked_runs,
+        "blocked_runs": planner_blocked_runs + executor_blocked_runs,
         "failed_runs": failed_runs,
     }
 

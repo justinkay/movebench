@@ -1,58 +1,15 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
 from movebench.bench_v2.train import TrainerConfig, run_training_loop
-from movebench.datasets.deepssf_wds_cache import (
-    make_deepssf_wds_loader,
-    steps_per_epoch_from_manifest,
-)
+from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
 from movebench.models.deepssf import DeepSSF
 
 DEFAULT_EVAL_MAX_ITEMS = 2500
-
-
-def _resolve_schedule(
-    method_hparams: dict[str, object],
-    *,
-    steps_per_epoch: int,
-) -> dict[str, int]:
-    steps_per_epoch = int(steps_per_epoch)
-    if steps_per_epoch <= 0:
-        raise ValueError(f"steps_per_epoch must be > 0; got {steps_per_epoch}")
-
-    if any(
-        key in method_hparams
-        for key in ("max_epochs", "eval_every_epochs", "patience_epochs")
-    ):
-        max_epochs = int(method_hparams["max_epochs"])
-        eval_every_epochs = int(method_hparams.get("eval_every_epochs", 1))
-        patience_epochs = int(method_hparams["patience_epochs"])
-        if max_epochs <= 0:
-            raise ValueError(f"max_epochs must be > 0; got {max_epochs}")
-        if eval_every_epochs <= 0:
-            raise ValueError(
-                f"eval_every_epochs must be > 0; got {eval_every_epochs}"
-            )
-        if patience_epochs <= 0:
-            raise ValueError(f"patience_epochs must be > 0; got {patience_epochs}")
-        return {
-            "max_steps": int(max_epochs) * steps_per_epoch,
-            "eval_every_steps": int(eval_every_epochs) * steps_per_epoch,
-            "patience_evals": int(
-                math.ceil(float(patience_epochs) / float(eval_every_epochs))
-            ),
-        }
-
-    return {
-        "max_steps": int(method_hparams["max_steps"]),
-        "eval_every_steps": int(method_hparams["eval_every_steps"]),
-        "patience_evals": int(method_hparams["patience_evals"]),
-    }
 
 
 def _slice_spatial(
@@ -307,25 +264,6 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         )
 
     pixel_size_m = float(train_manifest["pixel_size_m"])
-    for split_key, entry in resolved_artifacts["cache_manifests"].items():
-        manifest = dict(entry["manifest"])
-        split_output_hw = tuple(int(v) for v in manifest["output_hw"])
-        if split_output_hw != output_hw:
-            raise ValueError(
-                "deepSSF requires consistent chip grid shape across splits. "
-                f"Got train={output_hw} and {split_key}={split_output_hw}."
-            )
-        split_pixel_size_m = float(manifest["pixel_size_m"])
-        if not math.isclose(
-            split_pixel_size_m,
-            pixel_size_m,
-            rel_tol=1e-6,
-            abs_tol=0.0,
-        ):
-            raise ValueError(
-                "deepSSF requires consistent chip grid scale across splits. "
-                f"Got train={pixel_size_m} and {split_key}={split_pixel_size_m}."
-            )
 
     train_loader = _make_loader(
         Path(resolved_artifacts["cache_manifests"]["train"]["cache_dir"]),
@@ -348,13 +286,11 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         ),
     }
 
-    schedule = _resolve_schedule(
-        method_hparams,
-        steps_per_epoch=steps_per_epoch_from_manifest(
-            train_manifest,
-            batch_size=batch_size,
-        ),
-    )
+    schedule = {
+        "max_steps": int(method_hparams["max_steps"]),
+        "eval_every_steps": int(method_hparams["eval_every_steps"]),
+        "patience_evals": int(method_hparams["patience_evals"]),
+    }
     channel_indices = list(resolved_artifacts["channel_indices"])
     model = DeepSSF(
         len(channel_indices),

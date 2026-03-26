@@ -171,9 +171,9 @@ METHODS: dict[str, dict[str, object]] = {
             "lr_movement": 0.00001,
             "lr_habitat": 0.0001,
             "weight_decay": 0.0,
-            "max_epochs": 100,
-            "eval_every_epochs": 1,
-            "patience_epochs": 5,
+            "max_steps": 100000,
+            "eval_every_steps": 1000,
+            "patience_evals": 5,
         },
     },
     "moveformer": {
