@@ -175,7 +175,7 @@ METHODS: dict[str, dict[str, object]] = {
             "max_steps": 100000,
             "eval_every_steps": 1000,
             "patience_evals": 5,
-            "max_eval_items": 2500,
+            "max_eval_items": 2500, # to keep validation fast during training loop
         },
     },
     "moveformer": {

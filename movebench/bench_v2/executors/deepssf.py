@@ -257,7 +257,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     image_dim = int(run_payload.get("method_model", {}).get("image_dim", output_hw[0]))
     if image_dim != int(output_hw[0]):
         raise ValueError(
-            f"deepSSF model.image_dim ({image_dim}) must match dataset chip size ({output_hw[0]})."
+            f"deepSSF model.image_dim={image_dim} is incompatible with cache output_hw={list(output_hw)}"
         )
 
     pixel_size_m = float(train_manifest["pixel_size_m"])

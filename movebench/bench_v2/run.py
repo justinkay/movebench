@@ -672,6 +672,33 @@ def _resolve_deepssf_cache_artifacts(
             "manifest": manifest,
         }
 
+    if reference_output_hw is None:
+        return {
+            "status": "blocked",
+            "reason": "missing deepSSF cache metadata",
+        }
+    if len(reference_output_hw) != 2 or int(reference_output_hw[0]) != int(
+        reference_output_hw[1]
+    ):
+        return {
+            "status": "blocked",
+            "reason": (
+                f"deepSSF expects square chips; cache output_hw={list(reference_output_hw)}"
+            ),
+        }
+
+    image_dim = int(
+        run_payload.get("method_model", {}).get("image_dim", reference_output_hw[0])
+    )
+    if image_dim != int(reference_output_hw[0]):
+        return {
+            "status": "blocked",
+            "reason": (
+                f"deepSSF model.image_dim={image_dim} is incompatible with "
+                f"cache output_hw={list(reference_output_hw)}"
+            ),
+        }
+
     return {
         "status": "resolved",
         "artifact_requirement": "deepssf_cache",
