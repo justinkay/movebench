@@ -158,7 +158,7 @@ def load_point_store_manifest(
     return store_dir, read_manifest(manifest_path)
 
 
-def load_point_store_shared(store_dir: Path) -> dict[str, torch.Tensor]:
+def load_point_store_shared(store_dir: Path) -> dict[str, Any]:
     shared_path = Path(store_dir) / "shared.pt"
     if not shared_path.exists():
         raise FileNotFoundError(f"shared.pt not found under: {store_dir}")
@@ -209,6 +209,8 @@ class _StepRequest:
     end_lat: float
     actual_step_time_s: float
     step_time_error_s: float
+    individual_id: str
+    burst_id: int
 
 
 def _fit_sampler_state(
@@ -698,20 +700,22 @@ def _torch_atomic_save(obj: Any, path: Path) -> None:
 
 def _build_step_requests(steps: pd.DataFrame) -> list[_StepRequest]:
     reqs: list[_StepRequest] = []
-    for row in steps.itertuples(index=False):
+    for row in steps.to_dict(orient="records"):
         reqs.append(
             _StepRequest(
-                point_id_start=int(row.point_id_start),
-                point_id_end=int(row.point_id_end),
-                timestamp=pd.Timestamp(row.timestamp),
-                timestamp_end=pd.Timestamp(row.timestamp_end),
-                start_lon=float(row.start_lon),
-                start_lat=float(row.start_lat),
-                start_bearing=float(row.start_bearing),
-                end_lon=float(row.end_lon),
-                end_lat=float(row.end_lat),
-                actual_step_time_s=float(row.actual_step_time_s),
-                step_time_error_s=float(row.step_time_error_s),
+                point_id_start=int(row["point_id_start"]),
+                point_id_end=int(row["point_id_end"]),
+                timestamp=pd.Timestamp(row["timestamp"]),
+                timestamp_end=pd.Timestamp(row["timestamp_end"]),
+                start_lon=float(row["start_lon"]),
+                start_lat=float(row["start_lat"]),
+                start_bearing=float(row["start_bearing"]),
+                end_lon=float(row["end_lon"]),
+                end_lat=float(row["end_lat"]),
+                actual_step_time_s=float(row["actual_step_time_s"]),
+                step_time_error_s=float(row["step_time_error_s"]),
+                individual_id=str(row["individual-local-identifier"]),
+                burst_id=int(row["burst_id"]),
             )
         )
     return reqs
@@ -725,7 +729,7 @@ def _extract_env_block(
     reqs: list[_StepRequest],
     sampler_state: dict[str, Any],
     n_workers: int,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     n_steps = int(len(reqs))
     points_per_step = int(sampler_state["num_candidates"]) + 1
     n_channels = int(plan.num_channels())
@@ -736,6 +740,10 @@ def _extract_env_block(
         "candidate_lat": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "step_length_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "turn_angle_rad": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "start_lon": torch.zeros((n_steps,), dtype=torch.float32),
+        "start_lat": torch.zeros((n_steps,), dtype=torch.float32),
+        "burst_id": torch.zeros((n_steps,), dtype=torch.int64),
+        "individual_id": ["" for _ in range(n_steps)],
         "point_id_start": torch.zeros((n_steps,), dtype=torch.int64),
         "point_id_end": torch.zeros((n_steps,), dtype=torch.int64),
         "timestamp_ns": torch.zeros((n_steps,), dtype=torch.int64),
@@ -777,6 +785,10 @@ def _extract_env_block(
             shared["candidate_lat"][i] = torch.from_numpy(lats)
             shared["step_length_m"][i] = torch.from_numpy(sl)
             shared["turn_angle_rad"][i] = torch.from_numpy(ta)
+            shared["start_lon"][i] = float(req.start_lon)
+            shared["start_lat"][i] = float(req.start_lat)
+            shared["burst_id"][i] = int(req.burst_id)
+            shared["individual_id"][i] = str(req.individual_id)
             shared["point_id_start"][i] = int(pid_start)
             shared["point_id_end"][i] = int(pid_end)
             shared["timestamp_ns"][i] = int(ts_start)
@@ -822,6 +834,11 @@ def _extract_env_block(
                 shared["candidate_lat"][idx] = torch.from_numpy(lats)
                 shared["step_length_m"][idx] = torch.from_numpy(sl)
                 shared["turn_angle_rad"][idx] = torch.from_numpy(ta)
+                req = reqs[idx]
+                shared["start_lon"][idx] = float(req.start_lon)
+                shared["start_lat"][idx] = float(req.start_lat)
+                shared["burst_id"][idx] = int(req.burst_id)
+                shared["individual_id"][idx] = str(req.individual_id)
                 shared["point_id_start"][idx] = int(pid_start)
                 shared["point_id_end"][idx] = int(pid_end)
                 shared["timestamp_ns"][idx] = int(ts_start)
@@ -872,6 +889,7 @@ def _manifest_matches_request(
         and manifest.extraction.get("gap_cutoff_source") == "train"
         and int(manifest.extraction.get("points_per_step", -1)) == int(points_per_step)
         and list(manifest.extraction.get("selected_splits", [])) == list(selected_splits)
+        and int(manifest.extraction.get("shared_metadata_version", -1)) == 1
     )
 
 
@@ -1033,6 +1051,7 @@ def extract_split_feature_store(
             "points_per_step": int(points_per_step),
             "choice_policy": "last_is_true",
             "target_crs": TARGET_CRS,
+            "shared_metadata_version": 1,
         },
         shared=_shared_meta(shared_data, points_per_step=points_per_step),
         bands=bands_meta,

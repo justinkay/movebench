@@ -25,8 +25,9 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 - [x] (2026-03-25 13:34Z) Implemented `issf_linear` and `issf_mlp` under `movebench/bench_v2/executors/issf.py`, reusing `build_expanded_x(...)`, shared-loop training, best-checkpoint writing, and discrete prediction artifact writing.
 - [x] (2026-03-25 15:54Z) Implemented `movebench/bench_v2/executors/deepssf.py` with shared-loop training from existing WDS caches, `all`-cache channel slicing for covariate subsets, grid prediction artifacts, and held-out `n_valid` logging.
 - [x] (2026-03-25 18:34Z) Renamed `movebench/bench_v2/methods/` to `movebench/bench_v2/executors/`, updated executor import strings and current ExecPlan references, and reran the targeted runtime import/runner tests.
-- [ ] Implement MoveFormer executor against the new artifact layer.
-- [ ] Implement `movebench bench run` for MoveFormer (completed in this scoped pass: baseline + iSSF + deepSSF execution, status-based skipping, blocked-run marking, and run-directory / MLflow integration).
+- [x] (2026-03-26 20:09Z) Added failing MoveFormer-targeted tests in `tests/bench_v2/test_moveformer_runtime.py` plus a `bench run` integration case in `tests/bench_v2/test_runner.py`, then confirmed the new scope currently fails because the executor is still missing and `moveformer` remains blocked.
+- [x] (2026-03-26 20:15Z) Implemented `movebench/bench_v2/executors/moveformer.py` with point-store-backed sequence construction, train-derived movement scaling, split-aware loss masking, shared-loop training, best-checkpoint writing, and discrete prediction artifact writing.
+- [x] (2026-03-26 20:15Z) Enabled MoveFormer in `movebench bench run` by adding the executor to the supported method set, converting MoveFormer defaults to step-based schedule fields, and rerunning `python -m unittest -v tests.bench_v2.test_moveformer_runtime tests.bench_v2.test_runner`.
 
 ## Surprises & Discoveries
 
@@ -53,6 +54,9 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
 
 - Observation: the existing deepSSF WDS cache schema records grid metadata but not step identifiers.
   Evidence: [movebench/datasets/deepssf_wds_cache.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/deepssf_wds_cache.py) writes manifests with `output_hw`, `pixel_size_m`, `env_channels`, and `num_samples`, while each cached sample decodes only to `(spatial, scalars, bearing, target)`.
+
+- Observation: the point-store `shared.pt` already contains the step linkage needed to rebuild MoveFormer sequences without re-running `select_step_starts(...)`.
+  Evidence: [movebench/features/points.py](/data/vision/beery/scratch/justin/movebench/movebench/features/points.py) stores `point_id_start`, `point_id_end`, `timestamp_ns`, `timestamp_end_ns`, and candidate coordinates in `_extract_env_block(...)`.
 
 ## Decision Log
 
@@ -96,13 +100,17 @@ This plan is about execution, not reporting. It standardizes how runs are resolv
   Rationale: these modules adapt reusable model families into benchmark execution, artifact resolution, and run outputs. The new name makes that role explicit and avoids conflating them with `movebench/models/`.
   Date/Author: 2026-03-25 / assistant
 
+- Decision: split MoveFormer chains into overlapping windows with one-token carry-over, and mask the carried token out of loss.
+  Rationale: this preserves immediate same-individual context across `max_len` boundaries without double-counting any scored target token during training or evaluation.
+  Date/Author: 2026-03-26 / assistant
+
 ## Outcomes & Retrospective
 
-This scoped pass now leaves the repository with the shared trainer, read-only artifact resolution, three baseline executors, iSSF linear and MLP executors, the deepSSF executor, and `bench run` support for baseline + iSSF + deepSSF methods. The targeted verification for the deepSSF scope passed with:
+This plan now leaves the repository with the shared trainer, read-only artifact resolution, three baseline executors, iSSF linear and MLP executors, the deepSSF executor, the MoveFormer executor, and `bench run` support for every method named in this plan. The MoveFormer-targeted verification passed with:
 
-    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench_v2.test_artifact_resolution tests.bench_v2.test_deepssf_runtime tests.bench_v2.test_runner
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench_v2.test_moveformer_runtime tests.bench_v2.test_runner
 
-MoveFormer execution remains for the next stage of this plan. The later evaluation and report plan can now rely on the baseline, iSSF, and deepSSF run-directory layout and prediction artifacts, while still needing a follow-up pass to tighten deepSSF evaluation semantics around step identity if reporting requires it.
+The later evaluation and report plan can now rely on a uniform run-directory layout and prediction-artifact contract across baselines, iSSF, deepSSF, and MoveFormer. The remaining work after this plan is limited to evaluation/reporting behavior and any later follow-up semantics, not method execution.
 
 ## Context and Orientation
 

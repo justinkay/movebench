@@ -37,6 +37,7 @@ _SUPPORTED_METHODS = {
     "issf_linear",
     "issf_mlp",
     "deepssf",
+    "moveformer",
 }
 
 
