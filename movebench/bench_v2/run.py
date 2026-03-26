@@ -545,6 +545,31 @@ def _resolve_point_artifacts(
             "manifest": manifest,
         }
 
+    if str(run_payload["method"]) == "moveformer":
+        expected_selected_splits: list[str] | None = None
+        for split, store in point_stores.items():
+            selected_splits = store["manifest"].extraction.get("selected_splits")
+            if not isinstance(selected_splits, list) or not selected_splits:
+                return {
+                    "status": "blocked",
+                    "reason": (
+                        f"point store for {split} is missing extraction.selected_splits "
+                        "required for MoveFormer context resolution"
+                    ),
+                }
+            selected_splits = [str(split_key) for split_key in selected_splits]
+            if expected_selected_splits is None:
+                expected_selected_splits = selected_splits
+                continue
+            if selected_splits != expected_selected_splits:
+                return {
+                    "status": "blocked",
+                    "reason": (
+                        "MoveFormer requires train/eval point stores extracted from "
+                        "the same selected_splits representation"
+                    ),
+                }
+
     normalization_stats_path: Path | None = None
     if bool(method.get("requires_normalization_stats", False)):
         normalization_stats_path = point_store_train_stats_path(

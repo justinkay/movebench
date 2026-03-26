@@ -89,6 +89,7 @@ class _MoveFormerRuntime:
         ]
         self._steps_per_epoch = max(1, len(self.train_loader))
         self._steps_done = 0
+        self._set_lr()
         self._train_iter = iter(self.train_loader)
 
     def _set_lr(self) -> None:

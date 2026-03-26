@@ -50,6 +50,16 @@ class _StepRecord:
     candidate_lat: torch.Tensor
 
 
+def _manifest_selected_splits(manifest) -> list[str]:
+    selected_splits = manifest.extraction.get("selected_splits")
+    if not isinstance(selected_splits, list) or not selected_splits:
+        raise ValueError(
+            "Point store manifest is missing extraction.selected_splits required "
+            "for MoveFormer context resolution."
+        )
+    return [str(split_key) for split_key in selected_splits]
+
+
 def _to_datetime64(ns_values: list[int]) -> np.ndarray:
     return np.asarray(ns_values, dtype=np.int64).astype("datetime64[ns]").astype(
         "datetime64[us]"
@@ -147,6 +157,7 @@ class MoveFormerPointStoreDataset(Dataset):
         )
         self.store_dir = target_store_dir
         self.manifest = target_manifest
+        target_selected_splits = _manifest_selected_splits(target_manifest)
 
         train_store_dir, _train_manifest = load_point_store_manifest(
             study_dir=self.study_dir,
@@ -205,6 +216,14 @@ class MoveFormerPointStoreDataset(Dataset):
                 rasters_hash=str(self.plan.rasters_hash),
                 sampler_hash=str(sampler_hash),
             )
+            selected_splits = _manifest_selected_splits(manifest)
+            if selected_splits != target_selected_splits:
+                raise ValueError(
+                    "MoveFormer context_splits require point stores extracted from "
+                    "the same selected_splits representation, but got "
+                    f"{target_selected_splits} for split={self.split!r} and "
+                    f"{selected_splits} for context split {split_key!r}."
+                )
             env, valid = load_point_store_bands(
                 store_dir=store_dir,
                 manifest=manifest,
