@@ -21,10 +21,13 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 - [x] (2026-03-26 23:53Z) Added failing targeted tests in `tests/bench_v2/test_energy_score.py` and `tests/bench_v2/test_eval_runner.py`, then confirmed the new scope initially failed because the `movebench.bench_v2.evaluation` package did not exist yet.
 - [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/energy.py` with exact deterministic, discrete-support, and FFT-based grid energy math.
 - [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/runner.py` with documented prediction-contract validation, shared support reconstruction, exact per-step scoring, `energy_by_step.csv.gz` and `summary.json` artifacts, and MLflow logging of `energy_score`, `energy_score.accuracy.*`, `energy_score.calibration.*`, `n_steps_scored.*`, and `n_steps_excluded_out_of_support.*`.
+- [x] (2026-03-27 14:40Z) Added failing targeted tests in `tests/bench_v2/test_report_queries.py`, `tests/bench_v2/test_report_plots.py`, and `tests/bench_v2/test_report_html.py`, then confirmed the new reporting scope currently fails because `movebench/bench_v2/report.py` is still a stub, MLflow has no structured report-query helper, and the CLI has no `bench report` command or HTML status mode yet.
+- [x] (2026-03-27 15:15Z) Implemented the structured MLflow report-query helper, `movebench/bench_v2/report.py`, main-results and covariate-comparison PNG generation, `status_report.json`, and the static `results/bench_v2/report/index.html` dashboard.
+- [x] (2026-03-27 15:15Z) Added `bench report` plus `bench status --format html`, then verified the reporting slice with `python -m unittest -v tests.bench_v2.test_status tests.bench_v2.test_mlflow` and `python -m unittest -v tests.bench_v2.test_report_queries tests.bench_v2.test_report_plots tests.bench_v2.test_report_html`.
 - [x] Implement exact energy-score evaluation for deterministic, candidate-based, and grid-based methods.
 - [x] Implement final-evaluation orchestration and MLflow logging.
-- [ ] Implement plot generation for main results and covariate comparisons.
-- [ ] Implement static HTML report generation and status snapshots.
+- [x] Implement plot generation for main results and covariate comparisons.
+- [x] Implement static HTML report generation and status snapshots.
 - [ ] Perform the final legacy cutover after the new report layer is validated.
 
 ## Surprises & Discoveries
@@ -40,6 +43,12 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 
 - Observation: the user’s requested report is better served by a generated static site than by extending the existing app.
   Evidence: the current `app/` directory is a trajectory viewer, not an experiment dashboard, and the user wants an always-updated HTML file that can be checked quickly.
+
+- Observation: the current reporting surface is effectively unimplemented.
+  Evidence: [movebench/bench_v2/report.py](/data/vision/beery/scratch/justin/movebench/movebench/bench_v2/report.py) contains only a stub docstring, and [movebench/bench_v2/run.py](/data/vision/beery/scratch/justin/movebench/movebench/bench_v2/run.py) registers only `plan`, `status --format text`, and `run`.
+
+- Observation: importing the reporting module too eagerly pulls in the evaluation stack and breaks the lightweight status/test harness path.
+  Evidence: the first combined `test_status` run after wiring `bench report` failed while importing `movebench.bench_v2.report` because the eager evaluation-runner import pulled `pyproj`/`libproj` into the fake-module status environment.
 
 - Observation: some studies have only one held-out split, so the report layer must treat missing plots as “not applicable,” not as failures.
   Evidence: the existing study inventories and artifact layouts include studies with only `test-temporal` or only `test-individual`.
@@ -84,9 +93,18 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
   Rationale: the current grid prediction artifact omits step ids, the cache hash does not encode a separate order seed, and the checked-in benchmark configs consistently build those caches with `runtime.seed: 0`. This keeps the scoped evaluation runner exact for the current artifact family without expanding scope into cache-schema changes.
   Date/Author: 2026-03-26 / assistant
 
+- Decision: the report module should defer importing the evaluation runner until metric refresh is actually needed.
+  Rationale: `bench status --format text` and the existing fake-module status tests should remain lightweight and should not require the heavy geospatial evaluation import path just to render or parse report commands.
+  Date/Author: 2026-03-27 / assistant
+
 ## Outcomes & Retrospective
 
-This plan now has its evaluation core in place. The repository contains exact energy-score math for deterministic, discrete-support, and dense-grid predictions; a run-directory evaluation runner that writes final metric artifacts and logs MLflow metrics; and targeted tests that prove the math and runner behavior for the scoped evaluation slice. The remaining work in this plan is report generation, status HTML, and the later legacy cutover.
+This plan now has its reporting layer in place alongside the earlier evaluation core. The repository contains exact energy-score math and a run-directory evaluation runner, plus a static report generator that queries MLflow, refreshes missing final metrics when needed, writes `status_report.json`, emits main-results and covariate-comparison PNGs, and generates `results/bench_v2/report/index.html`. The scoped reporting verification passed with:
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench_v2.test_status tests.bench_v2.test_mlflow
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench_v2.test_report_queries tests.bench_v2.test_report_plots tests.bench_v2.test_report_html
+
+The only remaining item in this ExecPlan is the later legacy cutover, which stays out of scope for the current user request.
 
 ## Context and Orientation
 
@@ -251,3 +269,7 @@ Keep plotting dependencies minimal. Use `matplotlib` and standard library HTML g
 Plan creation note (2026-03-24 / assistant): initial draft written after tracing the current energy-score math, identifying the exactness requirements for each method family, and choosing a static HTML report over app integration.
 
 Revision note (2026-03-26 / assistant): updated the living sections after completing the scoped evaluation-math and evaluation-runner work, including the support-reconstruction approach, the current deepSSF cache-order assumption, and the passing targeted test command for this slice.
+
+Revision note (2026-03-27 / assistant): recorded the newly added failing report/query/plot/HTML tests and the concrete gaps they exposed before starting the reporting implementation.
+
+Revision note (2026-03-27 / assistant): updated the living sections after landing the scoped report/query/plot/HTML implementation, recording the passing targeted test commands and the deferred evaluation-runner import decision needed to keep the lightweight status path working.

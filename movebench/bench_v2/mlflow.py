@@ -122,3 +122,32 @@ def search_latest_runs_by_key(run_keys: list[str]) -> dict[str, object]:
             continue
         latest[run_key] = run
     return latest
+
+
+def _run_record(run: object) -> dict[str, object]:
+    info = getattr(run, "info", None)
+    data = getattr(run, "data", None)
+    tags = dict(getattr(data, "tags", {}) or {})
+    params = dict(getattr(data, "params", {}) or {})
+    metrics = {
+        str(key): float(value)
+        for key, value in dict(getattr(data, "metrics", {}) or {}).items()
+    }
+    return {
+        "run_id": str(getattr(info, "run_id", "") or ""),
+        "start_time": int(getattr(info, "start_time", 0) or 0),
+        "end_time": int(getattr(info, "end_time", 0) or 0),
+        "status": str(tags.get("status", "")),
+        "tags": {str(key): str(value) for key, value in tags.items()},
+        "params": {str(key): str(value) for key, value in params.items()},
+        "metrics": metrics,
+    }
+
+
+def search_latest_run_records_by_key(
+    run_keys: list[str],
+) -> dict[str, dict[str, object]]:
+    return {
+        str(run_key): _run_record(run)
+        for run_key, run in search_latest_runs_by_key(run_keys).items()
+    }

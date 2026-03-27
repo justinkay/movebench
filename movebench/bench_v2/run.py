@@ -27,6 +27,7 @@ from movebench.study import Study
 
 import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.config as bench_config
+import movebench.bench_v2.report as bench_report
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
 PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
@@ -1112,9 +1113,26 @@ def _command_plan(args: argparse.Namespace) -> int:
 
 
 def _command_status(args: argparse.Namespace) -> int:
-    if args.format != "text":
-        raise ValueError(f"Unsupported status format: {args.format}")
-    print(_render_status_text(status_snapshot()))
+    snapshot = status_snapshot()
+    if args.format == "text":
+        print(_render_status_text(snapshot))
+        return 0
+    if args.format == "html":
+        result = bench_report.write_report(
+            status_snapshot=snapshot,
+            refresh_metrics=False,
+        )
+        print(result["index_path"])
+        return 0
+    raise ValueError(f"Unsupported status format: {args.format}")
+
+
+def _command_report(args: argparse.Namespace) -> int:
+    result = bench_report.write_report(
+        status_snapshot=status_snapshot(),
+        refresh_metrics=bool(args.refresh_metrics),
+    )
+    print(result["index_path"])
     return 0
 
 
@@ -1145,8 +1163,12 @@ def register(subparsers) -> None:
     plan_parser.set_defaults(func=_command_plan)
 
     status_parser = bench_subparsers.add_parser("status", help="Inspect artifact and run readiness")
-    status_parser.add_argument("--format", choices=["text"], default="text")
+    status_parser.add_argument("--format", choices=["text", "html"], default="text")
     status_parser.set_defaults(func=_command_status)
+
+    report_parser = bench_subparsers.add_parser("report", help="Generate the benchmark report")
+    report_parser.add_argument("--refresh-metrics", action="store_true")
+    report_parser.set_defaults(func=_command_report)
 
     run_parser = bench_subparsers.add_parser("run", help="Execute runnable benchmark runs")
     run_parser.add_argument("experiment_module")
