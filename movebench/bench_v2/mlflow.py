@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+import json
 
 import mlflow
 
@@ -66,6 +67,22 @@ def get_existing_experiment_id() -> str | None:
     return str(existing.experiment_id)
 
 
+def _flatten_model_params(method_model: dict[str, object]) -> dict[str, object]:
+    params: dict[str, object] = {}
+    for key, value in dict(method_model).items():
+        param_key = f"model.{key}"
+        if isinstance(value, (str, int, float, bool)):
+            params[param_key] = value
+            continue
+        params[param_key] = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    return params
+
+
 def start_benchmark_run(run_payload: dict[str, object]) -> object:
     experiment_id = get_or_create_experiment()
     tags = {
@@ -82,6 +99,7 @@ def start_benchmark_run(run_payload: dict[str, object]) -> object:
         "seed": int(run_payload["seed"]),
     }
     params.update(dict(run_payload.get("method_hparams", {})))
+    params.update(_flatten_model_params(dict(run_payload.get("method_model", {}))))
     run = mlflow.start_run(
         experiment_id=experiment_id,
         run_name=str(run_payload["run_key"]),

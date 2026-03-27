@@ -1158,6 +1158,7 @@ def _command_status(args: argparse.Namespace) -> int:
         result = bench_report.write_report(
             status_snapshot=snapshot,
             refresh_metrics=False,
+            allow_metric_repair=False,
         )
         print(result["index_path"])
         return 0
@@ -1169,6 +1170,7 @@ def _command_report(args: argparse.Namespace) -> int:
     result = bench_report.write_report(
         status_snapshot=status_snapshot(),
         refresh_metrics=bool(args.refresh_metrics),
+        allow_metric_repair=True,
     )
     print(result["index_path"])
     return 0

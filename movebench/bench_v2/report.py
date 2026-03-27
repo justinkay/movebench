@@ -533,7 +533,10 @@ def _refresh_final_metrics(
     *,
     latest_run_records: dict[str, dict[str, object]],
     refresh_metrics: bool,
+    allow_metric_repair: bool,
 ) -> tuple[dict[str, dict[str, object]], list[str], list[dict[str, object]]]:
+    if not bool(allow_metric_repair):
+        return latest_run_records, [], []
     refreshed: list[str] = []
     errors: list[dict[str, object]] = []
     evaluate_run_fn = None
@@ -587,9 +590,15 @@ def _planned_run_entries(
         latest = dict(latest_run_records.get(run_key, {}))
         status = str(latest.get("status", "") or "pending")
         split_keys = [str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])]
-        final_metrics, missing_splits = _final_summaries(run_key, split_keys)
+        final_metrics, missing_summary_splits = _final_summaries(run_key, split_keys)
+        missing_metric_splits = _missing_mlflow_metric_splits(latest, split_keys)
         if status != "completed":
-            missing_splits = []
+            missing_summary_splits = []
+            missing_metric_splits = []
+        missing_splits = _ordered(
+            list(dict.fromkeys([*missing_summary_splits, *missing_metric_splits])),
+            preferred=EXPECTED_HELD_OUT_SPLITS,
+        )
         entry = {
             "run_key": run_key,
             "study_id": str(planned_run["study_id"]),
@@ -607,13 +616,22 @@ def _planned_run_entries(
         entries.append(entry)
         if status == "completed":
             completed.append(entry)
-            for split_key in missing_splits:
+            for split_key in missing_summary_splits:
                 missing_artifacts.append(
                     {
                         "kind": "final_metrics",
                         "run_key": run_key,
                         "split_key": split_key,
                         "reason": "missing final metric summary",
+                    }
+                )
+            for split_key in missing_metric_splits:
+                missing_artifacts.append(
+                    {
+                        "kind": "mlflow_metric",
+                        "run_key": run_key,
+                        "split_key": split_key,
+                        "reason": "missing MLflow final metric",
                     }
                 )
 
@@ -851,6 +869,7 @@ def write_report(
     *,
     status_snapshot: dict[str, object],
     refresh_metrics: bool = False,
+    allow_metric_repair: bool = True,
 ) -> dict[str, object]:
     manifests = _load_resolved_manifests()
     planned_runs = _planned_run_index(manifests)
@@ -862,6 +881,7 @@ def write_report(
         planned_runs,
         latest_run_records=latest_run_records,
         refresh_metrics=bool(refresh_metrics),
+        allow_metric_repair=bool(allow_metric_repair),
     )
 
     main_results = load_main_results(latest_run_records=latest_run_records)

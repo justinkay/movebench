@@ -26,6 +26,7 @@ movebench = "movebench.cli.main:main"
 
 [project.optional-dependencies]
 bench = [
+  "matplotlib",
   "mlflow",
 ]
 
