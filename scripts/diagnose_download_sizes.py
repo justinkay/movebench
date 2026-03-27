@@ -26,12 +26,12 @@ from movebench.layers.download import (
     SET_COL,
     TIME_COL,
     compute_group_scale,
-    get_buffer_m_for_study,
 )
 from movebench.layers.registry import REGISTRY
 from movebench.study import Study
 from movebench.trajectories import (
     compute_step_length_extent_m,
+    fit_interval_step_support,
     prepare_interval_step_starts,
 )
 
@@ -796,27 +796,27 @@ def main(argv: list[str]) -> int:
 
         try:
             resolution_buffer_m = float(
-                get_buffer_m_for_study(
+                fit_interval_step_support(
                     train_df,
                     step_time_s=min_step_time_s,
                     step_multiplier=float(step_multiplier),
                     step_q=float(step_q),
                     max_step_q=float(max_step_q),
                     gap_q=float(gap_q),
-                )
+                ).max_step_length_m
             )
             if max_step_time_s == min_step_time_s:
                 extent_buffer_m = float(resolution_buffer_m)
             else:
                 extent_buffer_m = float(
-                    get_buffer_m_for_study(
+                    fit_interval_step_support(
                         train_df,
                         step_time_s=max_step_time_s,
                         step_multiplier=float(step_multiplier),
                         step_q=float(step_q),
                         max_step_q=float(max_step_q),
                         gap_q=float(gap_q),
-                    )
+                    ).max_step_length_m
                 )
         except Exception as e:
             failures += 1

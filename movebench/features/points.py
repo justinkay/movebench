@@ -35,10 +35,9 @@ from movebench.rasters import Raster
 from movebench.trajectories import (
     SET_COL,
     compute_step_length_extent_m,
-    fit_interval_gap_cutoffs,
-    fit_interval_step_length_cutoff_m,
+    fit_interval_step_support,
     load_trajectories_csv,
-    select_step_starts,
+    select_step_starts_with_support,
 )
 
 from pyproj import Transformer
@@ -1089,40 +1088,34 @@ def extract_point_feature_stores(
     train_df = df[df[SET_COL] == "train"].copy()
     if len(train_df) == 0:
         raise ValueError("No training data found (set=='train'); cannot fit sampler")
-    gap_cutoffs = fit_interval_gap_cutoffs(
-        train_df, gap_q=float(plan.step_spec.gap_q)
-    )
-    train_max_step_length_m = fit_interval_step_length_cutoff_m(
+    support = fit_interval_step_support(
         train_df,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
-        gap_cutoffs=gap_cutoffs,
         step_q=float(plan.step_spec.step_q),
         max_step_q=float(plan.step_spec.max_step_q),
         step_multiplier=float(plan.step_spec.step_multiplier),
     )
-    requested_steps = select_step_starts(
+    requested_steps = select_step_starts_with_support(
         selected_df,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
-        gap_cutoffs=gap_cutoffs,
-        max_step_length_m=train_max_step_length_m,
+        support=support,
     )
     if len(splits) == 1 and str(splits[0]) == "train":
         train_steps = requested_steps.copy()
     else:
-        train_steps = select_step_starts(
+        train_steps = select_step_starts_with_support(
             train_df,
             step_time_s=int(plan.step_spec.step_time_s),
             gap_q=float(plan.step_spec.gap_q),
-            gap_cutoffs=gap_cutoffs,
-            max_step_length_m=train_max_step_length_m,
+            support=support,
         )
     sampler, sampler_state, sampler_hash_value = build_train_sampler(
         train_steps,
         sampler_config=sampler_config,
         step_spec=plan.step_spec,
-        max_step_len_m_train=train_max_step_length_m,
+        max_step_len_m_train=float(support.max_step_length_m),
     )
 
     results: dict[str, Any] = {}

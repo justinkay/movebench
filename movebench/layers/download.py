@@ -47,15 +47,11 @@ from movebench.layers.constants import (
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY, LayerRegistry
 from movebench.trajectories import (
-    INDIVIDUAL_COL,
     LAT_COL,
     LON_COL,
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
-    compute_step_length_extent_m,
-    fit_interval_step_length_cutoff_m,
-    haversine_distance_m,
 )
 
 _ee_initialized = False
@@ -1448,67 +1444,6 @@ def download_chips(
     _write_json_atomic(meta_path, meta)
 
     return stats
-
-
-def get_buffer_m_for_study(
-    df: pd.DataFrame,
-    *,
-    step_time_s: int | None = None,
-    step_q: float = 0.95,
-    max_step_q: float = 0.99,
-    step_multiplier: float = 2.0,
-    gap_q: float = 0.999,
-) -> float:
-    """Compute buffer size (meters) from movement data (train split only)."""
-    if TIME_COL not in df.columns:
-        raise RuntimeError(f"Expected a '{TIME_COL}' column in the data.")
-
-    if step_time_s is not None:
-        return fit_interval_step_length_cutoff_m(
-            df,
-            step_time_s=int(step_time_s),
-            gap_q=float(gap_q),
-            step_q=step_q,
-            max_step_q=max_step_q,
-            step_multiplier=step_multiplier,
-        )
-
-    d = df.copy()
-    d[TIME_COL] = pd.to_datetime(d[TIME_COL], errors="coerce")
-    d = d.dropna(subset=[TIME_COL])
-    d = d.sort_values([INDIVIDUAL_COL, TIME_COL])
-
-    d["time_since_last"] = d.groupby(INDIVIDUAL_COL)[TIME_COL].diff()
-    per_indiv_cutoff = d.groupby(INDIVIDUAL_COL)["time_since_last"].transform(
-        lambda s: s.dropna().quantile(gap_q)
-    )
-    d = d[
-        d["time_since_last"].notna() & (d["time_since_last"] <= per_indiv_cutoff)
-    ].copy()
-
-    g = d.groupby(INDIVIDUAL_COL)
-    lat_prev_deg = g[LAT_COL].shift()
-    lon_prev_deg = g[LON_COL].shift()
-    d["step_length_m"] = haversine_distance_m(
-        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        d[LAT_COL].to_numpy(dtype=np.float64, copy=False),
-        d[LON_COL].to_numpy(dtype=np.float64, copy=False),
-    )
-
-    valid = d["step_length_m"].dropna()
-    valid = valid[valid > 0]
-    if len(valid) == 0:
-        raise ValueError("No valid step lengths computed")
-
-    return compute_step_length_extent_m(
-        valid,
-        step_q=step_q,
-        max_step_q=max_step_q,
-        step_multiplier=step_multiplier,
-    )
-
-
 def download_tile_layer(
     df: pd.DataFrame,
     *,

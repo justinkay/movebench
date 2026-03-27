@@ -32,6 +32,12 @@ class IntervalGapCutoffs:
     fallback: pd.Timedelta | None = None
 
 
+@dataclass(frozen=True)
+class IntervalStepSupport:
+    gap_cutoffs: IntervalGapCutoffs
+    max_step_length_m: float
+
+
 def haversine_distance_m(
     start_lat_deg: np.ndarray,
     start_lon_deg: np.ndarray,
@@ -350,6 +356,32 @@ def fit_interval_step_length_cutoff_m(
     )
 
 
+def fit_interval_step_support(
+    df: pd.DataFrame,
+    *,
+    step_time_s: int,
+    gap_q: float = 0.999,
+    step_q: float = 0.95,
+    max_step_q: float = 0.99,
+    step_multiplier: float = 2.0,
+) -> IntervalStepSupport:
+    """Fit burst gap cutoffs and spatial support from the provided rows."""
+    gap_cutoffs = fit_interval_gap_cutoffs(df, gap_q=float(gap_q))
+    max_step_length_m = fit_interval_step_length_cutoff_m(
+        df,
+        step_time_s=int(step_time_s),
+        gap_q=float(gap_q),
+        gap_cutoffs=gap_cutoffs,
+        step_q=float(step_q),
+        max_step_q=float(max_step_q),
+        step_multiplier=float(step_multiplier),
+    )
+    return IntervalStepSupport(
+        gap_cutoffs=gap_cutoffs,
+        max_step_length_m=float(max_step_length_m),
+    )
+
+
 def compute_movement_features(
     df: pd.DataFrame,
     *,
@@ -578,3 +610,20 @@ def select_step_starts(
         ].to_numpy(dtype=np.float64, copy=False)
     ).all(axis=1)
     return out.loc[finite].reset_index(drop=True)
+
+
+def select_step_starts_with_support(
+    df: pd.DataFrame,
+    *,
+    step_time_s: int,
+    gap_q: float = 0.999,
+    support: IntervalStepSupport,
+) -> pd.DataFrame:
+    """Select fixed-interval step starts using pre-fit burst and spatial support."""
+    return select_step_starts(
+        df,
+        step_time_s=int(step_time_s),
+        gap_q=float(gap_q),
+        gap_cutoffs=support.gap_cutoffs,
+        max_step_length_m=float(support.max_step_length_m),
+    )

@@ -19,10 +19,10 @@ from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
-    IntervalGapCutoffs,
-    fit_interval_gap_cutoffs,
+    IntervalStepSupport,
+    fit_interval_step_support,
     load_trajectories_csv,
-    select_step_starts,
+    select_step_starts_with_support,
 )
 
 
@@ -37,18 +37,16 @@ def _rows_for_raster_downloads(
     *,
     splits: list[str],
     plan: LayerPlan,
-    gap_cutoffs: IntervalGapCutoffs,
-    max_step_length_m: float | None = None,
+    support: IntervalStepSupport,
 ) -> pd.DataFrame:
     sub = df[df[SET_COL].isin(splits)].copy()
     if len(sub) == 0:
         return sub
-    starts = select_step_starts(
+    starts = select_step_starts_with_support(
         sub,
         step_time_s=int(plan.step_spec.step_time_s),
         gap_q=float(plan.step_spec.gap_q),
-        gap_cutoffs=gap_cutoffs,
-        max_step_length_m=max_step_length_m,
+        support=support,
     )
     if len(starts) == 0:
         return sub.iloc[0:0].copy()
@@ -105,23 +103,21 @@ class Study:
         plan = REGISTRY.resolve(cfg)
 
         df = load_trajectories_csv(self.trajectories_path)
-
         train_df = df[df[SET_COL] == "train"].copy()
         if len(train_df) == 0:
             raise ValueError(
                 "No training data found (set=='train'); cannot compute buffer"
             )
-
         step = plan.step_spec
-        gap_cutoffs = fit_interval_gap_cutoffs(train_df, gap_q=float(step.gap_q))
-        extent_buffer_m = mb2dl.get_buffer_m_for_study(
+        support = fit_interval_step_support(
             train_df,
             step_time_s=int(step.step_time_s),
-            step_multiplier=float(step.step_multiplier),
+            gap_q=float(step.gap_q),
             step_q=float(step.step_q),
             max_step_q=float(step.max_step_q),
-            gap_q=float(step.gap_q),
+            step_multiplier=float(step.step_multiplier),
         )
+        extent_buffer_m = float(support.max_step_length_m)
         resolution_buffer_m = float(extent_buffer_m)
 
         if splits is None:
@@ -130,8 +126,7 @@ class Study:
             df,
             splits=splits,
             plan=plan,
-            gap_cutoffs=gap_cutoffs,
-            max_step_length_m=float(extent_buffer_m),
+            support=support,
         )
 
         clamp = cfg.raster_params["scale_clamp"]

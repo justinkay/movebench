@@ -17,12 +17,10 @@ import movebench.bench_v2.config as bench_config
 import movebench.bench_v2.mlflow as bench_mlflow
 from movebench.bench_v2.evaluation import energy
 from movebench.trajectories import (
-    POINT_ID_COL,
     SET_COL,
-    fit_interval_gap_cutoffs,
-    fit_interval_step_length_cutoff_m,
+    fit_interval_step_support,
     load_trajectories_csv,
-    select_step_starts,
+    select_step_starts_with_support,
 )
 
 _TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
@@ -119,25 +117,19 @@ def _support_rows_for_split(
     train_df = df[df[SET_COL] == "train"].copy()
     if len(train_df) == 0:
         raise ValueError(f"Study {study_id!r} has no train split for support reconstruction")
-    gap_cutoffs = fit_interval_gap_cutoffs(
-        train_df,
-        gap_q=float(plan.step_spec.gap_q),
-    )
-    buffer_m = fit_interval_step_length_cutoff_m(
+    support = fit_interval_step_support(
         train_df,
         step_time_s=int(timescale["step_time_s"]),
         gap_q=float(plan.step_spec.gap_q),
-        gap_cutoffs=gap_cutoffs,
         step_q=float(plan.step_spec.step_q),
         max_step_q=float(plan.step_spec.max_step_q),
         step_multiplier=float(plan.step_spec.step_multiplier),
     )
-    steps = select_step_starts(
+    steps = select_step_starts_with_support(
         df[df[SET_COL] == str(split_key)].copy(),
         step_time_s=int(timescale["step_time_s"]),
         gap_q=float(plan.step_spec.gap_q),
-        gap_cutoffs=gap_cutoffs,
-        max_step_length_m=float(buffer_m),
+        support=support,
     )
 
     rows: list[dict[str, object]] = []
@@ -158,11 +150,11 @@ def _support_rows_for_split(
                 "in_support": _is_truth_in_support(
                     truth_xy_m,
                     output_hw=output_hw,
-                    buffer_m=float(buffer_m),
+                    buffer_m=float(support.max_step_length_m),
                 ),
             }
         )
-    return rows, float(buffer_m)
+    return rows, float(support.max_step_length_m)
 
 
 def _point_rows_by_id(rows: list[dict[str, object]]) -> dict[int, dict[str, object]]:
