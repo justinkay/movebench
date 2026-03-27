@@ -309,6 +309,7 @@ def _score_split(
         timescale_key=str(run_payload["timescale"]),
     )
     truth_by_point = _point_rows_by_id(ordered_rows)
+    expected_point_ids = [int(row["point_id_start"]) for row in ordered_rows]
     pred_kind = str(pred_artifact.get("prediction_kind", "")).strip()
     timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
     output_hw = tuple(int(v) for v in timescale["output_hw"])
@@ -319,17 +320,14 @@ def _score_split(
 
     if pred_kind == "deterministic":
         point_ids, contracts = _deterministic_contracts(pred_artifact)
-        aligned_rows = [truth_by_point[int(point_id)] for point_id in point_ids.tolist()]
     elif pred_kind == "discrete":
         point_ids, contracts = _discrete_contracts(pred_artifact)
-        aligned_rows = [truth_by_point[int(point_id)] for point_id in point_ids.tolist()]
     elif pred_kind == "grid":
         point_ids, contracts = _grid_contracts(
             pred_artifact,
             expected_pixel_size_m=float(expected_pixel_size_m),
             expected_output_hw=output_hw,
         )
-        aligned_rows = [truth_by_point[int(point_id)] for point_id in point_ids.tolist()]
     else:
         raise ValueError(f"Unsupported prediction_kind {pred_kind!r}")
 
@@ -337,10 +335,18 @@ def _score_split(
         raise ValueError(
             f"prediction artifact for split {split_key!r} contains {len(contracts)} rows but {len(ordered_rows)} steps were reconstructed"
         )
+    actual_point_ids = [int(point_id) for point_id in point_ids.tolist()]
+    if len(set(actual_point_ids)) != len(actual_point_ids):
+        raise ValueError(f"prediction artifact for split {split_key!r} contains duplicate point_id_start values")
+    if set(actual_point_ids) != set(expected_point_ids):
+        raise ValueError(
+            f"prediction artifact for split {split_key!r} point_id_start values do not match reconstructed steps"
+        )
+    aligned_rows = [truth_by_point[point_id] for point_id in actual_point_ids]
 
     by_step_rows: list[dict[str, object]] = []
     excluded = 0
-    for point_id, contract, meta in zip(point_ids.tolist(), contracts, aligned_rows):
+    for point_id, contract, meta in zip(actual_point_ids, contracts, aligned_rows):
         if int(meta["point_id_start"]) != int(point_id):
             raise ValueError(
                 f"prediction row point_id_start={int(point_id)} does not align with reconstructed step point_id_start={int(meta['point_id_start'])}"

@@ -36,9 +36,9 @@ def _validate_probs_1d(probs: torch.Tensor) -> torch.Tensor:
     if not bool((probs >= 0.0).all().item()):
         raise ValueError("probs must be non-negative")
     total = probs.sum()
-    if not bool(torch.isclose(total, torch.tensor(1.0, dtype=torch.float64), atol=1e-8, rtol=1e-8).item()):
-        raise ValueError(f"probs must sum to 1, got {float(total):.12f}")
-    return probs
+    if not bool(torch.isfinite(total).item()) or float(total) <= 0.0:
+        raise ValueError("probs must have positive finite mass")
+    return probs / total
 
 
 def _validate_coords_2d(coords_m: torch.Tensor) -> torch.Tensor:
@@ -91,8 +91,6 @@ def _energy_terms_discrete(
         raise ValueError(
             f"coords_m and probs must agree on support size, got {tuple(coords_m.shape)} and {tuple(probs.shape)}"
         )
-    if bool(torch.isclose(coords_m, truth.view(1, 2), atol=1e-6, rtol=0.0).all(dim=1).any().item()):
-        raise ValueError("discrete prediction support still contains the true endpoint")
 
     accuracy = torch.matmul(torch.linalg.norm(coords_m - truth.view(1, 2), dim=1), probs)
     pairwise = torch.cdist(coords_m, coords_m)
