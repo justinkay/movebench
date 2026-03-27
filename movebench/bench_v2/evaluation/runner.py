@@ -25,11 +25,6 @@ from movebench.trajectories import (
 
 _TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-# The current deepSSF cache identity does not encode a separate cache-order seed.
-# The checked-in benchmark configs build those caches with runtime.seed=0.
-_DEEPSSF_CACHE_BUILD_SEED = 0
-
-
 def _load_json(path: Path) -> dict[str, object]:
     return dict(json.loads(path.read_text(encoding="utf-8")))
 
@@ -227,19 +222,18 @@ def _grid_coordinates(*, width: int, height: int, pixel_size_m: float) -> tuple[
     )
 
 
-def _deepssf_cache_permutation(n_steps: int) -> torch.Tensor:
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(int(_DEEPSSF_CACHE_BUILD_SEED))
-    return torch.randperm(int(n_steps), generator=generator, device="cpu")
-
-
 def _grid_contracts(
     pred_artifact: dict[str, object],
     *,
-    ordered_rows: list[dict[str, object]],
     expected_pixel_size_m: float,
     expected_output_hw: tuple[int, int],
-) -> tuple[torch.Tensor, list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[torch.Tensor, list[dict[str, object]]]:
+    if "point_id_start" not in pred_artifact:
+        raise ValueError("grid prediction artifact must include point_id_start")
+    point_ids = _tensor_1d(
+        pred_artifact["point_id_start"],
+        field="point_id_start",
+    ).to(dtype=torch.int64)
     if "scores" in pred_artifact:
         scores = torch.as_tensor(pred_artifact["scores"], dtype=torch.float64)
         if scores.ndim != 3:
@@ -296,17 +290,11 @@ def _grid_contracts(
             f"grid prediction pixel_size_m={pixel_size_m} does not match expected {expected_pixel_size_m}"
         )
 
-    perm = _deepssf_cache_permutation(len(ordered_rows))
-    if int(perm.numel()) != len(contracts):
+    if int(point_ids.shape[0]) != len(contracts):
         raise ValueError(
-            f"grid predictions contain {len(contracts)} rows but split reconstruction found {len(ordered_rows)} steps"
+            f"grid artifact point_id_start has {int(point_ids.shape[0])} rows but predictions contain {len(contracts)} rows"
         )
-    aligned_rows = [ordered_rows[int(idx)] for idx in perm.tolist()]
-    point_ids = torch.tensor(
-        [int(row["point_id_start"]) for row in aligned_rows],
-        dtype=torch.int64,
-    )
-    return point_ids, contracts, aligned_rows
+    return point_ids, contracts
 
 
 def _score_split(
@@ -336,12 +324,12 @@ def _score_split(
         point_ids, contracts = _discrete_contracts(pred_artifact)
         aligned_rows = [truth_by_point[int(point_id)] for point_id in point_ids.tolist()]
     elif pred_kind == "grid":
-        point_ids, contracts, aligned_rows = _grid_contracts(
+        point_ids, contracts = _grid_contracts(
             pred_artifact,
-            ordered_rows=ordered_rows,
             expected_pixel_size_m=float(expected_pixel_size_m),
             expected_output_hw=output_hw,
         )
+        aligned_rows = [truth_by_point[int(point_id)] for point_id in point_ids.tolist()]
     else:
         raise ValueError(f"Unsupported prediction_kind {pred_kind!r}")
 
@@ -438,17 +426,21 @@ def evaluate_run_dir(run_dir: str | Path) -> dict[str, object]:
     Prediction scorer contract at the evaluation boundary:
 
     `prediction_kind == "deterministic"`:
-        {"prediction_kind": "deterministic", "dx_m": ..., "dy_m": ...}
+        {"prediction_kind": "deterministic", "point_id_start": ..., "dx_m": ..., "dy_m": ...}
 
     `prediction_kind == "discrete"`:
-        {"prediction_kind": "discrete", "coords_m": ..., "probs": ...}
+        {"prediction_kind": "discrete", "point_id_start": ..., "coords_m": ..., "probs": ...}
 
     `prediction_kind == "grid"`:
-        {"prediction_kind": "grid", "probs_hw": ..., "x_coords_m": ..., "y_coords_m": ...}
+        {
+            "prediction_kind": "grid",
+            "point_id_start": ...,
+            "scores": ...,
+            "pixel_size_m": ...,
+        }
 
-    Current run artifacts may still store batched tensors or grid `scores`; this
-    runner converts those raw artifacts into the documented per-step scorer
-    contract above before computing exact energy terms.
+    The runner converts each split artifact into per-step scorer inputs before
+    computing exact energy terms.
     """
 
     run_dir = Path(run_dir)

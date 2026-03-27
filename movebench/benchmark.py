@@ -631,7 +631,7 @@ def run_deepssf(
             hparams=dict(method["hparams"]), steps_per_epoch=len(train_loader)
         )
 
-    x1, _x2, _x3, _y = next(iter(train_loader))
+    x1 = next(iter(train_loader))[0]
     b, c_env, h, w = x1.shape
     if int(h) != int(w):
         raise ValueError(f"deepSSF expects square chips. Got H={h}, W={w}.")

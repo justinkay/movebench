@@ -670,6 +670,14 @@ def _resolve_deepssf_cache_artifacts(
                 "status": "blocked",
                 "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
             }
+        if str(manifest.get("sample_identity", "")) != "point_id_start":
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"deepSSF cache for {split} is missing sample_identity=point_id_start; "
+                    "rebuild the cache"
+                ),
+            }
         env_channels = int(manifest["env_channels"])
         if env_channels != expected_env_channels:
             return {

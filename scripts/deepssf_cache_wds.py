@@ -246,7 +246,7 @@ def _bench_train(
     )
 
     def _one_update(batch) -> tuple[int, int]:
-        x1, x2, x3, y = batch
+        x1, x2, x3, y = batch[:4]
         x1 = x1.to(device, non_blocking=True)
         x2 = x2.to(device, non_blocking=True)
         x3 = x3.to(device, non_blocking=True)

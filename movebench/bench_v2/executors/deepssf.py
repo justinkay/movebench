@@ -20,10 +20,10 @@ def _slice_spatial(
 
 
 def _slice_batch_items(
-    batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     *,
     num_items: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return tuple(t[: int(num_items)] for t in batch)  # type: ignore[return-value]
 
 
@@ -62,15 +62,15 @@ def _evaluate_loader(
     item_limit = None if max_items is None else int(max_items)
     if item_limit is not None and item_limit <= 0:
         raise ValueError(f"max_items must be > 0 or None; got {max_items}")
-    for spatial, scalars, bearing, target in loader:
+    for spatial, scalars, bearing, target, _point_id_start in loader:
         if item_limit is not None:
             remaining = item_limit - seen_items
             if remaining <= 0:
                 break
             batch_size = int(spatial.shape[0])
             if batch_size > remaining:
-                spatial, scalars, bearing, target = _slice_batch_items(
-                    (spatial, scalars, bearing, target),
+                spatial, scalars, bearing, target, _point_id_start = _slice_batch_items(
+                    (spatial, scalars, bearing, target, _point_id_start),
                     num_items=remaining,
                 )
                 batch_size = remaining
@@ -111,7 +111,8 @@ def _prediction_payload(
 ) -> dict[str, object]:
     model.eval()
     scores_chunks: list[torch.Tensor] = []
-    for spatial, scalars, bearing, _target in loader:
+    point_id_chunks: list[torch.Tensor] = []
+    for spatial, scalars, bearing, _target, point_id_start in loader:
         spatial = _slice_spatial(
             spatial.to(device=device, dtype=torch.float32),
             channel_indices=channel_indices,
@@ -124,14 +125,22 @@ def _prediction_payload(
                 f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}"
             )
         scores_chunks.append((out[..., 0] + out[..., 1]).detach().cpu())
+        point_id_chunks.append(point_id_start.to(dtype=torch.int64).cpu())
     return {
         "prediction_kind": "grid",
+        "point_id_start": torch.cat(point_id_chunks, dim=0),
         "scores": torch.cat(scores_chunks, dim=0),
         "pixel_size_m": float(pixel_size_m),
     }
 
 
-def _make_loader(cache_dir: Path, *, batch_size: int, seed: int, shuffle: bool):
+def _make_loader(
+    cache_dir: Path,
+    *,
+    batch_size: int,
+    seed: int,
+    shuffle: bool,
+):
     return make_deepssf_wds_loader(
         cache_dir,
         batch_size=int(batch_size),
@@ -194,7 +203,7 @@ class _DeepSSFRuntime:
             return next(self._train_iter)
 
     def train_step(self, step: int) -> dict[str, float]:
-        spatial, scalars, bearing, target = self._next_train_batch()
+        spatial, scalars, bearing, target, _point_id_start = self._next_train_batch()
         spatial = _slice_spatial(
             spatial.to(device=self.device, dtype=torch.float32),
             channel_indices=self._channel_indices,
@@ -249,6 +258,12 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
     eval_max_items = int(method_hparams["max_eval_items"])
+    for split_key in ["train", *list(run_payload["evaluation_split_keys"])]:
+        manifest = dict(resolved_artifacts["cache_manifests"][str(split_key)]["manifest"])
+        if str(manifest.get("sample_identity", "")) != "point_id_start":
+            raise ValueError(
+                "deepSSF cache manifest must declare sample_identity='point_id_start'; rebuild the cache"
+            )
 
     train_manifest = dict(resolved_artifacts["cache_manifests"]["train"]["manifest"])
     output_hw = tuple(int(v) for v in train_manifest["output_hw"])

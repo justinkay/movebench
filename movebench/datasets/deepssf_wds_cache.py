@@ -5,14 +5,15 @@ per-sample raster loading/reprojection during training.
 
 Each sample is stored as a single tar member: `__key__.pth`, produced via
 `webdataset.torch_dumps` and decoded via `webdataset.torch_loads`. The stored
-object is a 4-tuple:
+object is a 5-tuple:
   - spatial: (C,H,W) torch.float16/torch.float32
   - scalars: (4,)    torch.float32
   - bearing: (1,)    torch.float32
   - target:  (H,W)   torch.uint8/torch.float16/torch.float32
+  - point_id_start:  int
 
-On read, values are returned as float32 torch tensors in the tuple order:
-  (spatial, scalars_to_grid, bearing, target)
+On read, values are returned as float32/int64 torch tensors in the tuple order:
+  (spatial, scalars_to_grid, bearing, target, point_id_start)
 
 Security note: `torch_loads` ultimately uses `torch.load` (pickle). Only open
 caches you built locally; do not load untrusted shard files.
@@ -69,7 +70,7 @@ def deepssf_wds_cache_hash(
     return _stable_hash_dict(
         {
             "kind": "deepssf_wds_cache",
-            "schema_version": "2",
+            "schema_version": "3",
             "payload_format": "pth",
             "rasters_hash": str(rasters_hash),
             "band_ids": list(band_ids),
@@ -83,6 +84,7 @@ def deepssf_wds_cache_hash(
             "spatial_dtype": str(spatial_dtype),
             "target_dtype": str(target_dtype),
             "compression": str(compression),
+            "sample_identity": "point_id_start",
         }
     )
 
@@ -120,6 +122,10 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
     if int(d.get("env_channels", 0)) <= 0:
         raise ValueError(
             f"manifest.env_channels must be > 0; got {d.get('env_channels')!r}"
+        )
+    if str(d.get("sample_identity", "")) != "point_id_start":
+        raise ValueError(
+            "manifest.sample_identity must be 'point_id_start' for exact evaluation"
         )
     return dict(d)
 
@@ -187,10 +193,20 @@ def build_deepssf_wds_cache(
     pixel_size_m = float(getattr(chips, "pixel_size_m"))
     if pixel_size_m <= 0:
         raise ValueError(f"Invalid pixel_size_m={pixel_size_m}")
+    steps = getattr(chips, "step_starts_df", None)
+    if steps is None or "point_id_start" not in steps.columns:
+        raise ValueError(
+            "DeepSSF cache build requires chips.step_starts_df with point_id_start"
+        )
 
     n = int(len(dataset))
     if n <= 0:
         raise ValueError(f"Dataset is empty (len={n}); nothing to cache")
+    point_ids = steps["point_id_start"].to_numpy(dtype="int64", copy=False)
+    if int(len(point_ids)) != n:
+        raise RuntimeError(
+            "Internal error: DeepSSF cache point_id_start length does not match dataset length"
+        )
 
     if int(samples_per_shard) <= 0:
         raise ValueError(f"samples_per_shard must be > 0; got {samples_per_shard}")
@@ -270,6 +286,7 @@ def build_deepssf_wds_cache(
                 "pixel_size_m": float(pixel_size_m),
                 "env_channels": int(env_channels),
                 "num_samples": int(n),
+                "sample_identity": "point_id_start",
             }
             write_deepssf_wds_manifest(manifest_path, manifest)
             return dict(manifest)
@@ -322,6 +339,7 @@ def build_deepssf_wds_cache(
     try:
         for j, (spatial, scalars, bearing, target) in enumerate(it):
             idx = int(start_idx) + int(j)
+            point_id_start = int(point_ids[int(remaining[j])])
             spatial_t = (
                 spatial.detach()
                 .to(device="cpu", dtype=spatial_torch_dtype)
@@ -345,7 +363,9 @@ def build_deepssf_wds_cache(
             sink.write(
                 {
                     "__key__": f"{int(idx):09d}",
-                    "pth": wds.torch_dumps((spatial_t, scalars_t, bearing_t, target_t)),
+                    "pth": wds.torch_dumps(
+                        (spatial_t, scalars_t, bearing_t, target_t, point_id_start)
+                    ),
                 }
             )
     finally:
@@ -365,20 +385,25 @@ def build_deepssf_wds_cache(
         "pixel_size_m": float(pixel_size_m),
         "env_channels": int(env_channels),
         "num_samples": int(n),
+        "sample_identity": "point_id_start",
     }
     write_deepssf_wds_manifest(manifest_path, manifest)
     return dict(manifest)
 
 
-def _decode_pth_sample(
+def _load_pth_sample(
     sample: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    spatial, scalars, bearing, target = wds.torch_loads(bytes(sample["pth"]))
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    spatial, scalars, bearing, target, point_id_start = wds.torch_loads(
+        bytes(sample["pth"])
+    )
+    point_id = torch.tensor(int(point_id_start), dtype=torch.int64)
     return (
         spatial.to(dtype=torch.float32),
         scalars.to(dtype=torch.float32),
         bearing.to(dtype=torch.float32),
         target.to(dtype=torch.float32),
+        point_id,
     )
 
 
@@ -393,7 +418,9 @@ def make_deepssf_wds_loader(
     pin_memory: bool,
     persistent_workers: bool,
     prefetch_factor: int | None,
-) -> Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> Iterable[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+]:
     cache_dir = Path(cache_dir)
     _ = read_deepssf_wds_manifest(cache_dir / "manifest.json")
     urls = [str(p) for p in list_deepssf_wds_shards(cache_dir)]
@@ -415,7 +442,7 @@ def make_deepssf_wds_loader(
     )
     if int(shuffle_buffer) > 0:
         ds = ds.shuffle(int(shuffle_buffer), rng=random.Random(int(seed)))
-    ds = ds.map(_decode_pth_sample)
+    ds = ds.map(_load_pth_sample)
 
     loader_kwargs: dict[str, Any] = {
         "num_workers": int(nw),

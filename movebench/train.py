@@ -537,6 +537,18 @@ def collate_deepssf(
     return x1, x2, x3, y
 
 
+def _unpack_deepssf_batch(
+    batch: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if len(batch) == 4:
+        x1, x2, x3, y = batch
+        return x1, x2, x3, y
+    if len(batch) == 5:
+        x1, x2, x3, y, _point_id_start = batch
+        return x1, x2, x3, y
+    raise ValueError(f"Expected deepSSF batch of length 4 or 5, got {len(batch)}")
+
+
 def random_grid_baseline_metrics(num_pixels: int, topk: Sequence[int]) -> dict:
     """Deterministic uniform random baseline for grid-based next-step prediction."""
     n = int(num_pixels)
@@ -551,7 +563,7 @@ def random_grid_baseline_metrics(num_pixels: int, topk: Sequence[int]) -> dict:
 @torch.no_grad()
 def eval_deepssf(
     model: torch.nn.Module,
-    loader: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    loader: Iterable[tuple[torch.Tensor, ...]],
     device: torch.device,
     *,
     topk: Sequence[int] = (1, 5, 10, 25, 50),
@@ -563,7 +575,8 @@ def eval_deepssf(
     total = 0
     correct_topk = {int(k): 0 for k in topk}
 
-    for x1, x2, x3, y in loader:
+    for batch in loader:
+        x1, x2, x3, y = _unpack_deepssf_batch(batch)
         if max_items is not None and int(total) >= int(max_items):
             break
         x1 = x1.to(device)
@@ -616,10 +629,8 @@ def eval_deepssf(
 
 def fit_deepssf(
     model: torch.nn.Module,
-    train_loader: Iterable[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-    ],
-    val_loader: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    train_loader: Iterable[tuple[torch.Tensor, ...]],
+    val_loader: Iterable[tuple[torch.Tensor, ...]],
     device: torch.device,
     *,
     lr_movement: float,
@@ -672,10 +683,11 @@ def fit_deepssf(
     train_iter = iter(train_loader)
     for step in range(int(max_steps)):
         try:
-            x1, x2, x3, y = next(train_iter)
+            batch = next(train_iter)
         except StopIteration:
             train_iter = iter(train_loader)
-            x1, x2, x3, y = next(train_iter)
+            batch = next(train_iter)
+        x1, x2, x3, y = _unpack_deepssf_batch(batch)
 
         model.train()
         x1 = x1.to(device)
