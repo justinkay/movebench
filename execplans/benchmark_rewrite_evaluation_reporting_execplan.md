@@ -97,6 +97,10 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
   Rationale: `bench status --format text` and the existing fake-module status tests should remain lightweight and should not require the heavy geospatial evaluation import path just to render or parse report commands.
   Date/Author: 2026-03-27 / assistant
 
+- Decision: plot applicability in the static report may continue to follow local study discovery from the status snapshot rather than being inferred solely from manifests and MLflow.
+  Rationale: the intended daily reporting workflow runs where the study corpus is mounted locally, so treating missing local studies as out of scope keeps the reporting slice simpler without blocking the accepted dashboard behavior.
+  Date/Author: 2026-03-27 / assistant
+
 ## Outcomes & Retrospective
 
 This plan now has its reporting layer in place alongside the earlier evaluation core. The repository contains exact energy-score math and a run-directory evaluation runner, plus a static report generator that queries MLflow, refreshes missing final metrics when needed, writes `status_report.json`, emits main-results and covariate-comparison PNGs, and generates `results/bench_v2/report/index.html`. The scoped reporting verification passed with:

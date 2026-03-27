@@ -7,12 +7,6 @@ from math import ceil
 from pathlib import Path
 import shutil
 from typing import Any
-
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import pandas as pd
 
 import movebench.paths as paths
@@ -201,6 +195,8 @@ def _result_rows_for_kind(
                     "energy_score": float(metrics[metric_key]),
                 }
             )
+    if not rows:
+        return _empty_results_df()
     return _sort_results_df(pd.DataFrame.from_records(rows))
 
 
@@ -264,6 +260,14 @@ def write_main_results_plots(
     status_snapshot: dict[str, object],
     report_root: str | Path,
 ) -> list[dict[str, object]]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    import matplotlib.pyplot as plt
+
+    if main_results.empty and "study_id" not in main_results.columns:
+        main_results = _empty_results_df()
     report_root = Path(report_root)
     asset_dir = report_root / "assets" / "main_results"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -349,6 +353,14 @@ def write_covariate_comparison_plots(
     status_snapshot: dict[str, object],
     report_root: str | Path,
 ) -> list[dict[str, object]]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    import matplotlib.pyplot as plt
+
+    if covariate_results.empty and "study_id" not in covariate_results.columns:
+        covariate_results = _empty_results_df()
     report_root = Path(report_root)
     asset_dir = report_root / "assets" / "covariate_comparison"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -477,6 +489,45 @@ def _final_summaries(
     return summaries, missing
 
 
+def _missing_mlflow_metric_splits(
+    latest_run_record: dict[str, object],
+    split_keys: list[str],
+) -> list[str]:
+    metrics = dict(latest_run_record.get("metrics", {}))
+    missing: list[str] = []
+    for split_key in split_keys:
+        metric_key = f"energy_score.{_metric_split_key(str(split_key))}"
+        if metric_key not in metrics:
+            missing.append(str(split_key))
+    return missing
+
+
+def _planner_blocked_runs(
+    manifests: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    manifests = _load_resolved_manifests() if manifests is None else manifests
+    blocked: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for manifest in manifests:
+        for entry in manifest.get("blocked", []):
+            payload = {str(key): value for key, value in dict(entry).items()}
+            dedupe_key = json.dumps(payload, sort_keys=True)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            blocked.append(payload)
+    blocked.sort(
+        key=lambda entry: (
+            str(entry.get("study_id", "")),
+            str(entry.get("timescale", "")),
+            str(entry.get("covariate_set", "")),
+            str(entry.get("method", "")),
+            str(entry.get("reason", "")),
+        )
+    )
+    return blocked
+
+
 def _refresh_final_metrics(
     planned_runs: dict[str, dict[str, object]],
     *,
@@ -490,11 +541,15 @@ def _refresh_final_metrics(
         latest = dict(latest_run_records.get(run_key, {}))
         if str(latest.get("status", "")) != "completed":
             continue
+        split_keys = [
+            str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])
+        ]
         _summaries, missing_splits = _final_summaries(
             run_key,
-            [str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])],
+            split_keys,
         )
-        if (not refresh_metrics) and not missing_splits:
+        missing_mlflow_splits = _missing_mlflow_metric_splits(latest, split_keys)
+        if (not refresh_metrics) and not missing_splits and not missing_mlflow_splits:
             continue
         try:
             if evaluate_run_fn is None:
@@ -683,7 +738,7 @@ def _render_completed_runs(completed_runs: list[dict[str, object]]) -> str:
                 parts.append(f"{split_key}: no scored steps")
             else:
                 parts.append(f"{split_key}: {float(energy_score):.3f}")
-        if not parts and run["missing_final_metrics_splits"]:
+        if run["missing_final_metrics_splits"]:
             parts.append(
                 "missing: " + ", ".join(run["missing_final_metrics_splits"])
             )
@@ -799,6 +854,7 @@ def write_report(
 ) -> dict[str, object]:
     manifests = _load_resolved_manifests()
     planned_runs = _planned_run_index(manifests)
+    planner_blocked_runs = _planner_blocked_runs(manifests)
     latest_run_records = bench_mlflow.search_latest_run_records_by_key(
         list(planned_runs.keys())
     )
@@ -837,7 +893,7 @@ def write_report(
     )
     counts = {
         "studies": int(status_snapshot.get("counts", {}).get("studies", 0)),
-        "planned_runs": int(len(planned_runs)),
+        "planned_runs": int(len(planned_runs) + len(planner_blocked_runs)),
         "completed_runs": int(
             sum(1 for entry in planned_run_entries if entry["latest_status"] == "completed")
         ),
@@ -851,7 +907,8 @@ def write_report(
             sum(1 for entry in planned_run_entries if entry["latest_status"] == "failed")
         ),
         "blocked_runs": int(
-            sum(1 for entry in planned_run_entries if entry["latest_status"] == "blocked")
+            len(planner_blocked_runs)
+            + sum(1 for entry in planned_run_entries if entry["latest_status"] == "blocked")
         ),
         "not_applicable_cases": int(
             sum(
@@ -874,6 +931,7 @@ def write_report(
         "counts": counts,
         "studies": list(status_snapshot.get("studies", [])),
         "blocked_studies": blocked_studies,
+        "blocked_runs": planner_blocked_runs,
         "planned_runs": planned_run_entries,
         "completed_runs": completed_runs,
         "missing_artifacts": [

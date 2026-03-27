@@ -1106,7 +1106,7 @@ def _command_plan(args: argparse.Namespace) -> int:
     experiment = load_experiment(args.experiment_module)
     runs = expand_experiment(experiment, studies_override=args.studies)
     manifest_path = write_resolved_manifest(experiment, runs)
-    print(f"Planned runs: {len(runs)}")
+    print(f"Runnable runs: {len(runs)}")
     print(f"Blocked runs: {len(experiment['blocked'])}")
     print(f"Resolved manifest: {manifest_path}")
     return 0
