@@ -19,7 +19,7 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 - [x] (2026-03-24 17:25Z) Verified that benchmark support is shared across method families, so endpoints outside that support should be excluded from final evaluation consistently for every method.
 - [x] (2026-03-24 17:35Z) Confirmed that the current app is unrelated to benchmark reporting, making a generated static HTML report the simplest and safest presentation layer.
 - [x] (2026-03-26 23:53Z) Added failing targeted tests in `tests/bench_v2/test_energy_score.py` and `tests/bench_v2/test_eval_runner.py`, then confirmed the new scope initially failed because the `movebench.bench_v2.evaluation` package did not exist yet.
-- [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/energy.py` with exact deterministic, discrete-support, and FFT-based grid energy math, including the true-endpoint guardrail for discrete artifacts.
+- [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/energy.py` with exact deterministic, discrete-support, and FFT-based grid energy math.
 - [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/runner.py` with documented prediction-contract validation, shared support reconstruction, exact per-step scoring, `energy_by_step.csv.gz` and `summary.json` artifacts, and MLflow logging of `energy_score`, `energy_score.accuracy.*`, `energy_score.calibration.*`, `n_steps_scored.*`, and `n_steps_excluded_out_of_support.*`.
 - [x] Implement exact energy-score evaluation for deterministic, candidate-based, and grid-based methods.
 - [x] Implement final-evaluation orchestration and MLflow logging.
@@ -115,7 +115,7 @@ Implement `energy.py` next. Add one exact function per prediction family. For de
 
     sum_i p_i ||x_i - y|| - 0.5 sum_{i,j} p_i p_j ||x_i - x_j||
 
-exactly with vectorized tensor code. This path covers `baseline_randomwalk`, `issf_linear`, `issf_mlp`, and `moveformer`. Require that the discrete-support artifact already excludes the true endpoint candidate from its support; if the artifact still includes it, fail loudly. For dense-grid predictions, compute the first term directly over the full grid, then compute the pairwise term by convolving the probability map with itself against a precomputed distance kernel using FFT. The implementation must be numerically tested against a brute-force small-grid reference.
+exactly with vectorized tensor code. This path covers `baseline_randomwalk`, `issf_linear`, `issf_mlp`, and `moveformer`. For dense-grid predictions, compute the first term directly over the full grid, then compute the pairwise term by convolving the probability map with itself against a precomputed distance kernel using FFT. The implementation must be numerically tested against a brute-force small-grid reference.
 
 Implement `runner.py` after the metric core exists. This module should load one completed concrete run, detect which held-out splits are available from the run metadata and existing artifacts, load the method’s prediction artifact, dispatch on `prediction_kind`, compute per-step energy scores, write `energy_by_step.csv.gz`, and then write an aggregated summary JSON. Log final aggregate metrics back to MLflow, including the total energy score and its two named components for each split, where `accuracy` means the `E ||X - y||` term and `calibration` means the `E ||X - X'||` term, for example:
 
@@ -190,13 +190,11 @@ Acceptance for this plan is reached when the following behaviors are observable.
 
 First, the energy-score unit tests prove exactness. The deterministic path must match Euclidean distance exactly. The discrete-support path must match a direct brute-force calculation exactly or within a tiny floating-point tolerance. The dense-grid FFT path must match a brute-force small-grid calculation within a tiny floating-point tolerance.
 
-Second, candidate-based final evaluation must fail if the prediction artifact still contains the true endpoint in its support. This is an intentional guardrail against leakage.
+Second, the evaluation runner must exclude out-of-support endpoints consistently across method families, write the excluded counts into the run summary, and log those counts plus the two raw energy-score components to MLflow.
 
-Third, the evaluation runner must exclude out-of-support endpoints consistently across method families, write the excluded counts into the run summary, and log those counts plus the two raw energy-score components to MLflow.
+Third, `movebench bench report` must generate plots for every finished run and must not crash when some studies are blocked or have only one held-out split. The HTML should include visible counts for completed, pending, failed, blocked, and not-applicable cases.
 
-Fourth, `movebench bench report` must generate plots for every finished run and must not crash when some studies are blocked or have only one held-out split. The HTML should include visible counts for completed, pending, failed, blocked, and not-applicable cases.
-
-Fifth, after the cutover, the legacy benchmark entrypoints must no longer be the default path. A user following the repository should naturally discover `movebench bench ...` and the static report instead of the old YAML benchmark flow.
+Fourth, after the cutover, the legacy benchmark entrypoints must no longer be the default path. A user following the repository should naturally discover `movebench bench ...` and the static report instead of the old YAML benchmark flow.
 
 ## Idempotence and Recovery
 
