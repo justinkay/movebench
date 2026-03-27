@@ -9,7 +9,6 @@ from typing import Any
 
 import torch
 from pyproj import Transformer
-from rasterio.transform import from_bounds, rowcol
 
 import movebench.paths as paths
 
@@ -59,24 +58,29 @@ def _truth_xy_m_for_step(
     )
 
 
-def _support_transform(*, output_hw: tuple[int, int], buffer_m: float):
+def _support_pixel_size_m(*, output_hw: tuple[int, int], buffer_m: float) -> float:
     height, width = (int(output_hw[0]), int(output_hw[1]))
     if height != width:
         raise ValueError(f"expected square output_hw, got {list(output_hw)}")
     if width < 2:
         raise ValueError(f"expected output_hw width >= 2, got {list(output_hw)}")
-    pixel_size_m = (2.0 * float(buffer_m)) / float(width - 1)
-    return (
-        from_bounds(
-            -float(buffer_m) - 0.5 * pixel_size_m,
-            -float(buffer_m) - 0.5 * pixel_size_m,
-            float(buffer_m) + 0.5 * pixel_size_m,
-            float(buffer_m) + 0.5 * pixel_size_m,
-            width,
-            height,
-        ),
-        pixel_size_m,
+    return (2.0 * float(buffer_m)) / float(width - 1)
+
+
+def _support_row_col(
+    truth_xy_m: torch.Tensor,
+    *,
+    output_hw: tuple[int, int],
+    buffer_m: float,
+) -> tuple[int, int]:
+    pixel_size_m = _support_pixel_size_m(output_hw=output_hw, buffer_m=buffer_m)
+    rr = math.floor(
+        (float(buffer_m) + 0.5 * pixel_size_m - float(truth_xy_m[1])) / pixel_size_m
     )
+    cc = math.floor(
+        (float(truth_xy_m[0]) + float(buffer_m) + 0.5 * pixel_size_m) / pixel_size_m
+    )
+    return int(rr), int(cc)
 
 
 def _is_truth_in_support(
@@ -85,14 +89,10 @@ def _is_truth_in_support(
     output_hw: tuple[int, int],
     buffer_m: float,
 ) -> bool:
-    transform, _pixel_size_m = _support_transform(
+    rr, cc = _support_row_col(
+        truth_xy_m,
         output_hw=output_hw,
         buffer_m=buffer_m,
-    )
-    rr, cc = rowcol(
-        transform,
-        float(truth_xy_m[0]),
-        float(truth_xy_m[1]),
     )
     return 0 <= int(rr) < int(output_hw[0]) and 0 <= int(cc) < int(output_hw[1])
 
@@ -313,7 +313,7 @@ def _score_split(
     pred_kind = str(pred_artifact.get("prediction_kind", "")).strip()
     timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
     output_hw = tuple(int(v) for v in timescale["output_hw"])
-    _transform, expected_pixel_size_m = _support_transform(
+    expected_pixel_size_m = _support_pixel_size_m(
         output_hw=output_hw,
         buffer_m=float(buffer_m),
     )
@@ -412,22 +412,38 @@ def _write_energy_rows(path: Path, rows: list[dict[str, object]]) -> None:
             writer.writerow(row)
 
 
-def _log_metrics_to_mlflow(run_key: str, metrics: dict[str, float]) -> None:
-    latest_runs = bench_mlflow.search_latest_runs_by_key([str(run_key)])
-    latest_run = latest_runs.get(str(run_key))
-    if latest_run is None:
-        raise ValueError(f"No MLflow run found for run_key {run_key!r}")
+def _resolve_mlflow_run_id(*, run_key: str, mlflow_run_id: str | None = None) -> str:
+    run_id = str(mlflow_run_id or "").strip()
+    if not run_id:
+        latest_runs = bench_mlflow.search_latest_runs_by_key([str(run_key)])
+        latest_run = latest_runs.get(str(run_key))
+        if latest_run is None:
+            raise ValueError(f"No MLflow run found for run_key {run_key!r}")
+        run_id = str(getattr(getattr(latest_run, "info", None), "run_id", "")).strip()
+    if not run_id:
+        raise ValueError(f"Latest MLflow run for {run_key!r} is missing run_id")
+    return run_id
+
+
+def _log_metrics_to_mlflow(
+    *,
+    run_key: str,
+    metrics: dict[str, float],
+    mlflow_run_id: str | None = None,
+) -> None:
     client = bench_mlflow._client(create=True)
     if client is None:
         raise ValueError("MLflow tracking client is unavailable")
-    run_id = str(getattr(getattr(latest_run, "info", None), "run_id", "")).strip()
-    if not run_id:
-        raise ValueError(f"Latest MLflow run for {run_key!r} is missing run_id")
+    run_id = _resolve_mlflow_run_id(run_key=str(run_key), mlflow_run_id=mlflow_run_id)
     for key, value in metrics.items():
         client.log_metric(run_id, str(key), float(value))
 
 
-def evaluate_run_dir(run_dir: str | Path) -> dict[str, object]:
+def evaluate_run_dir(
+    run_dir: str | Path,
+    *,
+    mlflow_run_id: str | None = None,
+) -> dict[str, object]:
     """
     Prediction scorer contract at the evaluation boundary:
 
@@ -487,7 +503,11 @@ def evaluate_run_dir(run_dir: str | Path) -> dict[str, object]:
     if not split_summaries:
         raise ValueError(f"No held-out prediction artifacts found under {run_dir / 'predictions'}")
 
-    _log_metrics_to_mlflow(str(run_payload["run_key"]), mlflow_metrics)
+    _log_metrics_to_mlflow(
+        run_key=str(run_payload["run_key"]),
+        metrics=mlflow_metrics,
+        mlflow_run_id=mlflow_run_id,
+    )
     return {
         "run_key": str(run_payload["run_key"]),
         "run_dir": str(run_dir),

@@ -23,11 +23,9 @@ from movebench.features.points import (
 )
 from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
-from movebench.study import Study
 
 import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.config as bench_config
-import movebench.bench_v2.report as bench_report
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
 PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
@@ -61,6 +59,24 @@ def _load_module_from_path(module_path: str | Path):
     return module, path.resolve()
 
 
+def _list_available_studies() -> list[str]:
+    from movebench.study import Study
+
+    return Study.list_available()
+
+
+def _bench_report_module():
+    import movebench.bench_v2.report as bench_report
+
+    return bench_report
+
+
+def _evaluation_runner_module():
+    import movebench.bench_v2.evaluation.runner as evaluation_runner
+
+    return evaluation_runner
+
+
 def _resolve_studies(
     experiment: dict[str, object],
     studies_override: list[str] | None = None,
@@ -68,14 +84,14 @@ def _resolve_studies(
     if studies_override:
         studies = [str(study_id).strip() for study_id in studies_override if str(study_id).strip()]
         if len(studies) == 1 and studies[0].lower() == "all":
-            return Study.list_available()
+            return _list_available_studies()
         if not studies:
             raise ValueError("No studies resolved from --studies")
         return studies
 
     studies = experiment.get("studies", "all")
     if studies == "all":
-        resolved = Study.list_available()
+        resolved = _list_available_studies()
         if not resolved:
             raise ValueError(
                 "No studies resolved. Set MOVEBENCH_DATA_ROOT or pass --studies."
@@ -873,6 +889,9 @@ def _clear_runtime_outputs(run_dir: Path) -> None:
     predictions_dir = run_dir / "predictions"
     if predictions_dir.exists():
         shutil.rmtree(predictions_dir)
+    final_metrics_dir = run_dir / "final_metrics"
+    if final_metrics_dir.exists():
+        shutil.rmtree(final_metrics_dir)
 
 
 def _write_blocked_run(
@@ -893,6 +912,11 @@ def _write_blocked_run(
     _write_json(run_dir / "training_summary.json", summary)
     _end_mlflow_run("FAILED")
     return summary
+
+
+def _mlflow_run_id(mlflow_run: object | None) -> str | None:
+    run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "")).strip()
+    return run_id or None
 
 
 def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
@@ -920,7 +944,7 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
             reason=str(resolved["reason"]),
         )
 
-    bench_mlflow.start_benchmark_run({**run_payload, "status": "running"})
+    mlflow_run = bench_mlflow.start_benchmark_run({**run_payload, "status": "running"})
     tracker = _RunTracker(run_dir)
     try:
         executor = _load_executor(str(run_payload["executor"]))
@@ -933,6 +957,12 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
             )
         )
         summary.setdefault("status", "completed")
+        if str(summary["status"]) == "completed":
+            _write_json(run_dir / "training_summary.json", summary)
+            _evaluation_runner_module().evaluate_run_dir(
+                run_dir,
+                mlflow_run_id=_mlflow_run_id(mlflow_run),
+            )
         _write_json(run_dir / "training_summary.json", summary)
         _set_mlflow_tag("status", summary["status"])
         _end_mlflow_run("FINISHED")
@@ -1007,7 +1037,7 @@ def run_experiment(
 
 
 def status_snapshot() -> dict[str, object]:
-    studies = Study.list_available()
+    studies = _list_available_studies()
     study_entries: list[dict[str, object]] = []
 
     ssf_ready_pairs = 0
@@ -1106,8 +1136,14 @@ def _command_plan(args: argparse.Namespace) -> int:
     experiment = load_experiment(args.experiment_module)
     runs = expand_experiment(experiment, studies_override=args.studies)
     manifest_path = write_resolved_manifest(experiment, runs)
-    print(f"Runnable runs: {len(runs)}")
+    planned_runs = int(len(runs) + len(experiment["blocked"]))
+    existing_runs = len(
+        search_latest_runs_by_key([str(run["run_key"]) for run in runs])
+    )
+    print(f"Planned runs: {planned_runs}")
+    print(f"Existing runs: {existing_runs}")
     print(f"Blocked runs: {len(experiment['blocked'])}")
+    print(f"Runnable runs: {len(runs)}")
     print(f"Resolved manifest: {manifest_path}")
     return 0
 
@@ -1118,6 +1154,7 @@ def _command_status(args: argparse.Namespace) -> int:
         print(_render_status_text(snapshot))
         return 0
     if args.format == "html":
+        bench_report = _bench_report_module()
         result = bench_report.write_report(
             status_snapshot=snapshot,
             refresh_metrics=False,
@@ -1128,6 +1165,7 @@ def _command_status(args: argparse.Namespace) -> int:
 
 
 def _command_report(args: argparse.Namespace) -> int:
+    bench_report = _bench_report_module()
     result = bench_report.write_report(
         status_snapshot=status_snapshot(),
         refresh_metrics=bool(args.refresh_metrics),

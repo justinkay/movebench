@@ -18,7 +18,6 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-import movebench.layers.derived as derived
 from movebench.features.config import SamplerConfig
 from movebench.features.manifest import (
     PointFeatureManifest,
@@ -28,10 +27,8 @@ from movebench.features.manifest import (
 )
 from movebench.layers.config import FixedStepSpec, _truncate_key
 from movebench.layers.constants import WGS84_CRS
-from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
-from movebench.rasters import Raster
 from movebench.trajectories import (
     SET_COL,
     compute_step_length_extent_m,
@@ -39,8 +36,6 @@ from movebench.trajectories import (
     load_trajectories_csv,
     select_step_starts_with_support,
 )
-
-from pyproj import Transformer
 from scipy import stats
 
 TARGET_CRS = "EPSG:3857"  # meters
@@ -49,9 +44,27 @@ SamplerType = Literal["empirical", "parametric"]
 
 @lru_cache(maxsize=1)
 def _transformers():
+    from pyproj import Transformer
+
     to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
     to_4326 = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
     return to_target, to_4326
+
+
+@lru_cache(maxsize=1)
+def _extraction_runtime():
+    from movebench.layers.io import LayerIO
+    from movebench.rasters import Raster
+    from pyproj import Transformer
+
+    return LayerIO, Raster, Transformer
+
+
+@lru_cache(maxsize=1)
+def _derived_module():
+    import movebench.layers.derived as derived
+
+    return derived
 
 
 def _stable_payload(d: dict[str, Any]) -> bytes:
@@ -338,6 +351,7 @@ def _sample_from_raster(
     c_channels, height, width = arr.shape
     n_points = int(len(lons))
 
+    _LayerIO, _Raster, Transformer = _extraction_runtime()
     transformer = Transformer.from_crs(WGS84_CRS, src_crs, always_xy=True)
     xs, ys = transformer.transform(lons, lats)
 
@@ -559,12 +573,13 @@ def _extract_one_step(
         if cached is not None:
             return cached
 
+        _LayerIO, Raster, _Transformer = _extraction_runtime()
         spec = REGISTRY.get(layer)
         if spec.source == "derived":
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
             parents = {p: get_raster(p) for p in spec.derived_from}
-            fn = getattr(derived, f"compute_{layer}", None)
+            fn = getattr(_derived_module(), f"compute_{layer}", None)
             if fn is None:
                 raise ValueError(
                     f"Missing derived compute function compute_{layer} in movebench.layers.derived"
@@ -636,6 +651,7 @@ _W_SAMPLER_STATE = None
 
 def _worker_init(ctx: dict[str, Any]) -> None:
     global _W_IO, _W_PLAN, _W_LAYER_SLICES, _W_SAMPLER_STATE
+    LayerIO, _Raster, _Transformer = _extraction_runtime()
     _W_PLAN = LayerPlan.from_dict(ctx["plan_dict"])
     _W_LAYER_SLICES = {k: tuple(v) for k, v in ctx["layer_slices"].items()}
     _W_SAMPLER_STATE = ctx["sampler_state"]
@@ -753,6 +769,7 @@ def _extract_env_block(
     layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
     if n_workers <= 1:
+        LayerIO, _Raster, _Transformer = _extraction_runtime()
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
         iterator = enumerate(reqs)
         for i, req in tqdm(

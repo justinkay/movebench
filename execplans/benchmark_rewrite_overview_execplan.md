@@ -23,9 +23,13 @@ Today the benchmark flow is split across [movebench/benchmark.py](/data/vision/b
 - [x] (2026-03-24 17:40Z) Verified that some studies expose only one held-out split, so planning, execution, and reporting must treat the missing split as not applicable rather than as an error.
 - [x] (2026-03-24 18:20Z) Chose the replacement architecture: plain Python experiment modules, a compact `movebench/bench_v2/` runtime package, MLflow-only tracking, exact final energy-score evaluation, and a generated static HTML report.
 - [x] (2026-03-24 18:45Z) Authored the coordinated ExecPlans for the core runtime, method runtime, and evaluation/reporting layers.
-- [ ] Implement [execplans/benchmark_rewrite_core_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_core_runtime_execplan.md).
-- [ ] Implement [execplans/benchmark_rewrite_method_runtime_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_method_runtime_execplan.md).
-- [ ] Implement [execplans/benchmark_rewrite_evaluation_reporting_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/benchmark_rewrite_evaluation_reporting_execplan.md).
+- [x] (2026-03-27 18:47Z) Audited the current tree against the child ExecPlans and confirmed that milestone 1 code landed under `movebench/bench_v2/`, `experiments/v2/`, and `movebench/cli/main.py`.
+- [x] (2026-03-27 18:47Z) Audited the current tree and confirmed that milestone 2 code landed under `movebench/bench_v2/train.py`, `movebench/bench_v2/executors/`, and `movebench/bench_v2/run.py`.
+- [x] (2026-03-27 18:47Z) Audited the current tree and confirmed that milestone 3 code landed under `movebench/bench_v2/evaluation/`, `movebench/bench_v2/report.py`, and the `bench report` / `bench status --format html` CLI paths.
+- [x] (2026-03-27) Closed the milestone 1 acceptance gaps from the audit. `movebench bench plan` now prints planned, existing, blocked, and runnable counts, while the planner/text-status import path stays off report, raster, and projection dependencies by keeping those imports at subsystem boundaries.
+- [x] (2026-03-27) Closed the milestone 2 acceptance gaps from the audit. `experiments/v2/main_results.py` now includes the three baseline methods and `experiments/v2/smoke_one_study.py` exists as the checked-in one-study smoke surface.
+- [x] (2026-03-27) Closed the milestone 2/3 integration gap from the audit. `movebench bench run` now performs exact final evaluation inline, writes `final_metrics/` before marking runs completed, and leaves `bench report` metric refresh as a repair path.
+- [x] (2026-03-27) Verified the accepted milestone 1-3 surface with the movebench micromamba environment: the targeted milestone suites passed, the broader 80-test `bench_v2` regression command passed, `movebench bench plan experiments/v2/main_results.py` completed successfully, and `movebench bench status --format text` completed successfully.
 - [ ] Delete the legacy YAML benchmark path, legacy benchmark-specific training helpers, and obsolete Slurm wrappers after the new runtime reaches parity and passes validation.
 
 ## Surprises & Discoveries
@@ -41,6 +45,15 @@ Today the benchmark flow is split across [movebench/benchmark.py](/data/vision/b
 
 - Observation: MLflow is not currently a project dependency.
   Evidence: [pyproject.toml](/data/vision/beery/scratch/justin/movebench/pyproject.toml) does not mention `mlflow`, so the rewrite must add and validate that dependency explicitly.
+
+- Observation: import-safe control-plane work required tightening more than just `run.py` and `study.py`.
+  Evidence: the broader `bench_v2` regression surface still failed until [movebench/features/points.py](/data/vision/beery/scratch/justin/movebench/movebench/features/points.py) stopped importing `movebench.layers.derived` at module import time and [movebench/datasets/__init__.py](/data/vision/beery/scratch/justin/movebench/movebench/datasets/__init__.py) stopped eagerly importing `ChipDataset`.
+
+- Observation: the exact-evaluation cutover stayed small once the evaluator could target the active MLflow run id directly.
+  Evidence: [movebench/bench_v2/evaluation/runner.py](/data/vision/beery/scratch/justin/movebench/movebench/bench_v2/evaluation/runner.py) now accepts `mlflow_run_id`, logs metrics directly to that run attempt, and uses direct square-grid arithmetic instead of `rasterio.transform`, while [movebench/bench_v2/run.py](/data/vision/beery/scratch/justin/movebench/movebench/bench_v2/run.py) only needed to call the evaluator before tagging the run completed.
+
+- Observation: the current data root still does not provide a real one-study smoke target for end-to-end execution.
+  Evidence: running `movebench bench status --format text` on 2026-03-27 reported `Studies: 148`, `SSF-ready pairs: 44`, `deepSSF-cache-ready pairs: 0`, and `Fully runnable pairs: 0`, so the checked-in smoke command could not be exercised against a fully ready study in this environment.
 
 ## Decision Log
 
@@ -68,9 +81,21 @@ Today the benchmark flow is split across [movebench/benchmark.py](/data/vision/b
   Rationale: the old code is still the only working reference for some model details. Deleting it before the new runtime is verified would make regression diagnosis unnecessarily hard.
   Date/Author: 2026-03-24 / assistant
 
+- Decision: keep milestone 1-3 acceptance open in the overview plan even though the corresponding code has landed.
+  Rationale: this umbrella plan tracks user-visible acceptance, not just code presence, and the audit found several remaining gaps between the implemented tree and the overview-level promises.
+  Date/Author: 2026-03-27 / assistant
+
+- Decision: close milestone 1-3 acceptance in the overview once the follow-up plan lands and the bench-specific regression surface passes, even if the environment cannot provide a fully ready smoke-run study.
+  Rationale: the remaining open work is now the milestone 4 legacy cutover. The accepted milestone 1-3 behavior is covered by the targeted and broad `bench_v2` tests plus live CLI plan/status execution; the absence of a ready deepSSF cache on the shared data root is an environment limitation, not an implementation gap.
+  Date/Author: 2026-03-27 / assistant
+
 ## Outcomes & Retrospective
 
-This plan is a blueprint, not the implementation. Its intended result is a benchmark stack where artifact validation, training, evaluation, status, and reporting read like one coherent system instead of several stitched scripts. If the sibling plans are followed, a later reviewer should be able to judge correctness by inspecting the new `bench_v2` package, running the new CLI, and ignoring the old YAML benchmark path entirely.
+The sibling plans plus the acceptance follow-up now provide an overview-level accepted `bench_v2` stack for milestones 1-3. The planner, runner, executors, evaluation layer, and static report generator all exist, and the remaining user-visible gaps from the 2026-03-27 audit have been closed: `bench plan` reports existing runs, `main_results` includes the baselines, `smoke_one_study.py` exists, and `bench run` records exact held-out metrics before a run is marked completed.
+
+Validation for that accepted state is recorded in the follow-up plan and was rerun in the movebench micromamba environment here: the milestone-targeted suites passed, the combined 80-test `bench_v2` regression command passed, `movebench bench plan experiments/v2/main_results.py` completed successfully with `Planned runs: 4144`, `Existing runs: 0`, `Blocked runs: 3924`, and `Runnable runs: 220`, and `movebench bench status --format text` completed successfully on the shared data root. The environment still had `Fully runnable pairs: 0` and `deepSSF-cache-ready pairs: 0`, so the checked-in one-study smoke run was not exercised against a real study in this session.
+
+The remaining open work in this umbrella plan is milestone 4 only: remove the legacy YAML benchmark path and obsolete wrappers once the accepted `bench_v2` stack is the clear primary path.
 
 ## Context and Orientation
 
@@ -214,3 +239,7 @@ The implementation plans must preserve these stable user commands:
     movebench bench status
 
 Plan creation note (2026-03-24 / assistant): initial umbrella plan authored after repository inspection to sequence the rewrite into core runtime, method runtime, and evaluation/reporting milestones with an explicit final cutover step.
+
+Revision note (2026-03-27 / assistant): audited the implemented milestone 1-3 tree against this overview plan, recorded which code paths are present, and left overview acceptance open for the remaining gaps around lightweight control-plane imports, missing `smoke_one_study.py`, baseline coverage in `main_results.py`, missing existing-run counts in `bench plan`, and final metric logging still being deferred from `bench run` to `bench report`.
+
+Revision note (2026-03-27 / assistant): landed the milestone 1-3 acceptance follow-up, reran the targeted and broad `bench_v2` regression suites, validated live `bench plan` and text `bench status`, and updated this overview to mark milestones 1-3 accepted. The only remaining open milestone in this umbrella plan is the legacy cutover.

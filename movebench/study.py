@@ -6,15 +6,9 @@ from pathlib import Path
 import pandas as pd
 
 from movebench import paths
-from movebench.datasets.chips import ChipDataset
-from movebench.datasets.ssf import SSFDataset, iSSFDataset
 from movebench.features.config import SamplerConfig, load_sampler_config
-from movebench.features.normalization import compute_points_normalization_stats
-from movebench.features.points import extract_point_feature_stores
 from movebench.layers import REGISTRY
-from movebench.layers import download as mb2dl
 from movebench.layers.config import load_layers_config
-from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     POINT_ID_COL,
@@ -88,6 +82,8 @@ class Study:
         return REGISTRY.resolve(cfg)
 
     def layer_io(self, layers_config: str | Path = "configs/layers/all.yaml"):
+        from movebench.layers.io import LayerIO
+
         plan = self.layer_plan(layers_config)
         return LayerIO(study_dir=self.study_dir, plan=plan)
 
@@ -99,6 +95,8 @@ class Study:
         n_workers: int = 16,
         skip_existing: bool = True,
     ) -> dict:
+        from movebench.layers import download as mb2dl
+
         cfg = load_layers_config(layers_config)
         plan = REGISTRY.resolve(cfg)
 
@@ -193,6 +191,8 @@ class Study:
         n_workers: int = 16,
         skip_existing: bool = True,
     ) -> dict:
+        from movebench.features.points import extract_point_feature_stores
+
         plan = self.layer_plan(layers_config)
         sampler = _load_sampler(sampler_config)
         return extract_point_feature_stores(
@@ -216,6 +216,8 @@ class Study:
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
     ):
+        from movebench.datasets.chips import ChipDataset
+
         plan = self.layer_plan(layers_config)
         sampler = None if sampler_config is None else _load_sampler(sampler_config)
         return ChipDataset(
@@ -291,6 +293,8 @@ class Study:
         subset_env_layers: list[str] | None = None,
         subset_band_ids: list[str] | None = None,
     ):
+        from movebench.datasets.ssf import SSFDataset
+
         plan = self.layer_plan(layers_config)
         sampler = _load_sampler(sampler_config)
         return SSFDataset(
@@ -317,6 +321,8 @@ class Study:
         include_individual_id: bool = False,
         movement_stats: dict[str, float] | None = None,
     ):
+        from movebench.datasets.ssf import iSSFDataset
+
         plan = self.layer_plan(layers_config)
         sampler = _load_sampler(sampler_config)
         return iSSFDataset(
@@ -343,6 +349,8 @@ class Study:
         split: str = "train",
         skip_existing: bool = True,
     ) -> dict:
+        from movebench.features.normalization import compute_points_normalization_stats
+
         if from_ != "points":
             raise NotImplementedError(
                 f"Unsupported from_={from_!r}. Only 'points' is implemented."
