@@ -337,9 +337,22 @@ def load_experiment(module_path: str) -> dict[str, object]:
     return bench_config.normalize_experiment(module.EXPERIMENT, source_path=path)
 
 
+def checked_in_experiment_module_paths() -> list[str]:
+    experiments_dir = Path(__file__).resolve().parents[2] / "experiments" / "v2"
+    if not experiments_dir.exists():
+        return []
+    return [
+        str(path)
+        for path in sorted(experiments_dir.glob("*.py"))
+        if path.name != "__init__.py" and not path.name.startswith("_")
+    ]
+
+
 def expand_experiment(
     experiment: dict[str, object],
     studies_override: list[str] | None = None,
+    *,
+    readiness_map: dict[str, dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     normalized = bench_config.normalize_experiment(
         experiment,
@@ -351,12 +364,17 @@ def expand_experiment(
     studies = _resolve_studies(experiment, studies_override)
     blocked: list[dict[str, object]] = []
     runs: list[dict[str, object]] = []
-    readiness_map: dict[str, dict[str, object]] = {}
+    local_readiness_map: dict[str, dict[str, object]] = {}
 
     for study_id in studies:
         for timescale_key in experiment["timescales"]:
-            readiness = _study_timescale_readiness(study_id, str(timescale_key))
-            readiness_map[f"{study_id}:{timescale_key}"] = readiness
+            readiness_key = f"{study_id}:{timescale_key}"
+            readiness = None if readiness_map is None else readiness_map.get(readiness_key)
+            if readiness is None:
+                readiness = _study_timescale_readiness(study_id, str(timescale_key))
+                if readiness_map is not None:
+                    readiness_map[readiness_key] = readiness
+            local_readiness_map[readiness_key] = readiness
             for covariate_set_key in experiment["covariate_sets"]:
                 band_ids = bench_config.resolve_covariate_band_ids(
                     str(timescale_key),
@@ -427,7 +445,7 @@ def expand_experiment(
 
     experiment["resolved_studies"] = studies
     experiment["blocked"] = blocked
-    experiment["study_readiness"] = readiness_map
+    experiment["study_readiness"] = local_readiness_map
     experiment["planning_summary"] = {
         "planned_runs": len(runs),
         "blocked_runs": len(blocked),
@@ -437,64 +455,22 @@ def expand_experiment(
     return runs
 
 
-def _manifest_payload(
-    experiment: dict[str, object],
-    runs: list[dict[str, object]],
-) -> dict[str, object]:
-    return {
-        "schema_version": "1",
-        "experiment": {
-            key: value
-            for key, value in experiment.items()
-            if key
-            not in {"blocked", "planning_summary", "study_readiness"}
-        },
-        "summary": dict(experiment.get("planning_summary", {})),
-        "blocked": list(experiment.get("blocked", [])),
-        "runs": runs,
-    }
-
-
-def write_resolved_manifest(
-    experiment: dict[str, object],
-    runs: list[dict[str, object]],
-) -> Path:
-    out_dir = paths.repo_root() / "results" / "bench_v2" / "resolved_experiments"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{experiment['name']}.json"
-    manifest = _manifest_payload(experiment, runs)
-
-    existing_runs: dict[str, str] = {}
-    for existing_manifest in _load_resolved_manifests():
-        for existing_run in existing_manifest.get("runs", []):
-            run_key = str(existing_run["run_key"])
-            payload = bench_config.stable_payload(_canonical_run_payload(existing_run))
-            if run_key in existing_runs and existing_runs[run_key] != payload:
-                raise ValueError(
-                    f"Existing resolved manifests contain conflicting payloads for run_key {run_key!r}"
-                )
-            existing_runs[run_key] = payload
-
-    for run in runs:
-        run_key = str(run["run_key"])
-        payload = bench_config.stable_payload(_canonical_run_payload(run))
-        if run_key in existing_runs and existing_runs[run_key] != payload:
-            raise ValueError(
-                f"Existing run_key {run_key!r} resolves to a different payload"
-            )
-
-    out_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    return out_path
-
-
-def _load_resolved_manifests() -> list[dict[str, object]]:
-    manifest_dir = paths.repo_root() / "results" / "bench_v2" / "resolved_experiments"
-    if not manifest_dir.exists():
-        return []
-    manifests: list[dict[str, object]] = []
-    for path in sorted(manifest_dir.glob("*.json")):
-        manifests.append(json.loads(path.read_text(encoding="utf-8")))
-    return manifests
+def expanded_checked_in_experiments(
+    *,
+    readiness_map: dict[str, dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    expanded: list[dict[str, object]] = []
+    for module_path in checked_in_experiment_module_paths():
+        experiment = load_experiment(module_path)
+        runs = expand_experiment(experiment, readiness_map=readiness_map)
+        expanded.append(
+            {
+                "module_path": str(module_path),
+                "experiment": experiment,
+                "runs": runs,
+            }
+        )
+    return expanded
 
 
 def _resolve_point_artifacts(
@@ -995,7 +971,6 @@ def run_experiment(
 
     runs = expand_experiment(experiment, studies_override=studies_override)
     planner_blocked_runs = len(experiment.get("blocked", []))
-    manifest_path = write_resolved_manifest(experiment, runs)
     latest_runs = bench_mlflow.search_latest_runs_by_key(
         [str(run["run_key"]) for run in runs]
     )
@@ -1027,7 +1002,6 @@ def run_experiment(
             failed_runs += 1
 
     return {
-        "manifest_path": manifest_path,
         "planned_runs": len(runs) + planner_blocked_runs,
         "executed_runs": executed_runs,
         "skipped_runs": skipped_runs,
@@ -1039,6 +1013,7 @@ def run_experiment(
 def status_snapshot() -> dict[str, object]:
     studies = _list_available_studies()
     study_entries: list[dict[str, object]] = []
+    readiness_index: dict[str, dict[str, object]] = {}
 
     ssf_ready_pairs = 0
     raster_ready_pairs = 0
@@ -1051,6 +1026,7 @@ def status_snapshot() -> dict[str, object]:
         study_has_blocked_pair = False
         for timescale_key in bench_config.TIMESCALES:
             readiness = _study_timescale_readiness(study_id, timescale_key)
+            readiness_index[f"{study_id}:{timescale_key}"] = readiness
             timescale_entries.append(readiness)
             if readiness["point_ready"]:
                 ssf_ready_pairs += 1
@@ -1065,11 +1041,11 @@ def status_snapshot() -> dict[str, object]:
             blocked_studies += 1
         study_entries.append({"study_id": study_id, "timescales": timescale_entries})
 
-    manifests = _load_resolved_manifests()
+    expanded_experiments = expanded_checked_in_experiments(readiness_map=readiness_index)
     planned_keys: list[str] = []
     seen_planned_keys: set[str] = set()
-    for manifest in manifests:
-        for run in manifest.get("runs", []):
+    for expanded in expanded_experiments:
+        for run in expanded.get("runs", []):
             run_key = str(run["run_key"])
             if run_key in seen_planned_keys:
                 continue
@@ -1097,7 +1073,7 @@ def status_snapshot() -> dict[str, object]:
         "studies": study_entries,
         "planned_run_keys": planned_keys,
         "completed_run_keys": completed_runs,
-        "resolved_experiment_count": len(manifests),
+        "checked_in_experiment_count": len(expanded_experiments),
     }
 
 
@@ -1135,7 +1111,6 @@ def _render_status_text(snapshot: dict[str, object]) -> str:
 def _command_plan(args: argparse.Namespace) -> int:
     experiment = load_experiment(args.experiment_module)
     runs = expand_experiment(experiment, studies_override=args.studies)
-    manifest_path = write_resolved_manifest(experiment, runs)
     planned_runs = int(len(runs) + len(experiment["blocked"]))
     existing_runs = len(
         search_latest_runs_by_key([str(run["run_key"]) for run in runs])
@@ -1144,7 +1119,6 @@ def _command_plan(args: argparse.Namespace) -> int:
     print(f"Existing runs: {existing_runs}")
     print(f"Blocked runs: {len(experiment['blocked'])}")
     print(f"Runnable runs: {len(runs)}")
-    print(f"Resolved manifest: {manifest_path}")
     return 0
 
 
@@ -1189,7 +1163,6 @@ def _command_run(args: argparse.Namespace) -> int:
     print(f"Skipped runs: {summary['skipped_runs']}")
     print(f"Blocked runs: {summary['blocked_runs']}")
     print(f"Failed runs: {summary['failed_runs']}")
-    print(f"Resolved manifest: {summary['manifest_path']}")
     return 0
 
 

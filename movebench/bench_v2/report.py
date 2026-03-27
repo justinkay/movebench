@@ -13,6 +13,7 @@ import movebench.paths as paths
 
 import movebench.bench_v2.config as bench_config
 import movebench.bench_v2.mlflow as bench_mlflow
+import movebench.bench_v2.run as bench_run
 
 EXPECTED_HELD_OUT_SPLITS = ["test-temporal", "test-individual"]
 TIMESCALE_ORDER = ["1h", "12h", "1d", "7d"]
@@ -94,26 +95,24 @@ def _split_label(split_key: str) -> str:
     return str(split_key).replace("-", " ")
 
 
-def _load_resolved_manifests() -> list[dict[str, object]]:
-    manifest_dir = paths.repo_root() / "results" / "bench_v2" / "resolved_experiments"
-    if not manifest_dir.exists():
-        return []
-    manifests: list[dict[str, object]] = []
-    for path in sorted(manifest_dir.glob("*.json")):
-        manifests.append(_load_json(path))
-    return manifests
+def _expanded_checked_in_experiments() -> list[dict[str, object]]:
+    return bench_run.expanded_checked_in_experiments()
 
 
 def _planned_run_index(
-    manifests: list[dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
-    manifests = _load_resolved_manifests() if manifests is None else manifests
+    expanded_experiments = (
+        _expanded_checked_in_experiments()
+        if expanded_experiments is None
+        else expanded_experiments
+    )
     planned: dict[str, dict[str, object]] = {}
-    for manifest in manifests:
-        experiment = dict(manifest.get("experiment", {}))
+    for entry in expanded_experiments:
+        experiment = dict(entry.get("experiment", {}))
         experiment_name = str(experiment.get("name", ""))
         experiment_kind = str(experiment.get("kind", "") or experiment_name)
-        for run in manifest.get("runs", []):
+        for run in entry.get("runs", []):
             run_payload = dict(run)
             run_key = str(run_payload["run_key"])
             if run_key not in planned:
@@ -133,9 +132,9 @@ def _planned_run_index(
 def _planned_runs_for_kind(
     experiment_kind: str,
     *,
-    manifests: list[dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
-    planned = _planned_run_index(manifests)
+    planned = _planned_run_index(expanded_experiments)
     return {
         run_key: run
         for run_key, run in planned.items()
@@ -161,8 +160,12 @@ def _result_rows_for_kind(
     experiment_kind: str,
     *,
     latest_run_records: dict[str, dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    planned_runs = _planned_runs_for_kind(experiment_kind)
+    planned_runs = _planned_runs_for_kind(
+        experiment_kind,
+        expanded_experiments=expanded_experiments,
+    )
     if not planned_runs:
         return _empty_results_df()
     if latest_run_records is None:
@@ -203,20 +206,24 @@ def _result_rows_for_kind(
 def load_main_results(
     *,
     latest_run_records: dict[str, dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     return _result_rows_for_kind(
         "main_results",
         latest_run_records=latest_run_records,
+        expanded_experiments=expanded_experiments,
     )
 
 
 def load_covariate_results(
     *,
     latest_run_records: dict[str, dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     return _result_rows_for_kind(
         "covariate_comparison",
         latest_run_records=latest_run_records,
+        expanded_experiments=expanded_experiments,
     )
 
 
@@ -503,13 +510,18 @@ def _missing_mlflow_metric_splits(
 
 
 def _planner_blocked_runs(
-    manifests: list[dict[str, object]] | None = None,
+    expanded_experiments: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
-    manifests = _load_resolved_manifests() if manifests is None else manifests
+    expanded_experiments = (
+        _expanded_checked_in_experiments()
+        if expanded_experiments is None
+        else expanded_experiments
+    )
     blocked: list[dict[str, object]] = []
     seen: set[str] = set()
-    for manifest in manifests:
-        for entry in manifest.get("blocked", []):
+    for expanded in expanded_experiments:
+        experiment = dict(expanded.get("experiment", {}))
+        for entry in experiment.get("blocked", []):
             payload = {str(key): value for key, value in dict(entry).items()}
             dedupe_key = json.dumps(payload, sort_keys=True)
             if dedupe_key in seen:
@@ -871,9 +883,9 @@ def write_report(
     refresh_metrics: bool = False,
     allow_metric_repair: bool = True,
 ) -> dict[str, object]:
-    manifests = _load_resolved_manifests()
-    planned_runs = _planned_run_index(manifests)
-    planner_blocked_runs = _planner_blocked_runs(manifests)
+    expanded_experiments = _expanded_checked_in_experiments()
+    planned_runs = _planned_run_index(expanded_experiments)
+    planner_blocked_runs = _planner_blocked_runs(expanded_experiments)
     latest_run_records = bench_mlflow.search_latest_run_records_by_key(
         list(planned_runs.keys())
     )
@@ -884,9 +896,13 @@ def write_report(
         allow_metric_repair=bool(allow_metric_repair),
     )
 
-    main_results = load_main_results(latest_run_records=latest_run_records)
+    main_results = load_main_results(
+        latest_run_records=latest_run_records,
+        expanded_experiments=expanded_experiments,
+    )
     covariate_results = load_covariate_results(
-        latest_run_records=latest_run_records
+        latest_run_records=latest_run_records,
+        expanded_experiments=expanded_experiments,
     )
 
     report_root = _report_root()
