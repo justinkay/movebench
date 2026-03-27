@@ -18,8 +18,11 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 - [x] (2026-03-24 17:20Z) Verified that candidate-based methods must remove the true endpoint candidate and renormalize probabilities before final held-out energy evaluation.
 - [x] (2026-03-24 17:25Z) Verified that benchmark support is shared across method families, so endpoints outside that support should be excluded from final evaluation consistently for every method.
 - [x] (2026-03-24 17:35Z) Confirmed that the current app is unrelated to benchmark reporting, making a generated static HTML report the simplest and safest presentation layer.
-- [ ] Implement exact energy-score evaluation for deterministic, candidate-based, and grid-based methods.
-- [ ] Implement final-evaluation orchestration and MLflow logging.
+- [x] (2026-03-26 23:53Z) Added failing targeted tests in `tests/bench_v2/test_energy_score.py` and `tests/bench_v2/test_eval_runner.py`, then confirmed the new scope initially failed because the `movebench.bench_v2.evaluation` package did not exist yet.
+- [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/energy.py` with exact deterministic, discrete-support, and FFT-based grid energy math, including the true-endpoint guardrail for discrete artifacts.
+- [x] (2026-03-26 23:53Z) Implemented `movebench/bench_v2/evaluation/runner.py` with documented prediction-contract validation, shared support reconstruction, exact per-step scoring, `energy_by_step.csv.gz` and `summary.json` artifacts, and MLflow logging of `energy_score`, `energy_score.accuracy.*`, `energy_score.calibration.*`, `n_steps_scored.*`, and `n_steps_excluded_out_of_support.*`.
+- [x] Implement exact energy-score evaluation for deterministic, candidate-based, and grid-based methods.
+- [x] Implement final-evaluation orchestration and MLflow logging.
 - [ ] Implement plot generation for main results and covariate comparisons.
 - [ ] Implement static HTML report generation and status snapshots.
 - [ ] Perform the final legacy cutover after the new report layer is validated.
@@ -40,6 +43,12 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
 
 - Observation: some studies have only one held-out split, so the report layer must treat missing plots as “not applicable,” not as failures.
   Evidence: the existing study inventories and artifact layouts include studies with only `test-temporal` or only `test-individual`.
+
+- Observation: the out-of-support corner case for final evaluation is not just “very long steps.”
+  Evidence: the shared support limit is applied after projecting steps into EPSG:3857, so high-latitude steps can pass the interval-step-length cutoff yet still fall outside the final square grid support used by deepSSF and the new evaluation runner.
+
+- Observation: deepSSF prediction artifacts can be realigned to exact held-out steps by replaying the cache permutation.
+  Evidence: the current raw grid artifact does not store step ids, but the checked-in benchmark configs build deepSSF caches with `runtime.seed: 0`, which is sufficient to reproduce the cache write order for the current artifact family.
 
 ## Decision Log
 
@@ -67,9 +76,17 @@ This plan is the user-facing finish of the rewrite. It turns run artifacts into 
   Rationale: this avoids adding a parquet-only dependency surface for a single reporting artifact. Parquet can be introduced later only if profiling shows CSV is an actual bottleneck.
   Date/Author: 2026-03-24 / assistant
 
+- Decision: the evaluation runner will reconstruct held-out truth rows and shared support directly from `trajectories.csv` plus the resolved timescale step spec instead of reading support state from method-specific artifacts.
+  Rationale: that applies one eligibility rule to every method family, keeps the evaluation boundary independent of point-store internals, and still uses the same step-selection and support rules that generated the benchmark artifacts.
+  Date/Author: 2026-03-26 / assistant
+
+- Decision: deepSSF final evaluation will replay the current cache permutation with seed `0` until cache manifests or prediction artifacts record explicit step identity.
+  Rationale: the current grid prediction artifact omits step ids, the cache hash does not encode a separate order seed, and the checked-in benchmark configs consistently build those caches with `runtime.seed: 0`. This keeps the scoped evaluation runner exact for the current artifact family without expanding scope into cache-schema changes.
+  Date/Author: 2026-03-26 / assistant
+
 ## Outcomes & Retrospective
 
-This plan should leave the repository with benchmark outputs that are both trustworthy and easy to inspect. If it succeeds, a reviewer can assess correctness from exact metric tests and assess completeness from the generated report without spelunking through run directories.
+This plan now has its evaluation core in place. The repository contains exact energy-score math for deterministic, discrete-support, and dense-grid predictions; a run-directory evaluation runner that writes final metric artifacts and logs MLflow metrics; and targeted tests that prove the math and runner behavior for the scoped evaluation slice. The remaining work in this plan is report generation, status HTML, and the later legacy cutover.
 
 ## Context and Orientation
 
@@ -234,3 +251,5 @@ Keep this as documentation plus validation logic in `runner.py`, not as a separa
 Keep plotting dependencies minimal. Use `matplotlib` and standard library HTML generation unless a truly necessary requirement appears later.
 
 Plan creation note (2026-03-24 / assistant): initial draft written after tracing the current energy-score math, identifying the exactness requirements for each method family, and choosing a static HTML report over app integration.
+
+Revision note (2026-03-26 / assistant): updated the living sections after completing the scoped evaluation-math and evaluation-runner work, including the support-reconstruction approach, the current deepSSF cache-order assumption, and the passing targeted test command for this slice.
