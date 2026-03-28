@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import importlib
 import importlib.util
@@ -28,7 +27,7 @@ import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.config as bench_config
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
-PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual", "test"]
+PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual"]
 _SUPPORTED_METHODS = {
     "baseline_nomove",
     "baseline_constvel",
@@ -105,19 +104,22 @@ def _resolve_studies(
 
 def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
     study_dir = paths.study_dir(study_id)
-    path = study_dir / "trajectories.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"Study trajectories.csv not found: {path}")
+    manifest_path = study_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Study manifest.json not found: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    trajectories = manifest.get("trajectories", {})
+    if not isinstance(trajectories, dict):
+        raise ValueError(f"Study manifest missing trajectories metadata: {manifest_path}")
 
     seen: list[str] = []
-    with open(path, "r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if "set" not in reader.fieldnames:
-            raise ValueError(f"Study trajectories.csv missing 'set' column: {path}")
-        for row in reader:
-            split = str(row.get("set", "")).strip()
-            if split and split not in seen:
-                seen.append(split)
+    if int(trajectories.get("n_train", 0) or 0) > 0:
+        seen.append("train")
+    if int(trajectories.get("n_test_temporal", 0) or 0) > 0:
+        seen.append("test-temporal")
+    if int(trajectories.get("n_test_individual", 0) or 0) > 0:
+        seen.append("test-individual")
 
     extras = [
         split
@@ -127,6 +129,14 @@ def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
     ordered = [
         split for split in PREFERRED_EARLY_STOP_SPLITS if split in seen
     ] + extras
+    has_manifest_counts = any(
+        key in trajectories for key in ("n_train", "n_test_temporal", "n_test_individual")
+    )
+    if not has_manifest_counts:
+        raise ValueError(
+            f"Study manifest missing split counts: {manifest_path} "
+            "(expected n_train, n_test_temporal, n_test_individual)"
+        )
     return {
         "has_train": "train" in seen,
         "held_out_splits": ordered,

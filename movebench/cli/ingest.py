@@ -136,14 +136,16 @@ def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
 
     if SET_COL in df.columns:
         vals = df[SET_COL].dropna().astype(str).unique().tolist()
-        if set(vals).issubset({"train", "test"}):
+        if set(vals).issubset({"train", "test-temporal", "test-individual"}):
             return df
 
     # Compute per-individual midpoint split.
     spans = df.groupby(INDIVIDUAL_COL)[TIME_COL].agg(start="min", end="max")
     split_times = spans["start"] + (spans["end"] - spans["start"]) / 2
     df["split_time"] = df[INDIVIDUAL_COL].map(split_times)
-    df[SET_COL] = (df[TIME_COL] <= df["split_time"]).map({True: "train", False: "test"})
+    df[SET_COL] = (df[TIME_COL] <= df["split_time"]).map(
+        {True: "train", False: "test-temporal"}
+    )
     return df
 
 
@@ -165,8 +167,14 @@ def _write_manifest(
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
-    n_train = int((df[SET_COL] == "train").sum()) if SET_COL in df.columns else 0
-    n_test = int((df[SET_COL] == "test").sum()) if SET_COL in df.columns else 0
+    split_counts = (
+        Counter(df[SET_COL].dropna().astype(str).tolist())
+        if SET_COL in df.columns
+        else Counter()
+    )
+    n_train = int(split_counts.get("train", 0))
+    n_test_temporal = int(split_counts.get("test-temporal", 0))
+    n_test_individual = int(split_counts.get("test-individual", 0))
 
     manifest = {
         "schema_version": "1",
@@ -178,7 +186,8 @@ def _write_manifest(
             "n_points": n_points,
             "n_individuals": n_individuals,
             "n_train": n_train,
-            "n_test": n_test,
+            "n_test_temporal": n_test_temporal,
+            "n_test_individual": n_test_individual,
         },
     }
     if subsample is not None:
@@ -246,7 +255,9 @@ def _ingest_one_csv(
     df = _sort_and_assign_point_id(df)
 
     n_train = int((df[SET_COL] == "train").sum())
-    n_test = int((df[SET_COL] == "test").sum())
+    n_test_temporal = int((df[SET_COL] == "test-temporal").sum())
+    n_test_individual = int((df[SET_COL] == "test-individual").sum())
+    n_held_out = n_test_temporal + n_test_individual
     if n_train == 0:
         raise ValueError("No train rows found after split assignment; cannot proceed.")
 
@@ -260,7 +271,7 @@ def _ingest_one_csv(
         print(
             f"{log_prefix}{csv_path.name} -> {study_id} "
             f"points={n_points}/{before_p} individuals={n_individuals}/{before_i} stop={reason} "
-            f"split=train={n_train} test={n_test}"
+            f"split=train={n_train} test-temporal={n_test_temporal} test-individual={n_test_individual}"
         )
     else:
         print(f"{log_prefix}csv_path:   {csv_path}")
@@ -277,9 +288,12 @@ def _ingest_one_csv(
         print(
             f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})"
         )
-        print(f"{log_prefix}split:      train={n_train} test={n_test}")
+        print(
+            f"{log_prefix}split:      "
+            f"train={n_train} test-temporal={n_test_temporal} test-individual={n_test_individual}"
+        )
 
-    if n_test == 0:
+    if n_held_out == 0:
         print(
             f"{log_prefix}WARNING: no test rows found after split assignment (all points are train)."
         )
