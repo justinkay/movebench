@@ -137,6 +137,7 @@ METHODS: dict[str, dict[str, object]] = {
             "max_steps": 2000,
             "eval_every_steps": 100,
             "patience_evals": 5,
+            "max_eval_items": 2500,
         },
     },
     "issf_mlp": {
@@ -156,6 +157,7 @@ METHODS: dict[str, dict[str, object]] = {
             "max_steps": 2000,
             "eval_every_steps": 100,
             "patience_evals": 5,
+            "max_eval_items": 2500,
         },
     },
     "deepssf": {

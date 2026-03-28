@@ -483,6 +483,7 @@ class iSSFDataset(SSFDataset):
         fallback_to_pinned_cpu: bool = True,
         chunk_size: int = 2048,
         validate: bool = False,
+        idxs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Materialize the full (N,C,P) iSSF feature tensor for fast training.
 
@@ -505,6 +506,19 @@ class iSSFDataset(SSFDataset):
             raise ValueError(f"chunk_size must be > 0; got {chunk_size}")
 
         N, C_env, P = self.env.shape
+        row_idxs_cpu: torch.Tensor | None = None
+        if idxs is not None:
+            row_idxs_cpu = torch.as_tensor(idxs, dtype=torch.long, device="cpu")
+            if row_idxs_cpu.ndim != 1:
+                raise ValueError(
+                    f"idxs must be a rank-1 tensor, got shape={tuple(row_idxs_cpu.shape)}"
+                )
+            if row_idxs_cpu.numel() > 0:
+                if int(row_idxs_cpu.min().item()) < 0 or int(row_idxs_cpu.max().item()) >= int(N):
+                    raise IndexError(
+                        f"idxs must be within [0, {int(N) - 1}], got {row_idxs_cpu.tolist()}"
+                    )
+        n_rows = int(N if row_idxs_cpu is None else row_idxs_cpu.numel())
         n_indiv = int(self._n_individuals) if self.include_individual_id else 0
         c_time = 4 if self.include_time else 0
         c_total = (
@@ -570,15 +584,22 @@ class iSSFDataset(SSFDataset):
                     device=op_device, dtype=torch.float32, non_blocking=non_blocking
                 ).view(1, -1, 1)
 
-            for s in range(0, int(N), int(chunk_size)):
-                e = min(int(N), s + int(chunk_size))
+            for s in range(0, int(n_rows), int(chunk_size)):
+                e = min(int(n_rows), s + int(chunk_size))
                 b = int(e - s)
+                batch_row_idxs_cpu = None if row_idxs_cpu is None else row_idxs_cpu[s:e]
 
                 # --- env (normalized; invalid entries zeroed) ---
-                env = self.env[s:e].to(
+                if batch_row_idxs_cpu is None:
+                    env_cpu = self.env[s:e]
+                    valid_cpu = self.valid[s:e]
+                else:
+                    env_cpu = self.env.index_select(0, batch_row_idxs_cpu)
+                    valid_cpu = self.valid.index_select(0, batch_row_idxs_cpu)
+                env = env_cpu.to(
                     device=op_device, dtype=torch.float32, non_blocking=non_blocking
                 )
-                valid = self.valid[s:e].to(device=op_device, non_blocking=non_blocking)
+                valid = valid_cpu.to(device=op_device, non_blocking=non_blocking)
                 if self.normalize:
                     assert mean is not None and std is not None
                     env = torch.where(valid, (env - mean) / std, torch.zeros_like(env))
@@ -586,10 +607,16 @@ class iSSFDataset(SSFDataset):
                     env = torch.where(valid, env, torch.zeros_like(env))
 
                 # --- movement (normalized using ds._movement_stats) ---
-                sl = self.step_length_m[s:e].to(
+                if batch_row_idxs_cpu is None:
+                    sl_cpu = self.step_length_m[s:e]
+                    ta_cpu = self.turn_angle_rad[s:e]
+                else:
+                    sl_cpu = self.step_length_m.index_select(0, batch_row_idxs_cpu)
+                    ta_cpu = self.turn_angle_rad.index_select(0, batch_row_idxs_cpu)
+                sl = sl_cpu.to(
                     device=op_device, dtype=torch.float32, non_blocking=non_blocking
                 )  # (B,P)
-                ta = self.turn_angle_rad[s:e].to(
+                ta = ta_cpu.to(
                     device=op_device, dtype=torch.float32, non_blocking=non_blocking
                 )  # (B,P)
                 log_sl = torch.log(sl + 1e-8)
@@ -609,7 +636,12 @@ class iSSFDataset(SSFDataset):
 
                 # --- optional time + id features ---
                 if time4_cpu is not None:
-                    t4 = time4_cpu[s:e].to(
+                    time4_slice_cpu = (
+                        time4_cpu[s:e]
+                        if batch_row_idxs_cpu is None
+                        else time4_cpu.index_select(0, batch_row_idxs_cpu)
+                    )
+                    t4 = time4_slice_cpu.to(
                         device=op_device, dtype=torch.float32, non_blocking=non_blocking
                     )  # (B,4)
                     time_feats = t4.unsqueeze(-1).expand(b, 4, int(P))  # (B,4,P)
@@ -617,7 +649,12 @@ class iSSFDataset(SSFDataset):
                     time_feats = None
 
                 if indiv_idx_cpu is not None:
-                    idx = indiv_idx_cpu[s:e].to(
+                    indiv_slice_cpu = (
+                        indiv_idx_cpu[s:e]
+                        if batch_row_idxs_cpu is None
+                        else indiv_idx_cpu.index_select(0, batch_row_idxs_cpu)
+                    )
+                    idx = indiv_slice_cpu.to(
                         device=op_device, non_blocking=non_blocking
                     )  # (B,)
                     onehot = torch.zeros(
@@ -679,7 +716,7 @@ class iSSFDataset(SSFDataset):
         if cache_device.type == "cuda":
             try:
                 out = torch.empty(
-                    (int(N), int(c_total), int(P)), device=cache_device, dtype=dtype
+                    (int(n_rows), int(c_total), int(P)), device=cache_device, dtype=dtype
                 )
                 out = _build_into(out=out, op_device=cache_device)
             except RuntimeError as e:
@@ -688,26 +725,35 @@ class iSSFDataset(SSFDataset):
                     raise
                 torch.cuda.empty_cache()
                 out = torch.empty(
-                    (int(N), int(c_total), int(P)), dtype=dtype, pin_memory=True
+                    (int(n_rows), int(c_total), int(P)), dtype=dtype, pin_memory=True
                 )
                 out = _build_into(out=out, op_device=torch.device("cpu"))
         else:
             out = torch.empty(
-                (int(N), int(c_total), int(P)), device=cache_device, dtype=dtype
+                (int(n_rows), int(c_total), int(P)), device=cache_device, dtype=dtype
             )
             out = _build_into(out=out, op_device=cache_device)
 
         if validate:
             # Spot-check equivalence to __getitem__ on a few indices.
-            idxs = [0, int(N) // 2, int(N) - 1] if int(N) >= 3 else list(range(int(N)))
+            sample_output_idxs = (
+                [0, int(n_rows) // 2, int(n_rows) - 1]
+                if int(n_rows) >= 3
+                else list(range(int(n_rows)))
+            )
             tol = 1e-4 if dtype == torch.float32 else 1e-1
-            for i in idxs:
-                slow_x, _slow_valid, _m, _crs = self[int(i)]
-                fast_x = out[int(i)].detach().cpu().float()
+            for output_idx in sample_output_idxs:
+                source_idx = (
+                    int(output_idx)
+                    if row_idxs_cpu is None
+                    else int(row_idxs_cpu[int(output_idx)].item())
+                )
+                slow_x, _slow_valid, _m, _crs = self[source_idx]
+                fast_x = out[int(output_idx)].detach().cpu().float()
                 max_abs = (slow_x - fast_x).abs().max().item()
                 if max_abs > float(tol):
                     raise AssertionError(
-                        f"build_expanded_x mismatch at idx={i}: max_abs_diff={max_abs} (tol={tol})"
+                        f"build_expanded_x mismatch at idx={source_idx}: max_abs_diff={max_abs} (tol={tol})"
                     )
 
         return out

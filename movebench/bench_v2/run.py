@@ -40,6 +40,10 @@ _SUPPORTED_METHODS = {
 }
 
 
+def _log_progress(message: str) -> None:
+    print(str(message), flush=True)
+
+
 def _load_module_from_path(module_path: str | Path):
     path = Path(module_path)
     if not path.exists():
@@ -867,6 +871,7 @@ def _write_blocked_run(
     run_dir: Path,
     reason: str,
 ) -> dict[str, object]:
+    _log_progress(f"{run_payload['run_key']}: blocked: {reason}")
     bench_mlflow.start_benchmark_run({**run_payload, "status": "blocked"})
     _set_mlflow_tag("status", "blocked")
     _set_mlflow_tag("blocked_reason", reason)
@@ -911,6 +916,7 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
             reason=str(resolved["reason"]),
         )
 
+    _log_progress(f"{run_payload['run_key']}: starting executor {run_payload['method']}")
     mlflow_run = bench_mlflow.start_benchmark_run({**run_payload, "status": "running"})
     tracker = _RunTracker(run_dir)
     try:
@@ -926,15 +932,18 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
         summary.setdefault("status", "completed")
         if str(summary["status"]) == "completed":
             _write_json(run_dir / "training_summary.json", summary)
+            _log_progress(f"{run_payload['run_key']}: starting evaluation")
             _evaluation_runner_module().evaluate_run_dir(
                 run_dir,
                 mlflow_run_id=_mlflow_run_id(mlflow_run),
             )
+            _log_progress(f"{run_payload['run_key']}: finished evaluation")
         _write_json(run_dir / "training_summary.json", summary)
         _set_mlflow_tag("status", summary["status"])
         _end_mlflow_run("FINISHED")
         return summary
     except Exception as exc:
+        _log_progress(f"{run_payload['run_key']}: failed: {exc}")
         summary = {
             "status": "failed",
             "reason": str(exc),
@@ -983,7 +992,16 @@ def run_experiment(
     executed_runs = 0
     executor_blocked_runs = 0
     failed_runs = 0
-    for run_payload in pending_runs:
+    total_pending_runs = len(pending_runs)
+    if total_pending_runs:
+        _log_progress(
+            "Executing "
+            f"{total_pending_runs} run(s); skipped={skipped_runs}, planner_blocked={planner_blocked_runs}"
+        )
+    for run_index, run_payload in enumerate(pending_runs, start=1):
+        _log_progress(
+            f"[{run_index}/{total_pending_runs}] starting {run_payload['run_key']}"
+        )
         summary = _execute_run(run_payload)
         executed_runs += 1
         status = str(summary.get("status", ""))
@@ -991,6 +1009,9 @@ def run_experiment(
             executor_blocked_runs += 1
         elif status == "failed":
             failed_runs += 1
+        _log_progress(
+            f"[{run_index}/{total_pending_runs}] finished {run_payload['run_key']} status={status or 'completed'}"
+        )
 
     return {
         "planned_runs": len(runs) + planner_blocked_runs,

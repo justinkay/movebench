@@ -17,6 +17,7 @@ import movebench.bench_v2.mlflow as bench_mlflow
 from movebench.bench_v2.evaluation import energy
 from movebench.trajectories import (
     SET_COL,
+    canonicalize_split_key,
     fit_interval_step_support,
     load_trajectories_csv,
     select_step_starts_with_support,
@@ -102,6 +103,7 @@ def _support_rows_for_split(
     study_id: str,
     split_key: str,
     timescale_key: str,
+    selected_splits: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], float]:
     study_dir = paths.study_dir(str(study_id))
     trajectories_path = study_dir / "trajectories.csv"
@@ -120,12 +122,17 @@ def _support_rows_for_split(
         max_step_q=float(plan.step_spec.max_step_q),
         step_multiplier=float(plan.step_spec.step_multiplier),
     )
+    if selected_splits:
+        requested_df = df[df[SET_COL].isin(list(selected_splits))].copy()
+    else:
+        requested_df = df[df[SET_COL] == str(split_key)].copy()
     steps = select_step_starts_with_support(
-        df[df[SET_COL] == str(split_key)].copy(),
+        requested_df,
         step_time_s=int(timescale["step_time_s"]),
         gap_q=float(plan.step_spec.gap_q),
         support=support,
     )
+    steps = steps[steps[SET_COL] == str(split_key)].copy()
 
     rows: list[dict[str, object]] = []
     output_hw = tuple(int(v) for v in timescale["output_hw"])
@@ -160,6 +167,39 @@ def _point_rows_by_id(rows: list[dict[str, object]]) -> dict[int, dict[str, obje
             raise ValueError(f"duplicate point_id_start {point_id} in support reconstruction")
         out[point_id] = row
     return out
+
+
+def _selected_splits_for_split(
+    *,
+    run_payload: dict[str, object],
+    split_key: str,
+) -> list[str] | None:
+    manifest_path = (
+        paths.study_dir(str(run_payload["study_id"]))
+        / "features"
+        / "points"
+        / canonicalize_split_key(str(split_key))
+        / str(run_payload["rasters_hash"])
+        / str(run_payload["sampler_hash"])
+        / "manifest.json"
+    )
+    if not manifest_path.exists():
+        return None
+    extraction = _load_json(manifest_path).get("extraction", {})
+    if not isinstance(extraction, dict):
+        return None
+    raw_selected_splits = extraction.get("selected_splits")
+    if not isinstance(raw_selected_splits, list) or not raw_selected_splits:
+        return None
+    selected_splits: list[str] = []
+    seen: set[str] = set()
+    for raw_split in raw_selected_splits:
+        split = canonicalize_split_key(raw_split)
+        if not split or split in seen:
+            continue
+        selected_splits.append(split)
+        seen.add(split)
+    return selected_splits or None
 
 
 def _tensor_1d(value: Any, *, field: str) -> torch.Tensor:
@@ -307,6 +347,10 @@ def _score_split(
         study_id=str(run_payload["study_id"]),
         split_key=str(split_key),
         timescale_key=str(run_payload["timescale"]),
+        selected_splits=_selected_splits_for_split(
+            run_payload=run_payload,
+            split_key=str(split_key),
+        ),
     )
     truth_by_point = _point_rows_by_id(ordered_rows)
     expected_point_ids = [int(row["point_id_start"]) for row in ordered_rows]
@@ -467,6 +511,7 @@ def evaluate_run_dir(
 
     run_dir = Path(run_dir)
     run_payload = _load_json(run_dir / "resolved_run.json")
+    run_key = str(run_payload.get("run_key") or run_dir.name)
     training_summary = _load_json(run_dir / "training_summary.json")
     if str(training_summary.get("status", "")) != "completed":
         raise ValueError(
@@ -504,12 +549,12 @@ def evaluate_run_dir(
         raise ValueError(f"No held-out prediction artifacts found under {run_dir / 'predictions'}")
 
     _log_metrics_to_mlflow(
-        run_key=str(run_payload["run_key"]),
+        run_key=run_key,
         metrics=mlflow_metrics,
         mlflow_run_id=mlflow_run_id,
     )
     return {
-        "run_key": str(run_payload["run_key"]),
+        "run_key": run_key,
         "run_dir": str(run_dir),
         "splits": split_summaries,
     }

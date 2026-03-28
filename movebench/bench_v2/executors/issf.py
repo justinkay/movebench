@@ -23,6 +23,38 @@ from movebench.trajectories import (
 _TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 
+def _log_progress(message: str) -> None:
+    print(str(message), flush=True)
+
+
+def _feature_cache_settings(
+    device: torch.device,
+) -> tuple[torch.device, torch.dtype, bool]:
+    device = torch.device(device)
+    if device.type == "cuda":
+        return device, torch.bfloat16, True
+    return device, torch.float32, False
+
+
+def _eval_subset_idxs(
+    *,
+    n_rows: int,
+    max_items: int | None,
+) -> torch.Tensor | None:
+    if max_items is None:
+        return None
+    if int(max_items) <= 0:
+        raise ValueError(f"max_eval_items must be > 0, got {max_items!r}")
+    if int(n_rows) <= int(max_items):
+        return None
+    return torch.arange(int(max_items), dtype=torch.long)
+
+
+def _release_device_cache(device: torch.device) -> None:
+    if torch.device(device).type == "cuda":
+        torch.cuda.empty_cache()
+
+
 def _loss_step_select(logits: torch.Tensor) -> torch.Tensor:
     if logits.ndim != 2:
         raise ValueError(f"Expected logits with shape (B,P), got {tuple(logits.shape)}")
@@ -66,6 +98,7 @@ class _ISSFRuntime:
         *,
         model: torch.nn.Module,
         x_train: torch.Tensor,
+        x_train_eval: torch.Tensor,
         x_eval: torch.Tensor,
         early_stop_split_key: str,
         device: torch.device,
@@ -76,6 +109,7 @@ class _ISSFRuntime:
     ) -> None:
         self.model = model.to(device)
         self.x_train = x_train
+        self.x_train_eval = x_train_eval
         self.x_eval = x_eval
         self.early_stop_split_key = str(early_stop_split_key)
         self.device = device
@@ -91,6 +125,8 @@ class _ISSFRuntime:
         self._pos = 0
 
     def _next_batch(self) -> torch.Tensor:
+        if self.x_train is None:
+            raise RuntimeError("iSSF training cache has already been released")
         n_train = int(self.x_train.shape[0])
         if self._pos >= n_train:
             self._perm = torch.randperm(n_train, generator=self._rng)
@@ -115,15 +151,19 @@ class _ISSFRuntime:
 
     def evaluate(self, split_key: str) -> dict[str, float]:
         if split_key == "train":
+            if self.x_train_eval is None:
+                raise RuntimeError("iSSF train-eval cache has already been released")
             metrics = _eval_step_select_tensor(
                 self.model,
-                self.x_train,
+                self.x_train_eval,
                 self.device,
                 batch_size=self.batch_size,
             )
             return {"nll": float(metrics["nll"])}
         if split_key != self.early_stop_split_key:
             raise KeyError(f"Unknown split for iSSF runtime: {split_key!r}")
+        if self.x_eval is None:
+            raise RuntimeError("iSSF eval cache has already been released")
         metrics = _eval_step_select_tensor(
             self.model,
             self.x_eval,
@@ -148,6 +188,12 @@ class _ISSFRuntime:
         self.optimizer.load_state_dict(dict(state["optimizer"]))
         self._perm = torch.as_tensor(state["perm"], dtype=torch.long, device="cpu")
         self._pos = int(state["pos"])
+
+    def release_caches(self) -> None:
+        self.x_train = None
+        self.x_train_eval = None
+        self.x_eval = None
+        _release_device_cache(self.device)
 
 
 def _start_xy_by_point_id(trajectories_path: Path) -> dict[int, tuple[float, float]]:
@@ -236,11 +282,19 @@ def _run(
     model_kind: str,
 ) -> dict[str, object]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cache_device, feat_dtype, fallback_to_pinned_cpu = _feature_cache_settings(device)
     point_stores = resolved_artifacts["point_stores"]
     run_dir = Path(run_dir)
+    run_key = str(run_payload.get("run_key", run_payload["method"]))
 
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams.get("batch_size", 256))
+    max_eval_items = (
+        None
+        if method_hparams.get("max_eval_items") is None
+        else int(method_hparams["max_eval_items"])
+    )
+    _log_progress(f"{run_key}: building iSSF train tensor")
     train_dataset = iSSFDataset(
         study_dir=resolved_artifacts["study_dir"],
         trajectories_path=resolved_artifacts["trajectories_path"],
@@ -257,14 +311,40 @@ def _run(
         split=str(run_payload["early_stop_split_key"]),
         subset_band_ids=list(run_payload["band_ids"]),
     )
+    train_eval_idxs = _eval_subset_idxs(
+        n_rows=len(train_dataset),
+        max_items=max_eval_items,
+    )
+    eval_eval_idxs = _eval_subset_idxs(
+        n_rows=len(eval_dataset),
+        max_items=max_eval_items,
+    )
     train_x = train_dataset.build_expanded_x(
-        cache_device=torch.device("cpu"),
-        dtype=torch.float32,
+        cache_device=cache_device,
+        dtype=feat_dtype,
+        fallback_to_pinned_cpu=fallback_to_pinned_cpu,
+    )
+    _log_progress(f"{run_key}: built iSSF train tensor shape={tuple(train_x.shape)}")
+    train_eval_x = (
+        train_x
+        if train_eval_idxs is None
+        else train_dataset.build_expanded_x(
+            cache_device=cache_device,
+            dtype=feat_dtype,
+            fallback_to_pinned_cpu=fallback_to_pinned_cpu,
+            idxs=train_eval_idxs,
+        )
+    )
+    _log_progress(
+        f"{run_key}: building iSSF eval tensor split={run_payload['early_stop_split_key']}"
     )
     eval_x = eval_dataset.build_expanded_x(
-        cache_device=torch.device("cpu"),
-        dtype=torch.float32,
+        cache_device=cache_device,
+        dtype=feat_dtype,
+        fallback_to_pinned_cpu=fallback_to_pinned_cpu,
+        idxs=eval_eval_idxs,
     )
+    _log_progress(f"{run_key}: built iSSF eval tensor shape={tuple(eval_x.shape)}")
 
     in_dim = int(train_x.shape[1])
     if model_kind == "linear":
@@ -282,6 +362,7 @@ def _run(
     runtime = _ISSFRuntime(
         model=model,
         x_train=train_x,
+        x_train_eval=train_eval_x,
         x_eval=eval_x,
         early_stop_split_key=str(run_payload["early_stop_split_key"]),
         device=device,
@@ -300,6 +381,15 @@ def _run(
         ),
         tracker,
     )
+    _log_progress(
+        f"{run_key}: finished iSSF training steps={fit['completed_steps']} best_step={fit['best_step']}"
+    )
+    final_train_metrics = _eval_step_select_tensor(
+        runtime.model,
+        train_x,
+        device,
+        batch_size=batch_size,
+    )
 
     checkpoint_path = run_dir / "checkpoint_best.pt"
     torch.save(
@@ -317,22 +407,41 @@ def _run(
         checkpoint_path,
     )
 
+    runtime.release_caches()
+    train_x = None
+    train_eval_x = None
+    eval_x = None
+    _release_device_cache(device)
+
     point_xy_m = _start_xy_by_point_id(Path(resolved_artifacts["trajectories_path"]))
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
+    early_stop_split_key = str(run_payload["early_stop_split_key"])
+    final_eval_metrics: dict[str, float] | None = None
     for split_key in run_payload["evaluation_split_keys"]:
-        dataset = iSSFDataset(
-            study_dir=resolved_artifacts["study_dir"],
-            trajectories_path=resolved_artifacts["trajectories_path"],
-            plan=resolved_artifacts["plan"],
-            sampler_config=resolved_artifacts["sampler"],
-            split=str(split_key),
-            subset_band_ids=list(run_payload["band_ids"]),
-        )
+        if str(split_key) == early_stop_split_key:
+            dataset = eval_dataset
+        else:
+            dataset = iSSFDataset(
+                study_dir=resolved_artifacts["study_dir"],
+                trajectories_path=resolved_artifacts["trajectories_path"],
+                plan=resolved_artifacts["plan"],
+                sampler_config=resolved_artifacts["sampler"],
+                split=str(split_key),
+                subset_band_ids=list(run_payload["band_ids"]),
+            )
         x_split = dataset.build_expanded_x(
-            cache_device=torch.device("cpu"),
-            dtype=torch.float32,
+            cache_device=cache_device,
+            dtype=feat_dtype,
+            fallback_to_pinned_cpu=fallback_to_pinned_cpu,
         )
+        if str(split_key) == early_stop_split_key:
+            final_eval_metrics = _eval_step_select_tensor(
+                runtime.model,
+                x_split,
+                device,
+                batch_size=batch_size,
+            )
         shared = load_point_store_shared(Path(point_stores[split_key]["store_dir"]))
         torch.save(
             _discrete_prediction_payload(
@@ -345,14 +454,31 @@ def _run(
             ),
             pred_dir / f"{split_key}.pt",
         )
+        x_split = None
+        _release_device_cache(device)
+
+    if final_eval_metrics is None:
+        full_eval_x = eval_dataset.build_expanded_x(
+            cache_device=cache_device,
+            dtype=feat_dtype,
+            fallback_to_pinned_cpu=fallback_to_pinned_cpu,
+        )
+        final_eval_metrics = _eval_step_select_tensor(
+            runtime.model,
+            full_eval_x,
+            device,
+            batch_size=batch_size,
+        )
+        full_eval_x = None
+        _release_device_cache(device)
 
     return {
         "status": "completed",
         "train_steps": int(fit["completed_steps"]),
         "best_step": int(fit["best_step"]),
         "early_stop_split_key": str(run_payload["early_stop_split_key"]),
-        "train_metrics": dict(fit["train_metrics"]),
-        "eval_metrics": dict(fit["eval_metrics"]),
+        "train_metrics": dict(final_train_metrics),
+        "eval_metrics": dict(final_eval_metrics),
     }
 
 
