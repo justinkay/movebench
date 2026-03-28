@@ -40,6 +40,7 @@ import movebench.paths as paths
 import shutil
 from movebench.features.points import resolve_sampler_hash
 from movebench.layers.plan import LayerPlan
+from movebench.trajectories import canonicalize_split_key
 from torch.utils.data import Subset
 
 Compression = Literal["none", "gz"]
@@ -67,6 +68,7 @@ def deepssf_wds_cache_hash(
     target_dtype: TargetDType,
     compression: Compression,
 ) -> str:
+    split = canonicalize_split_key(split)
     return _stable_hash_dict(
         {
             "kind": "deepssf_wds_cache",
@@ -464,7 +466,13 @@ def cache_dir_for_study(
     split: str,
     cache_hash: str,
 ) -> Path:
-    return Path(study_dir) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
+    return (
+        Path(study_dir)
+        / "cache"
+        / "deepssf_wds"
+        / canonicalize_split_key(split)
+        / str(cache_hash)
+    )
 
 
 def steps_per_epoch_from_manifest(manifest: dict[str, Any], *, batch_size: int) -> int:
@@ -491,7 +499,7 @@ def ensure_deepssf_wds_cache_split(
     resume: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Ensure a deepSSF WebDataset cache exists for a study+split and return (cache_dir, manifest)."""
-    split = str(split)
+    split = canonicalize_split_key(split)
     layers_config = str(layers_config)
     plan = study.layer_plan(layers_config)
 
@@ -600,6 +608,7 @@ def make_deepssf_wds_train_test_loaders(
 
     bs = int(batch_size) if batch_size is not None else 1
     nw = int(num_workers or 0)
+    eval_split = str(ds_kwargs_test.get("split", "test"))
 
     samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
     spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
@@ -630,7 +639,7 @@ def make_deepssf_wds_train_test_loaders(
     )
     cache_dir_test, m_test = ensure_deepssf_wds_cache_split(
         study=study,
-        split="test",
+        split=eval_split,
         layers_config=str(layers_config),
         ds_kwargs=dict(ds_kwargs_test),
         samples_per_shard=int(samples_per_shard),

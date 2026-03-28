@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from movebench.benchmark import load_config
+from movebench.benchmark import resolve_default_eval_split
 from movebench.benchmark import resolve_studies
 from movebench.benchmark import run_method
 from movebench.benchmark import write_outputs
@@ -281,8 +282,12 @@ def _check_prereqs(
         _train_dir, train_m = _select_parametric_store(
             study_dir=study.study_dir, plan=plan, split="train", sampler=sampler
         )
+        eval_split = resolve_default_eval_split(study)
         _select_parametric_store(
-            study_dir=study.study_dir, plan=plan, split="test", sampler=sampler
+            study_dir=study.study_dir,
+            plan=plan,
+            split=eval_split,
+            sampler=sampler,
         )
     except (FileNotFoundError, ValueError) as e:
         return False, None, f"missing_parametric_point_store: {e}"

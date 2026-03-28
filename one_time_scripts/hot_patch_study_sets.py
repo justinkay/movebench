@@ -9,7 +9,11 @@ from pathlib import Path
 import pandas as pd
 
 from movebench.cli.ingest import _ensure_required_columns, _normalize_columns, _parse_and_filter
-from movebench.trajectories import INDIVIDUAL_COL, SET_COL
+from movebench.trajectories import (
+    INDIVIDUAL_COL,
+    SET_COL,
+    canonicalize_split_key,
+)
 
 
 DEFAULT_STUDIES_ROOT = Path("/archive/vision/beery/movebench/studies")
@@ -59,6 +63,7 @@ def _load_v2_source(
         raise ValueError(f"Source CSV has duplicate 'event-id' values: {v2_csv_path}")
     if SET_COL not in df.columns:
         raise ValueError(f"Source CSV is missing {SET_COL!r}: {v2_csv_path}")
+    df[SET_COL] = df[SET_COL].map(canonicalize_split_key)
     return df
 
 
@@ -66,14 +71,26 @@ def _updated_manifest(
     manifest: dict[str, object], updated_trajectories: pd.DataFrame
 ) -> dict[str, object]:
     split_counts = Counter(updated_trajectories[SET_COL].astype(str).tolist())
+    split_keys = []
+    if "train" in split_counts:
+        split_keys.append("train")
+    split_keys.extend(
+        split
+        for split in sorted(split_counts)
+        if split not in {"train", "unused"}
+    )
     updated = dict(manifest)
     trajectories = dict(updated.get("trajectories", {}))
     trajectories.pop("n_test", None)
     trajectories["n_points"] = int(len(updated_trajectories))
     trajectories["n_individuals"] = int(updated_trajectories[INDIVIDUAL_COL].nunique())
+    trajectories["split_keys"] = split_keys
+    trajectories["split_counts"] = {
+        split: int(split_counts[split]) for split in split_keys if int(split_counts[split]) > 0
+    }
     trajectories["n_train"] = int(split_counts.get("train", 0))
-    trajectories["n_test_temporal"] = int(split_counts.get("test-temporal", 0))
-    trajectories["n_test_individual"] = int(split_counts.get("test-individual", 0))
+    trajectories["n_test_temporal"] = int(split_counts.get("test_temporal", 0))
+    trajectories["n_test_individual"] = int(split_counts.get("test_individual", 0))
     trajectories["n_unused"] = int(split_counts.get("unused", 0))
     updated["trajectories"] = trajectories
     return updated
@@ -97,6 +114,9 @@ def plan_study_patch(*, study_dir: Path, v2_csv_path: Path) -> StudyPatchPlan:
     )
     set_by_event_id = source_v2.set_index("event-id")[SET_COL]
     updated_trajectories = trajectories.copy()
+    updated_trajectories[SET_COL] = updated_trajectories[SET_COL].map(
+        canonicalize_split_key
+    )
     old_set = updated_trajectories[SET_COL].astype(str)
     mapped_set = updated_trajectories["event-id"].map(set_by_event_id)
     new_set = mapped_set.fillna("unused")

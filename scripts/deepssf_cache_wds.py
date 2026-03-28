@@ -30,6 +30,7 @@ from movebench.datasets.deepssf_wds_cache import (
 )
 from movebench.models.deepssf import DeepSSF
 from movebench.train import collate_deepssf
+from movebench.trajectories import canonicalize_split_key
 
 _REPO_ROOT = bootstrap.REPO_ROOT
 
@@ -47,9 +48,11 @@ def _parse_hw(s: str) -> tuple[int, int]:
 
 
 def _parse_splits(s: str) -> list[str]:
-    out = [p.strip() for p in str(s).split(",") if p.strip()]
+    out = [canonicalize_split_key(p) for p in str(s).split(",") if p.strip()]
     if not out:
-        raise ValueError("splits must be a comma-separated list like 'train,test'")
+        raise ValueError(
+            "splits must be a comma-separated list like 'train,test_temporal'"
+        )
     return out
 
 
@@ -87,6 +90,9 @@ def _ensure_ready(
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
 
     plan = study.layer_plan(layers_config)
+    split_inventory = study.split_inventory()
+    split_keys = [str(split) for split in split_inventory["split_keys"]]
+    held_out_splits = [str(split) for split in split_inventory["held_out_splits"]]
     try:
         _train_dir, train_m = select_point_store_dir(
             study_dir=study.study_dir,
@@ -101,24 +107,24 @@ def _ensure_ready(
             bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
         )
         sampler_hash = str(train_m.sampler_hash)
-        # Also require the test split point store (benchmarks evaluate on test).
-        select_point_store_dir(
-            study_dir=study.study_dir,
-            split="test",
-            config_hash=str(plan.config_hash),
-            expected_type="parametric",
-            num_candidates=int(NUM_CANDIDATES),
-            random_seed=int(SAMPLER_RANDOM_SEED),
-            step_multiplier=float(step_multiplier),
-            step_q=float(step_q),
-            gap_q=float(gap_q),
-            bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
-        )
+        for split in held_out_splits:
+            select_point_store_dir(
+                study_dir=study.study_dir,
+                split=str(split),
+                config_hash=str(plan.config_hash),
+                expected_type="parametric",
+                num_candidates=int(NUM_CANDIDATES),
+                random_seed=int(SAMPLER_RANDOM_SEED),
+                step_multiplier=float(step_multiplier),
+                step_q=float(step_q),
+                gap_q=float(gap_q),
+                bounds_buffer_deg=float(BOUNDS_BUFFER_DEG),
+            )
     except FileNotFoundError:
         try:
             rep = study.extract_point_features(
                 config=layers_config,
-                splits=["train", "test"],
+                splits=split_keys,
                 parametric=True,
                 num_candidates=int(NUM_CANDIDATES),
                 random_seed=int(SAMPLER_RANDOM_SEED),
@@ -134,13 +140,13 @@ def _ensure_ready(
                 raise
             study.download_rasters(
                 config=layers_config,
-                splits=["train", "test"],
+                splits=split_keys,
                 n_workers=int(setup_workers),
                 skip_existing=True,
             )
             rep = study.extract_point_features(
                 config=layers_config,
-                splits=["train", "test"],
+                splits=split_keys,
                 parametric=True,
                 num_candidates=int(NUM_CANDIDATES),
                 random_seed=int(SAMPLER_RANDOM_SEED),
@@ -346,7 +352,12 @@ def _cmd_build(args: argparse.Namespace) -> None:
         normalize = bool(args.normalize)
         norm_hash = str(sampler_hash) if normalize else None
 
-        for split in list(args.splits):
+        split_keys = (
+            list(args.splits)
+            if args.splits is not None
+            else [str(item) for item in study.split_inventory()["split_keys"]]
+        )
+        for split in split_keys:
             ds_kwargs = {
                 "split": str(split),
                 "config": str(args.config),
@@ -623,8 +634,8 @@ def _parse_args() -> argparse.Namespace:
     b.add_argument(
         "--splits",
         type=_parse_splits,
-        default=["train", "test"],
-        help="Comma list, e.g. train,test",
+        default=None,
+        help="Optional comma list, e.g. train,test_temporal. Default: use the study's default splits.",
     )
     _add_common_dataset_args(b)
     b.add_argument(

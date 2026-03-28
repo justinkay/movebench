@@ -21,6 +21,7 @@ from movebench.trajectories import (
     LAT_COL,
     LON_COL,
     TIME_COL,
+    canonicalize_split_key,
 )
 from movebench.trajectories import SET_COL
 from movebench.trajectories import POINT_ID_COL
@@ -71,6 +72,32 @@ def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
     df = df.dropna(subset=[TIME_COL, LAT_COL, LON_COL])
     return df
+
+
+def _ordered_split_keys(split_values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for split in split_values:
+        if split in seen or split == "unused":
+            continue
+        ordered.append(split)
+        seen.add(split)
+    if "train" in seen:
+        return ["train"] + [split for split in ordered if split != "train"]
+    return ordered
+
+
+def _split_counts(df: pd.DataFrame) -> Counter[str]:
+    if SET_COL not in df.columns:
+        return Counter()
+    return Counter(
+        split
+        for split in (
+            canonicalize_split_key(raw)
+            for raw in df[SET_COL].dropna().astype(str).tolist()
+        )
+        if split
+    )
 
 
 def _subsample_individuals(
@@ -135,8 +162,15 @@ def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     if SET_COL in df.columns:
-        vals = df[SET_COL].dropna().astype(str).unique().tolist()
-        if set(vals).issubset({"train", "test-temporal", "test-individual"}):
+        split_mask = df[SET_COL].notna()
+        if bool(split_mask.any()):
+            df.loc[split_mask, SET_COL] = df.loc[split_mask, SET_COL].map(
+                canonicalize_split_key
+            )
+            empty_mask = df[SET_COL].astype(str).str.len() == 0
+            if bool(empty_mask.any()):
+                df.loc[empty_mask, SET_COL] = pd.NA
+        if bool(df[SET_COL].notna().any()):
             return df
 
     # Compute per-individual midpoint split.
@@ -144,7 +178,7 @@ def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
     split_times = spans["start"] + (spans["end"] - spans["start"]) / 2
     df["split_time"] = df[INDIVIDUAL_COL].map(split_times)
     df[SET_COL] = (df[TIME_COL] <= df["split_time"]).map(
-        {True: "train", False: "test-temporal"}
+        {True: "train", False: "test_temporal"}
     )
     return df
 
@@ -167,14 +201,8 @@ def _write_manifest(
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
-    split_counts = (
-        Counter(df[SET_COL].dropna().astype(str).tolist())
-        if SET_COL in df.columns
-        else Counter()
-    )
-    n_train = int(split_counts.get("train", 0))
-    n_test_temporal = int(split_counts.get("test-temporal", 0))
-    n_test_individual = int(split_counts.get("test-individual", 0))
+    split_counts = _split_counts(df)
+    split_keys = _ordered_split_keys(list(split_counts.keys()))
 
     manifest = {
         "schema_version": "1",
@@ -185,11 +213,18 @@ def _write_manifest(
             "file": "trajectories.csv",
             "n_points": n_points,
             "n_individuals": n_individuals,
-            "n_train": n_train,
-            "n_test_temporal": n_test_temporal,
-            "n_test_individual": n_test_individual,
+            "split_keys": split_keys,
+            "split_counts": {
+                split: int(split_counts[split])
+                for split in split_keys
+                if int(split_counts[split]) > 0
+            },
         },
     }
+    for split, count in split_counts.items():
+        if int(count) <= 0:
+            continue
+        manifest["trajectories"][f"n_{split}"] = int(count)
     if subsample is not None:
         manifest["subsample"] = dict(subsample)
     (study_dir / "manifest.json").write_text(
@@ -254,15 +289,24 @@ def _ingest_one_csv(
     df = _ensure_set_split(df)
     df = _sort_and_assign_point_id(df)
 
-    n_train = int((df[SET_COL] == "train").sum())
-    n_test_temporal = int((df[SET_COL] == "test-temporal").sum())
-    n_test_individual = int((df[SET_COL] == "test-individual").sum())
-    n_held_out = n_test_temporal + n_test_individual
+    split_counts = _split_counts(df)
+    split_keys = _ordered_split_keys(list(split_counts.keys()))
+    n_train = int(split_counts.get("train", 0))
+    n_held_out = int(
+        sum(
+            count
+            for split, count in split_counts.items()
+            if split not in {"train", "unused"}
+        )
+    )
     if n_train == 0:
         raise ValueError("No train rows found after split assignment; cannot proceed.")
 
     n_points = int(len(df))
     n_individuals = int(df[INDIVIDUAL_COL].nunique())
+    split_summary = " ".join(
+        f"{split}={int(split_counts[split])}" for split in split_keys
+    )
 
     if compact_logs:
         before_p = int(subsample_info["n_points_before"])
@@ -271,7 +315,7 @@ def _ingest_one_csv(
         print(
             f"{log_prefix}{csv_path.name} -> {study_id} "
             f"points={n_points}/{before_p} individuals={n_individuals}/{before_i} stop={reason} "
-            f"split=train={n_train} test-temporal={n_test_temporal} test-individual={n_test_individual}"
+            f"split={split_summary}"
         )
     else:
         print(f"{log_prefix}csv_path:   {csv_path}")
@@ -288,14 +332,11 @@ def _ingest_one_csv(
         print(
             f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})"
         )
-        print(
-            f"{log_prefix}split:      "
-            f"train={n_train} test-temporal={n_test_temporal} test-individual={n_test_individual}"
-        )
+        print(f"{log_prefix}split:      {split_summary}")
 
     if n_held_out == 0:
         print(
-            f"{log_prefix}WARNING: no test rows found after split assignment (all points are train)."
+            f"{log_prefix}WARNING: no held-out rows found after split assignment (all points are train/unused)."
         )
 
     if dry_run:

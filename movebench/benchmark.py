@@ -241,6 +241,17 @@ def resolve_studies(cfg: dict[str, Any]) -> list[str]:
     return out
 
 
+def resolve_default_eval_split(study) -> str:
+    inventory = study.split_inventory()
+    held_out_splits = [str(split) for split in inventory["held_out_splits"]]
+    if not held_out_splits:
+        raise ValueError(f"Study {study.study_id!r} has no held-out splits.")
+    for split in ("test_temporal", "test_individual", "test"):
+        if split in held_out_splits:
+            return split
+    return held_out_splits[0]
+
+
 def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
     """Ensure rasters, parametric point store, and normalization stats exist; return sampler_hash."""
 
@@ -253,7 +264,7 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
         study.extract_point_features(
             layers_config=layers_config,
             sampler_config=sampler,
-            splits=["train", "test"],
+            splits=None,
             n_workers=int(setup_workers),
             skip_existing=True,
         )
@@ -262,14 +273,14 @@ def ensure_study_ready(*, study, cfg: dict[str, Any]) -> str:
             raise
         study.download_rasters(
             layers_config=layers_config,
-            splits=["train", "test"],
+            splits=None,
             n_workers=int(setup_workers),
             skip_existing=True,
         )
         study.extract_point_features(
             layers_config=layers_config,
             sampler_config=sampler,
-            splits=["train", "test"],
+            splits=None,
             n_workers=int(setup_workers),
             skip_existing=True,
         )
@@ -400,8 +411,9 @@ def _run_issf(
         if k in issf:
             ds_kwargs[k] = issf[k]
 
+    test_split = resolve_default_eval_split(study)
     train_ds = study.issf_dataset(split="train", **ds_kwargs)
-    test_ds = study.issf_dataset(split="test", **ds_kwargs)
+    test_ds = study.issf_dataset(split=test_split, **ds_kwargs)
 
     batch_size = int(issf.get("batch_size", None) or 1)
     steps_per_epoch = int(math.ceil(float(len(train_ds)) / float(batch_size)))
@@ -487,6 +499,7 @@ def _run_issf(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
+        "test_split_key": str(test_split),
         "checkpoint_path": str(ckpt_path),
     }
 
@@ -557,7 +570,8 @@ def run_deepssf(
         "sampler_config": load_sampler(cfg),
     }
     ds_kwargs_test = dict(ds_kwargs_train)
-    ds_kwargs_test["split"] = "test"
+    test_split = resolve_default_eval_split(study)
+    ds_kwargs_test["split"] = test_split
 
     for k in ("output_hw", "normalize"):
         if k not in dcfg:
@@ -719,6 +733,7 @@ def run_deepssf(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
+        "test_split_key": str(test_split),
         "checkpoint_path": str(ckpt_path),
     }
 
@@ -753,8 +768,9 @@ def run_moveformer(
     if "subset_band_ids" in dcfg:
         ds_kwargs["subset_band_ids"] = dcfg["subset_band_ids"]
 
+    test_split = resolve_default_eval_split(study)
     train_ds = study.moveformer_dataset(split="train", **ds_kwargs)
-    test_ds = study.moveformer_dataset(split="test", **ds_kwargs)
+    test_ds = study.moveformer_dataset(split=test_split, **ds_kwargs)
 
     train_loader, test_loader = _make_loaders(
         ds_train=train_ds,
@@ -830,6 +846,7 @@ def run_moveformer(
         "fit": fit,
         "train": train_metrics,
         "test": test_metrics,
+        "test_split_key": str(test_split),
         "checkpoint_path": str(ckpt_path),
     }
 

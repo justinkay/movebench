@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,7 @@ from movebench.layers.plan import LayerPlan
 from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
+    canonicalize_split_key,
     IntervalStepSupport,
     fit_interval_step_support,
     load_trajectories_csv,
@@ -33,6 +35,7 @@ def _rows_for_raster_downloads(
     plan: LayerPlan,
     support: IntervalStepSupport,
 ) -> pd.DataFrame:
+    splits = [canonicalize_split_key(split) for split in splits]
     sub = df[df[SET_COL].isin(splits)].copy()
     if len(sub) == 0:
         return sub
@@ -46,6 +49,52 @@ def _rows_for_raster_downloads(
         return sub.iloc[0:0].copy()
     wanted = set(starts["point_id_start"].astype(int).tolist())
     return sub[sub[POINT_ID_COL].astype(int).isin(wanted)].copy()
+
+
+def _normalize_split_keys(split_keys: list[object]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in split_keys:
+        split = canonicalize_split_key(raw)
+        if not split or split == "unused" or split in seen:
+            continue
+        out.append(split)
+        seen.add(split)
+    return out
+
+
+def _build_split_inventory(split_keys: list[object]) -> dict[str, object]:
+    ordered = _normalize_split_keys(list(split_keys))
+    held_out = [split for split in ordered if split != "train"]
+    return {
+        "has_train": "train" in ordered,
+        "split_keys": ordered,
+        "held_out_splits": held_out,
+    }
+
+
+def _manifest_split_keys_from_count_fields(
+    trajectories: dict[str, object],
+) -> list[str] | None:
+    raw_split_keys: list[str] = []
+    for key, value in trajectories.items():
+        key_str = str(key)
+        if not key_str.startswith("n_"):
+            continue
+        raw_split = canonicalize_split_key(key_str[2:])
+        if raw_split in {"", "points", "individuals"}:
+            continue
+        if int(value or 0) <= 0:
+            continue
+        raw_split_keys.append(raw_split)
+
+    if not raw_split_keys:
+        return None
+
+    ordered = [split for split in raw_split_keys if split != "train"]
+    if "train" in raw_split_keys:
+        ordered.insert(0, "train")
+    return ordered
 
 
 @dataclass(frozen=True)
@@ -68,12 +117,50 @@ class Study:
     def trajectories_path(self) -> Path:
         return self.study_dir / "trajectories.csv"
 
+    @property
+    def manifest_path(self) -> Path:
+        return self.study_dir / "manifest.json"
+
     @classmethod
     def list_available(cls) -> list[str]:
         root = paths.studies_root()
         if not root.exists():
             return []
         return sorted([p.name for p in root.iterdir() if p.is_dir()])
+
+    def split_inventory(self) -> dict[str, object]:
+        if self.manifest_path.exists():
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            trajectories = manifest.get("trajectories", {})
+            if not isinstance(trajectories, dict):
+                raise ValueError(
+                    f"Study manifest missing trajectories metadata: {self.manifest_path}"
+                )
+
+            split_keys = trajectories.get("split_keys")
+            if split_keys is not None:
+                return _build_split_inventory(split_keys)
+
+            split_counts = trajectories.get("split_counts")
+            if isinstance(split_counts, dict):
+                filtered = [
+                    str(split)
+                    for split, count in split_counts.items()
+                    if int(count or 0) > 0
+                ]
+                return _build_split_inventory(filtered)
+
+            manifest_split_keys = _manifest_split_keys_from_count_fields(trajectories)
+            if manifest_split_keys is not None:
+                return _build_split_inventory(manifest_split_keys)
+
+        df = load_trajectories_csv(self.trajectories_path)
+        if SET_COL not in df.columns:
+            return _build_split_inventory([])
+        split_keys = (
+            df[SET_COL].dropna().astype(str).drop_duplicates().tolist()
+        )
+        return _build_split_inventory(split_keys)
 
     def layer_plan(
         self, layers_config: str | Path = "configs/layers/all.yaml"
@@ -119,7 +206,11 @@ class Study:
         resolution_buffer_m = float(extent_buffer_m)
 
         if splits is None:
-            splits = sorted(df[SET_COL].dropna().unique().tolist())
+            splits = list(self.split_inventory()["split_keys"])
+            if not splits:
+                splits = sorted(df[SET_COL].dropna().unique().tolist())
+        else:
+            splits = [canonicalize_split_key(split) for split in splits]
         download_df = _rows_for_raster_downloads(
             df,
             splits=splits,
@@ -195,6 +286,10 @@ class Study:
 
         plan = self.layer_plan(layers_config)
         sampler = _load_sampler(sampler_config)
+        if splits is None:
+            splits = list(self.split_inventory()["split_keys"])
+        else:
+            splits = [canonicalize_split_key(split) for split in splits]
         return extract_point_feature_stores(
             study_id=self.study_id,
             study_dir=self.study_dir,

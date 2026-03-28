@@ -291,14 +291,24 @@ def _resolve_run_sampler_hash(run: _ExtractionRun) -> str:
     return resolve_sampler_hash(run.sampler)
 
 
-def _is_complete(*, study_dir: Path, run: _ExtractionRun) -> tuple[bool, str]:
+def _default_splits(study: Study) -> list[str]:
+    split_keys = [str(split) for split in study.split_inventory()["split_keys"]]
+    return split_keys or ["train"]
+
+
+def _is_complete(
+    *,
+    study_dir: Path,
+    run: _ExtractionRun,
+    splits: list[str],
+) -> tuple[bool, str]:
     from movebench.features.points import (
         point_store_manifest_path,
         point_store_train_stats_path,
     )
 
     sampler_hash = _resolve_run_sampler_hash(run)
-    for split in ("train", "test"):
+    for split in list(splits):
         manifest_path = point_store_manifest_path(
             study_dir=study_dir,
             split=split,
@@ -383,8 +393,13 @@ def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
             return 2
 
     study = Study(str(study_id))
+    splits = _default_splits(study)
 
-    done, sampler_hash = _is_complete(study_dir=study.study_dir, run=run)
+    done, sampler_hash = _is_complete(
+        study_dir=study.study_dir,
+        run=run,
+        splits=splits,
+    )
     if done:
         print(
             f"[extract] study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path} "
@@ -396,7 +411,7 @@ def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
             rep = study.extract_point_features(
                 layers_config=layers_config,
                 sampler_config=run.sampler,
-                splits=["train", "test"],
+                splits=splits,
                 n_workers=int(n_workers),
                 skip_existing=True,
             )
@@ -514,7 +529,9 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
             )
             continue
 
+        study = Study(str(study_id))
         study_dir = paths.study_dir(str(study_id))
+        splits = _default_splits(study)
         if _uses_gee_layers(run.plan):
             rasters_root = _rasters_root_for(run.plan, study_dir=study_dir)
             if not rasters_root.exists():
@@ -526,7 +543,11 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
                 )
                 continue
 
-        done, _sampler_hash = _is_complete(study_dir=study_dir, run=run)
+        done, _sampler_hash = _is_complete(
+            study_dir=study_dir,
+            run=run,
+            splits=splits,
+        )
         if done:
             skipped.append(
                 f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}"

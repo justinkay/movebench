@@ -52,6 +52,7 @@ from movebench.trajectories import (
     POINT_ID_COL,
     SET_COL,
     TIME_COL,
+    canonicalize_split_key,
 )
 
 _ee_initialized = False
@@ -1263,6 +1264,8 @@ def download_chips(
 
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
+    else:
+        splits = [canonicalize_split_key(split) for split in splits]
 
     _require_columns(df, [LON_COL, LAT_COL, TIME_COL, SET_COL, POINT_ID_COL])
 

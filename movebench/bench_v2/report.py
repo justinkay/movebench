@@ -15,7 +15,7 @@ import movebench.bench_v2.config as bench_config
 import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.run as bench_run
 
-EXPECTED_HELD_OUT_SPLITS = ["test-temporal", "test-individual"]
+EXPECTED_HELD_OUT_SPLITS = ["test_temporal", "test_individual"]
 TIMESCALE_ORDER = ["1h", "12h", "1d", "7d"]
 METHOD_ORDER = list(bench_config.METHODS.keys())
 COVARIATE_ORDER = list(bench_config.COVARIATE_SETS.keys())
@@ -92,7 +92,7 @@ def _covariate_label(covariate_key: str) -> str:
 
 
 def _split_label(split_key: str) -> str:
-    return str(split_key).replace("-", " ")
+    return str(split_key).replace("-", " ").replace("_", " ")
 
 
 def _expanded_checked_in_experiments() -> list[dict[str, object]]:

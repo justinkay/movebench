@@ -22,12 +22,13 @@ from movebench.features.points import (
 )
 from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
+from movebench.trajectories import canonicalize_split_key
 
 import movebench.bench_v2.mlflow as bench_mlflow
 import movebench.bench_v2.config as bench_config
 from movebench.bench_v2.mlflow import search_latest_runs_by_key
 
-PREFERRED_EARLY_STOP_SPLITS = ["test-temporal", "test-individual"]
+PREFERRED_EARLY_STOP_SPLITS = ["test_temporal", "test_individual"]
 _SUPPORTED_METHODS = {
     "baseline_nomove",
     "baseline_constvel",
@@ -103,47 +104,26 @@ def _resolve_studies(
 
 
 def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
-    study_dir = paths.study_dir(study_id)
-    manifest_path = study_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Study manifest.json not found: {manifest_path}")
+    from movebench.study import Study
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    trajectories = manifest.get("trajectories", {})
-    if not isinstance(trajectories, dict):
-        raise ValueError(f"Study manifest missing trajectories metadata: {manifest_path}")
-
-    seen: list[str] = []
-    if int(trajectories.get("n_train", 0) or 0) > 0:
-        seen.append("train")
-    if int(trajectories.get("n_test_temporal", 0) or 0) > 0:
-        seen.append("test-temporal")
-    if int(trajectories.get("n_test_individual", 0) or 0) > 0:
-        seen.append("test-individual")
-
+    inventory = Study(study_id).split_inventory()
+    split_keys = [str(split) for split in inventory["split_keys"]]
     extras = [
         split
-        for split in seen
+        for split in split_keys
         if split not in {"train", *PREFERRED_EARLY_STOP_SPLITS}
     ]
     ordered = [
-        split for split in PREFERRED_EARLY_STOP_SPLITS if split in seen
+        split for split in PREFERRED_EARLY_STOP_SPLITS if split in split_keys
     ] + extras
-    has_manifest_counts = any(
-        key in trajectories for key in ("n_train", "n_test_temporal", "n_test_individual")
-    )
-    if not has_manifest_counts:
-        raise ValueError(
-            f"Study manifest missing split counts: {manifest_path} "
-            "(expected n_train, n_test_temporal, n_test_individual)"
-        )
     return {
-        "has_train": "train" in seen,
+        "has_train": bool(inventory["has_train"]),
         "held_out_splits": ordered,
     }
 
 
 def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
+    split = canonicalize_split_key(split)
     timescale = bench_config.resolve_timescale(timescale_key)
     manifest_path = point_store_manifest_path(
         study_dir=paths.study_dir(study_id),
@@ -174,6 +154,7 @@ def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[st
 
 
 def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
+    split = canonicalize_split_key(split)
     cache_hash = bench_config.deepssf_cache_hash_for_split(timescale_key, split)
     cache_dir = paths.study_dir(study_id) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
     manifest_path = cache_dir / "manifest.json"

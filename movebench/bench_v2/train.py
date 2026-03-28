@@ -54,7 +54,7 @@ def run_training_loop(
     _seed_everything(int(config.seed))
 
     early_stop_split_key = str(
-        getattr(runtime, "early_stop_split_key", "test-temporal")
+        getattr(runtime, "early_stop_split_key", "test_temporal")
     )
     early_stop_metric = str(getattr(runtime, "early_stop_metric", "nll"))
 

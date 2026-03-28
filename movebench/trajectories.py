@@ -26,6 +26,10 @@ POINT_ID_COL = "point_id"
 OUTLIER_COL = "manually-marked-outlier"
 
 
+def canonicalize_split_key(split_key: object) -> str:
+    return str(split_key).strip().replace("-", "_")
+
+
 @dataclass(frozen=True)
 class IntervalGapCutoffs:
     per_individual: dict[object, pd.Timedelta]
@@ -109,6 +113,12 @@ def load_trajectories_csv(
 ) -> pd.DataFrame:
     """Load trajectories.csv with early outlier filtering and timestamp parsing."""
     df = pd.read_csv(path)
+    if SET_COL in df.columns:
+        split_mask = df[SET_COL].notna()
+        if bool(split_mask.any()):
+            df.loc[split_mask, SET_COL] = df.loc[split_mask, SET_COL].map(
+                canonicalize_split_key
+            )
     if bool(drop_manual_outliers) and OUTLIER_COL in df.columns:
         df = df.loc[~_is_manual_outlier(df[OUTLIER_COL])].copy()
     df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")

@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from movebench.features.points import (
 )
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
+from movebench.trajectories import canonicalize_split_key
 
 _REPO_ROOT = bootstrap.REPO_ROOT
 
@@ -69,12 +71,9 @@ def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
 
 
 def _parse_splits(val: str) -> list[str]:
-    out = [p.strip() for p in str(val).split(",") if p.strip()]
+    out = [canonicalize_split_key(p) for p in str(val).split(",") if p.strip()]
     if not out:
-        raise ValueError("--splits must be a comma-separated list like 'train,test'")
-    bad = [s for s in out if s not in {"train", "test"}]
-    if bad:
-        raise ValueError(f"Unknown split(s) {bad}. Expected 'train' and/or 'test'.")
+        raise ValueError("--splits must be a comma-separated list like 'train,test_temporal'")
     return out
 
 
@@ -102,8 +101,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--splits",
         type=_parse_splits,
-        default="train,test",
-        help="Comma-separated splits: train,test",
+        default=None,
+        help="Optional comma-separated splits. Default: use the study's default split list.",
     )
 
     p.add_argument(
@@ -441,10 +440,10 @@ def _build_srun_cmd(
             str(config_path),
             "--study",
             str(study_id),
-            "--splits",
-            ",".join(splits),
         ]
     )
+    if splits:
+        cmd.extend(["--splits", ",".join(splits)])
 
     # Pass cache params explicitly so workers match launcher skip logic.
     cmd.extend(
@@ -497,9 +496,12 @@ def _worker(args: argparse.Namespace) -> int:
 
     ds_kwargs = _deepssf_ds_kwargs(cfg, sampler=issf_sampler)
     study = Study(str(args.study))
+    splits = list(args.splits) if args.splits is not None else [
+        str(split) for split in study.split_inventory()["split_keys"]
+    ]
 
     cache_dirs: list[str] = []
-    for split in list(args.splits):
+    for split in splits:
         cache_dir, _m = ensure_deepssf_wds_cache_split(
             study=study,
             split=str(split),
@@ -519,7 +521,7 @@ def _worker(args: argparse.Namespace) -> int:
 
     print(
         f"[wds] OK study_id={args.study} rasters_hash={plan.rasters_hash} "
-        f"sampler_hash={sampler_hash} splits={args.splits} cache_dirs={cache_dirs}",
+        f"sampler_hash={sampler_hash} splits={splits} cache_dirs={cache_dirs}",
         flush=True,
     )
     return 0
@@ -576,12 +578,18 @@ def _launcher(args: argparse.Namespace) -> int:
             blocked.append((str(study_id), reason))
             continue
 
+        study = Study(str(study_id))
+        splits = (
+            list(args.splits)
+            if args.splits is not None
+            else [str(split) for split in study.split_inventory()["split_keys"]]
+        )
         ds_kwargs = _deepssf_ds_kwargs(cfg, sampler=issf_sampler)
         need = False
         if cache_params.overwrite:
             need = True
         else:
-            for split in list(args.splits):
+            for split in splits:
                 mpth = _expected_cache_manifest(
                     study_dir=paths.study_dir(str(study_id)),
                     plan=plan,
@@ -613,11 +621,17 @@ def _launcher(args: argparse.Namespace) -> int:
                 flush=True,
             )
             for sid in queue[:10]:
+                study = Study(str(sid))
+                splits = (
+                    list(args.splits)
+                    if args.splits is not None
+                    else [str(split) for split in study.split_inventory()["split_keys"]]
+                )
                 cmd = _build_srun_cmd(
                     args=args,
                     study_id=sid,
                     config_path=str(args.config),
-                    splits=list(args.splits),
+                    splits=splits,
                     log_dir=log_dir,
                     cache_params=cache_params,
                     cpus_per_task=cpus_per_task,
@@ -648,7 +662,14 @@ def _launcher(args: argparse.Namespace) -> int:
             args=args,
             study_id=study_id,
             config_path=str(args.config),
-            splits=list(args.splits),
+            splits=(
+                list(args.splits)
+                if args.splits is not None
+                else [
+                    str(split)
+                    for split in Study(str(study_id)).split_inventory()["split_keys"]
+                ]
+            ),
             log_dir=log_dir,
             cache_params=cache_params,
             cpus_per_task=cpus_per_task,

@@ -31,6 +31,7 @@ from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY
 from movebench.trajectories import (
     SET_COL,
+    canonicalize_split_key,
     compute_step_length_extent_m,
     fit_interval_step_support,
     load_trajectories_csv,
@@ -108,7 +109,13 @@ def resolve_sampler_hash(sampler: SamplerConfig | dict[str, Any]) -> str:
 
 
 def point_stores_dir(*, study_dir: Path, split: str, rasters_hash: str) -> Path:
-    return Path(study_dir) / "features" / "points" / str(split) / str(rasters_hash)
+    return (
+        Path(study_dir)
+        / "features"
+        / "points"
+        / canonicalize_split_key(split)
+        / str(rasters_hash)
+    )
 
 
 def point_store_dir(
@@ -154,6 +161,7 @@ def load_point_store_manifest(
     rasters_hash: str,
     sampler_hash: str,
 ) -> tuple[Path, PointFeatureManifest]:
+    split = canonicalize_split_key(split)
     store_dir = point_store_dir(
         study_dir=study_dir,
         split=split,
@@ -1098,6 +1106,8 @@ def extract_point_feature_stores(
     df = load_trajectories_csv(Path(trajectories_path))
     if splits is None:
         splits = sorted(df[SET_COL].dropna().unique().tolist())
+    else:
+        splits = [canonicalize_split_key(split) for split in splits]
 
     # Match download_rasters(): select interval starts once over the combined
     # requested splits, then partition by the start row's split.
