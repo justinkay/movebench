@@ -35,11 +35,14 @@ def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
 
 def _format_study_download_summary(name: str, result: dict[str, Any] | None) -> str:
     failed = 0
+    report_path: str | None = None
     if not isinstance(result, dict):
         chip_present = 0
         tile_present = 0
     else:
         chip_stats = result.get("chips")
+        if isinstance(chip_stats, dict) and chip_stats.get("report_path"):
+            report_path = str(chip_stats["report_path"])
         failed += (
             int(chip_stats.get("failed", 0)) if isinstance(chip_stats, dict) else 0
         )
@@ -65,6 +68,8 @@ def _format_study_download_summary(name: str, result: dict[str, Any] | None) -> 
     msg = f"{status} {name}: {chip_present} chips, {tile_present} tiles present"
     if failed > 0:
         msg += f", {failed} failures"
+        if report_path:
+            msg += f", report={report_path}"
     return msg
 
 

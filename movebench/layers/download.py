@@ -34,6 +34,11 @@ from rasterio.enums import ColorInterp
 from rasterio.merge import merge as rasterio_merge
 from tqdm import tqdm
 
+from movebench.download_reports import (
+    chip_request_hash,
+    update_request_status,
+    write_chip_download_report,
+)
 from movebench.layers.constants import (
     GEE_NODATA_SENTINEL,
     METERS_PER_DEG_LAT,
@@ -796,8 +801,7 @@ def _require_columns(
 
 
 def _chip_request_hash(point_ids: list[int]) -> str:
-    payload = {"point_ids": sorted({int(pid) for pid in point_ids})}
-    return _stable_hash_dict(payload)
+    return chip_request_hash(point_ids)
 
 
 def _normalize_chip_group_completions(
@@ -1334,6 +1338,7 @@ def download_chips(
     requested_splits = sorted(
         {str(x) for x in sub[SET_COL].dropna().astype(str).tolist()}
     )
+    started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     if skip_existing:
         can_skip_all = all(
@@ -1342,12 +1347,44 @@ def download_chips(
             for group_name in plan.chip_groups.keys()
         )
         if can_skip_all:
+            completed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            chip_group_stats = {
+                group_name: {
+                    "downloaded": 0,
+                    "existing": len(reqs),
+                    "failed": 0,
+                    "failures": [],
+                }
+                for group_name in plan.chip_groups.keys()
+            }
+            report_path = write_chip_download_report(
+                study_dir=study_dir,
+                rasters_hash=plan.rasters_hash,
+                request_hash=request_hash,
+                requested_splits=requested_splits,
+                requested_point_count=len(reqs),
+                started_at=started_at,
+                completed_at=completed_at,
+                chip_groups=chip_group_stats,
+                status="ok",
+            )
+            update_request_status(
+                meta,
+                request_hash=request_hash,
+                status="ok",
+                report_path=report_path,
+                completed_at=completed_at,
+            )
+            _write_json_atomic(meta_path, meta)
             return {
                 "total_points": len(reqs),
                 "downloaded": 0,
                 "existing": len(reqs) * len(plan.chip_groups),
                 "failed": 0,
                 "failures": [],
+                "report_path": str(report_path),
+                "request_hash": request_hash,
+                "status": "ok",
             }
 
     # Ensure output dirs exist up front (avoids races on first write).
@@ -1386,8 +1423,12 @@ def download_chips(
         "failed": 0,
         "failures": [],
     }
-    group_success_counts = {group_name: 0 for group_name in plan.chip_groups.keys()}
+    group_downloaded_counts = {
+        group_name: 0 for group_name in plan.chip_groups.keys()
+    }
+    group_existing_counts = {group_name: 0 for group_name in plan.chip_groups.keys()}
     group_failed = {group_name: False for group_name in plan.chip_groups.keys()}
+    group_failures = {group_name: [] for group_name in plan.chip_groups.keys()}
     for r in results:
         files = r.get("files", {})
         for group_name in plan.chip_groups.keys():
@@ -1399,20 +1440,25 @@ def download_chips(
             )
             if status == "downloaded":
                 stats["downloaded"] += 1
-                group_success_counts[group_name] += 1
+                group_downloaded_counts[group_name] += 1
             elif status == "existing":
                 stats["existing"] += 1
-                group_success_counts[group_name] += 1
+                group_existing_counts[group_name] += 1
             else:
                 stats["failed"] += 1
                 group_failed[group_name] = True
-                stats["failures"].append(
+                failure = {
+                    "point_id": r.get("point_id"),
+                    "group": group_name,
+                    "error": info.get("error", "unknown")
+                    if isinstance(info, dict)
+                    else "missing_result",
+                }
+                stats["failures"].append(failure)
+                group_failures[group_name].append(
                     {
-                        "point_id": r.get("point_id"),
-                        "group": group_name,
-                        "error": info.get("error", "unknown")
-                        if isinstance(info, dict)
-                        else "missing_result",
+                        "point_id": failure["point_id"],
+                        "error": failure["error"],
                     }
                 )
 
@@ -1424,7 +1470,9 @@ def download_chips(
     for group_name in plan.chip_groups.keys():
         group_records = chip_group_completions.get(group_name)
         is_complete = (
-            group_success_counts.get(group_name, 0) == len(reqs)
+            group_downloaded_counts.get(group_name, 0)
+            + group_existing_counts.get(group_name, 0)
+            == len(reqs)
         ) and not group_failed.get(group_name, False)
         if is_complete:
             if group_records is None:
@@ -1444,7 +1492,38 @@ def download_chips(
         meta["chip_group_completions"] = chip_group_completions
     else:
         meta.pop("chip_group_completions", None)
+    report_status = "failed" if stats["failed"] > 0 else "ok"
+    chip_group_stats = {
+        group_name: {
+            "downloaded": group_downloaded_counts[group_name],
+            "existing": group_existing_counts[group_name],
+            "failed": len(group_failures[group_name]),
+            "failures": group_failures[group_name],
+        }
+        for group_name in plan.chip_groups.keys()
+    }
+    report_path = write_chip_download_report(
+        study_dir=study_dir,
+        rasters_hash=plan.rasters_hash,
+        request_hash=request_hash,
+        requested_splits=requested_splits,
+        requested_point_count=len(reqs),
+        started_at=started_at,
+        completed_at=completed_at,
+        chip_groups=chip_group_stats,
+        status=report_status,
+    )
+    update_request_status(
+        meta,
+        request_hash=request_hash,
+        status=report_status,
+        report_path=report_path,
+        completed_at=completed_at,
+    )
     _write_json_atomic(meta_path, meta)
+    stats["report_path"] = str(report_path)
+    stats["request_hash"] = request_hash
+    stats["status"] = report_status
 
     return stats
 def download_tile_layer(

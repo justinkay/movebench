@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any
 
 from movebench import paths
+from movebench.download_reports import (
+    load_chip_request_status_for_extract,
+    summarize_failed_chip_report,
+)
 from movebench.features.config import SamplerConfig, load_sampler_config
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
@@ -240,6 +244,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print actions/commands but do not submit jobs.",
     )
+    p.add_argument(
+        "--allow-known-download-failures",
+        action="store_true",
+        help="Proceed even if the latest matching chip download report is marked failed.",
+    )
     args = p.parse_args(argv)
 
     raw_layers = args.layers_configs or [[str(default_layers_config)]]
@@ -294,6 +303,21 @@ def _resolve_run_sampler_hash(run: _ExtractionRun) -> str:
 def _default_splits(study: Study) -> list[str]:
     split_keys = [str(split) for split in study.split_inventory()["split_keys"]]
     return split_keys or ["train"]
+
+
+def _known_download_failure_reason(status: dict[str, Any] | None) -> str:
+    if not isinstance(status, dict):
+        return ""
+    parts: list[str] = []
+    report_path = status.get("report_path")
+    if report_path:
+        parts.append(f"known_download_failures_report={report_path}")
+    report = status.get("report")
+    if isinstance(report, dict):
+        summary = summarize_failed_chip_report(report)
+        if summary:
+            parts.append(summary)
+    return " ".join(parts)
 
 
 def _is_complete(
@@ -371,26 +395,24 @@ def _build_srun_cmd(
             str(int(args.n_workers)),
         ]
     )
+    if bool(getattr(args, "allow_known_download_failures", False)):
+        cmd.append("--allow-known-download-failures")
     return cmd
 
 
-def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
+def _worker_one(
+    *,
+    study_id: str,
+    run: _ExtractionRun,
+    n_workers: int,
+    allow_known_download_failures: bool = False,
+) -> int:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
     plan = run.plan
     sampler = run.sampler
     layers_config = str(run.layers_config_path)
-
-    if _uses_gee_layers(plan):
-        rasters_root = _rasters_root_for(plan, study_dir=paths.study_dir(str(study_id)))
-        if not rasters_root.exists():
-            print(
-                f"[extract] ERROR: rasters cache missing for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}. "
-                f"Expected: {rasters_root}. Prepare rasters on a login node first (no downloads in this script).",
-                file=sys.stderr,
-            )
-            return 2
 
     study = Study(str(study_id))
     splits = _default_splits(study)
@@ -407,6 +429,44 @@ def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
             flush=True,
         )
     else:
+        request_status = None
+        if _uses_gee_layers(plan):
+            rasters_root = _rasters_root_for(
+                plan, study_dir=paths.study_dir(str(study_id))
+            )
+            if not rasters_root.exists():
+                print(
+                    f"[extract] ERROR: rasters cache missing for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}. "
+                    f"Expected: {rasters_root}. Prepare rasters on a login node first (no downloads in this script).",
+                    file=sys.stderr,
+                )
+                return 2
+            request_status = load_chip_request_status_for_extract(
+                study=study,
+                plan=plan,
+                splits=splits,
+            )
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and not allow_known_download_failures
+            ):
+                print(
+                    f"[extract] ERROR: known download failures for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}. "
+                    f"{_known_download_failure_reason(request_status)}",
+                    file=sys.stderr,
+                )
+                return 2
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and allow_known_download_failures
+            ):
+                print(
+                    f"[extract] WARNING: proceeding despite known download failures for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}. "
+                    f"{_known_download_failure_reason(request_status)}",
+                    file=sys.stderr,
+                )
         try:
             rep = study.extract_point_features(
                 layers_config=layers_config,
@@ -424,8 +484,10 @@ def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
                     file=sys.stderr,
                 )
             else:
+                reason = _known_download_failure_reason(request_status)
                 print(
-                    f"[extract] ERROR: extraction failed for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}: {e}",
+                    f"[extract] ERROR: extraction failed for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}: {e}"
+                    + (f" ({reason})" if reason else ""),
                     file=sys.stderr,
                 )
             return 2
@@ -452,10 +514,21 @@ def _worker_one(*, study_id: str, run: _ExtractionRun, n_workers: int) -> int:
     return 0
 
 
-def _worker(*, study_id: str, runs: list[_ExtractionRun], n_workers: int) -> int:
+def _worker(
+    *,
+    study_id: str,
+    runs: list[_ExtractionRun],
+    n_workers: int,
+    allow_known_download_failures: bool = False,
+) -> int:
     failures: list[str] = []
     for run in runs:
-        rc = _worker_one(study_id=study_id, run=run, n_workers=n_workers)
+        rc = _worker_one(
+            study_id=study_id,
+            run=run,
+            n_workers=n_workers,
+            allow_known_download_failures=allow_known_download_failures,
+        )
         if rc != 0:
             failures.append(
                 f"layers={run.layers_config_path} sampler={run.sampler_config_path}"
@@ -508,7 +581,7 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
     if not base_log_dir.is_absolute():
         base_log_dir = (_REPO_ROOT / base_log_dir).resolve()
 
-    blocked: list[tuple[str, Path]] = []
+    blocked: list[tuple[str, str]] = []
     skipped: list[str] = []
     queue: list[tuple[str, _ExtractionRun]] = []
     missing_studies: set[str] = set()
@@ -532,17 +605,6 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
         study = Study(str(study_id))
         study_dir = paths.study_dir(str(study_id))
         splits = _default_splits(study)
-        if _uses_gee_layers(run.plan):
-            rasters_root = _rasters_root_for(run.plan, study_dir=study_dir)
-            if not rasters_root.exists():
-                blocked.append(
-                    (
-                        f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}",
-                        rasters_root,
-                    )
-                )
-                continue
-
         done, _sampler_hash = _is_complete(
             study_dir=study_dir,
             run=run,
@@ -552,8 +614,47 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
             skipped.append(
                 f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}"
             )
-        else:
-            queue.append((str(study_id), run))
+            continue
+
+        if _uses_gee_layers(run.plan):
+            rasters_root = _rasters_root_for(run.plan, study_dir=study_dir)
+            if not rasters_root.exists():
+                blocked.append(
+                    (
+                        f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}",
+                        f"missing_rasters_root={rasters_root}",
+                    )
+                )
+                continue
+            request_status = load_chip_request_status_for_extract(
+                study=study,
+                plan=run.plan,
+                splits=splits,
+            )
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and not bool(args.allow_known_download_failures)
+            ):
+                blocked.append(
+                    (
+                        f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}",
+                        _known_download_failure_reason(request_status),
+                    )
+                )
+                continue
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and bool(args.allow_known_download_failures)
+            ):
+                print(
+                    f"[extract] WARNING: proceeding despite known download failures for study={study_id!r} layers={run.layers_config_path!r} sampler={run.sampler_config_path!r}. "
+                    f"{_known_download_failure_reason(request_status)}",
+                    file=sys.stderr,
+                )
+
+        queue.append((str(study_id), run))
 
     unique_studies = sorted({study_id for study_id, _ in requested})
 
@@ -564,9 +665,9 @@ def _launcher(args: argparse.Namespace, runs: list[_ExtractionRun]) -> int:
         flush=True,
     )
     if blocked:
-        for item_label, expected in blocked:
+        for item_label, reason in blocked:
             print(
-                f"[extract] BLOCKED {item_label} missing_rasters_root={expected}",
+                f"[extract] BLOCKED {item_label} {reason}",
                 file=sys.stderr,
             )
 
@@ -716,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
             study_id=str(args.study),
             runs=runs,
             n_workers=int(args.n_workers),
+            allow_known_download_failures=bool(args.allow_known_download_failures),
         )
     return _launcher(args, runs)
 

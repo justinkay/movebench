@@ -3,8 +3,34 @@ from __future__ import annotations
 import argparse
 import os
 
+from movebench.download_reports import (
+    load_chip_request_status_for_extract,
+    summarize_failed_chip_report,
+)
 from movebench.features.config import load_sampler_config
+from movebench.layers import REGISTRY
+from movebench.layers.config import load_layers_config
 from movebench.study import Study
+
+
+def _default_splits(study: Study) -> list[str]:
+    split_keys = [str(split) for split in study.split_inventory()["split_keys"]]
+    return split_keys or ["train"]
+
+
+def _known_download_failure_suffix(status: dict[str, object] | None) -> str:
+    if not isinstance(status, dict):
+        return ""
+    parts: list[str] = []
+    report_path = status.get("report_path")
+    if report_path:
+        parts.append(f"report={report_path}")
+    report = status.get("report")
+    if isinstance(report, dict):
+        summary = summarize_failed_chip_report(report)
+        if summary:
+            parts.append(summary)
+    return " ".join(parts)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -50,6 +76,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Do not skip existing point stores on disk.",
     )
     parser.add_argument(
+        "--allow-known-download-failures",
+        action="store_true",
+        help="Proceed even if the latest matching chip download report is marked failed.",
+    )
+    parser.add_argument(
         "--data-root",
         default=None,
         help="Override MOVEBENCH_DATA_ROOT for this run.",
@@ -69,6 +100,7 @@ def run(args: argparse.Namespace) -> int:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
     sampler = load_sampler_config(args.sampler_config)
+    plan = REGISTRY.resolve(load_layers_config(args.layers_config))
 
     all_names = Study.list_available()
 
@@ -98,18 +130,53 @@ def run(args: argparse.Namespace) -> int:
             continue
 
         print(f"[{i}/{len(names)}] Extracting {name}...")
+        request_status = None
         try:
             study = Study(name)
+            resolved_splits = (
+                [str(split) for split in args.splits]
+                if args.splits
+                else _default_splits(study)
+            )
+            request_status = load_chip_request_status_for_extract(
+                study=study,
+                plan=plan,
+                splits=resolved_splits,
+            )
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and not bool(args.allow_known_download_failures)
+            ):
+                any_failed = True
+                print(
+                    "  ERROR: known download failures for this extract request; "
+                    + _known_download_failure_suffix(request_status)
+                )
+                continue
+            if (
+                isinstance(request_status, dict)
+                and str(request_status.get("status")) == "failed"
+                and bool(args.allow_known_download_failures)
+            ):
+                print(
+                    "  WARN: proceeding despite known download failures; "
+                    + _known_download_failure_suffix(request_status)
+                )
             study.extract_point_features(
                 layers_config=args.layers_config,
                 sampler_config=args.sampler_config,
-                splits=args.splits,
+                splits=resolved_splits,
                 n_workers=int(args.n_workers),
                 skip_existing=not bool(args.no_skip_existing),
             )
         except Exception as e:
             any_failed = True
-            print(f"  ERROR: {e}")
+            suffix = _known_download_failure_suffix(request_status)
+            if suffix:
+                print(f"  ERROR: {e} ({suffix})")
+            else:
+                print(f"  ERROR: {e}")
 
     print("\nDone.")
     return 2 if any_failed else 0
