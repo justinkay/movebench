@@ -14,13 +14,15 @@ from torch.utils.data import Dataset
 
 from pyproj import Transformer
 
-from movebench.datasets.ssf import _compute_movement_stats, _subset_plan_env_channels
+from movebench.datasets.ssf import (
+    _movement_stats_from_reader,
+    _subset_plan_env_channels,
+)
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (
-    load_point_store_bands,
+    PointStoreReader,
     load_point_store_manifest,
-    load_point_store_shared,
     resolve_sampler_hash,
 )
 from movebench.layers.constants import WGS84_CRS
@@ -116,6 +118,7 @@ class MoveFormerPointStoreDataset(Dataset):
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
     ) -> None:
+        del trajectories_path
         super().__init__()
         if str(sampler_config.type) != "parametric":
             raise ValueError(
@@ -123,7 +126,6 @@ class MoveFormerPointStoreDataset(Dataset):
             )
 
         self.study_dir = Path(study_dir)
-        self.trajectories_path = Path(trajectories_path)
         self.split = str(split)
         self.context_splits = list(
             dict.fromkeys(
@@ -139,12 +141,11 @@ class MoveFormerPointStoreDataset(Dataset):
         self.normalize_env = bool(normalize_env)
         self.require_normalization_stats = bool(require_normalization_stats)
 
-        _idxs, view_plan = _subset_plan_env_channels(
+        _indices, self.plan = _subset_plan_env_channels(
             plan,
             subset_env_layers=None,
             subset_band_ids=subset_band_ids,
         )
-        self.plan = view_plan
         self.cov_dim = int(self.plan.num_channels())
         self._band_ids = self.plan.band_ids_in_order()
         sampler_hash = resolve_sampler_hash(sampler_config)
@@ -159,17 +160,14 @@ class MoveFormerPointStoreDataset(Dataset):
         self.manifest = target_manifest
         target_selected_splits = _manifest_selected_splits(target_manifest)
 
-        train_store_dir, _train_manifest = load_point_store_manifest(
+        train_store_dir, train_manifest = load_point_store_manifest(
             study_dir=self.study_dir,
             split="train",
             rasters_hash=str(self.plan.rasters_hash),
             sampler_hash=str(sampler_hash),
         )
-        train_shared = load_point_store_shared(train_store_dir)
-        train_stats = _compute_movement_stats(
-            train_shared["step_length_m"],
-            train_shared["turn_angle_rad"],
-        )
+        train_reader = PointStoreReader(store_dir=train_store_dir, manifest=train_manifest)
+        train_stats = _movement_stats_from_reader(train_reader)
         self._mov_vec_scale = 1.0 / float(train_stats["sl_std"])
 
         self._mean: torch.Tensor | None = None
@@ -181,13 +179,13 @@ class MoveFormerPointStoreDataset(Dataset):
                     plan=self.plan,
                     sampler_config=sampler_config,
                 )
-            except FileNotFoundError as e:
+            except FileNotFoundError as exc:
                 if self.require_normalization_stats:
                     raise FileNotFoundError(
                         "MoveFormer covariate normalization stats not found. Run "
                         "Study.compute_normalization_vals(from_='points', ...) first, "
                         "or set require_normalization_stats=false."
-                    ) from e
+                    ) from exc
                 warnings.warn(
                     "MoveFormer covariate normalization requested, but stats were not found; "
                     "proceeding with raw env values. "
@@ -224,70 +222,66 @@ class MoveFormerPointStoreDataset(Dataset):
                     f"{target_selected_splits} for split={self.split!r} and "
                     f"{selected_splits} for context split {split_key!r}."
                 )
-            env, valid = load_point_store_bands(
-                store_dir=store_dir,
-                manifest=manifest,
+
+            reader = PointStoreReader(store_dir=store_dir, manifest=manifest)
+            for block in reader.iter_row_blocks(
                 band_ids=self._band_ids,
-            )
-            shared = load_point_store_shared(store_dir)
-            for key in (
-                "candidate_lon",
-                "candidate_lat",
-                "start_lon",
-                "start_lat",
-                "individual_id",
-                "burst_id",
-                "point_id_start",
-                "timestamp_ns",
-                "timestamp_end_ns",
+                shared_keys=[
+                    "candidate_lon",
+                    "candidate_lat",
+                    "start_lon",
+                    "start_lat",
+                    "individual_id",
+                    "burst_id",
+                    "point_id_start",
+                    "timestamp_ns",
+                    "timestamp_end_ns",
+                ],
+                block_size=2048,
             ):
-                if key not in shared:
+                env = block["env"]
+                valid = block["valid"]
+                if self.normalize_env:
+                    assert self._mean is not None
+                    assert self._std is not None
+                    env = (env - self._mean.view(1, -1, 1)) / self._std.view(1, -1, 1)
+
+                num_candidates = int(env.shape[2])
+                if self.num_candidates_total == 0:
+                    self.num_candidates_total = num_candidates
+                    self._cand_perm = torch.tensor(
+                        [num_candidates - 1] + list(range(num_candidates - 1)),
+                        dtype=torch.long,
+                    )
+                elif num_candidates != self.num_candidates_total:
                     raise ValueError(
-                        f"Point store shared.pt under {store_dir} is missing {key!r}. "
-                        "Re-run Study.extract_point_features(...) with the updated point-store schema."
+                        "All MoveFormer point stores must share the same number of candidates, "
+                        f"got {self.num_candidates_total} and {num_candidates}."
                     )
 
-            if self.normalize_env:
-                assert self._mean is not None
-                assert self._std is not None
-                env = (env - self._mean.view(1, -1, 1)) / self._std.view(1, -1, 1)
+                candidate_lon = block["candidate_lon"].index_select(1, self._cand_perm)
+                candidate_lat = block["candidate_lat"].index_select(1, self._cand_perm)
+                env = env.index_select(2, self._cand_perm)
+                valid = valid.index_select(2, self._cand_perm)
+                individual_ids = [str(x) for x in block["individual_id"].tolist()]
+                burst_ids = block["burst_id"].to(dtype=torch.int64)
 
-            num_candidates = int(env.shape[2])
-            if self.num_candidates_total == 0:
-                self.num_candidates_total = num_candidates
-                self._cand_perm = torch.tensor(
-                    [num_candidates - 1] + list(range(num_candidates - 1)),
-                    dtype=torch.long,
-                )
-            elif num_candidates != self.num_candidates_total:
-                raise ValueError(
-                    "All MoveFormer point stores must share the same number of candidates, "
-                    f"got {self.num_candidates_total} and {num_candidates}."
-                )
-
-            candidate_lon = shared["candidate_lon"].index_select(1, self._cand_perm)
-            candidate_lat = shared["candidate_lat"].index_select(1, self._cand_perm)
-            env = env.index_select(2, self._cand_perm)
-            valid = valid.index_select(2, self._cand_perm)
-            individual_ids = [str(x) for x in shared["individual_id"]]
-            burst_ids = shared["burst_id"].to(torch.int64)
-
-            for idx in range(int(env.shape[0])):
-                chain_key = (individual_ids[idx], int(burst_ids[idx].item()))
-                chains_by_key.setdefault(chain_key, []).append(
-                    _StepRecord(
-                        split_key=str(split_key),
-                        point_id_start=int(shared["point_id_start"][idx].item()),
-                        timestamp_ns=int(shared["timestamp_ns"][idx].item()),
-                        timestamp_end_ns=int(shared["timestamp_end_ns"][idx].item()),
-                        start_lon=float(shared["start_lon"][idx].item()),
-                        start_lat=float(shared["start_lat"][idx].item()),
-                        env=env[idx].cpu(),
-                        valid=valid[idx].cpu(),
-                        candidate_lon=candidate_lon[idx].cpu(),
-                        candidate_lat=candidate_lat[idx].cpu(),
+                for idx in range(int(env.shape[0])):
+                    chain_key = (individual_ids[idx], int(burst_ids[idx].item()))
+                    chains_by_key.setdefault(chain_key, []).append(
+                        _StepRecord(
+                            split_key=str(split_key),
+                            point_id_start=int(block["point_id_start"][idx].item()),
+                            timestamp_ns=int(block["timestamp_ns"][idx].item()),
+                            timestamp_end_ns=int(block["timestamp_end_ns"][idx].item()),
+                            start_lon=float(block["start_lon"][idx].item()),
+                            start_lat=float(block["start_lat"][idx].item()),
+                            env=env[idx].cpu(),
+                            valid=valid[idx].cpu(),
+                            candidate_lon=candidate_lon[idx].cpu(),
+                            candidate_lat=candidate_lat[idx].cpu(),
+                        )
                     )
-                )
 
         if self.num_candidates_total <= 1:
             raise ValueError(
@@ -331,7 +325,8 @@ class MoveFormerPointStoreDataset(Dataset):
         cov_cand = seq_env.permute(0, 2, 1).numpy().astype(np.float32, copy=False)
         cov_cand_valid = seq_valid.permute(0, 2, 1).numpy()
         cov_cand = np.where(cov_cand_valid, cov_cand, np.float32(np.nan)).astype(
-            np.float32, copy=False
+            np.float32,
+            copy=False,
         )
 
         cov = np.full(

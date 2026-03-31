@@ -25,3 +25,4 @@ results/
 *.pt
 *.tar.gz
 __pycache__
+old_tests_dont_use

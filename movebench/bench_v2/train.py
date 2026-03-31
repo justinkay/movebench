@@ -4,6 +4,7 @@ import copy
 import random
 from dataclasses import dataclass
 from typing import Any
+from tqdm import tqdm
 
 import torch
 
@@ -68,7 +69,7 @@ def run_training_loop(
     stopped_early = False
 
     try:
-        for step in range(1, int(config.max_steps) + 1):
+        for step in tqdm(range(1, int(config.max_steps) + 1), desc="Training..."):
             completed_steps = int(step)
             train_step_metrics = {
                 str(key): float(value)

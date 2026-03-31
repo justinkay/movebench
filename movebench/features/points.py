@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 import numpy as np
 import pandas as pd
@@ -174,46 +174,154 @@ def load_point_store_manifest(
             "No extracted point feature store found for "
             f"split={split!r}, rasters_hash={rasters_hash!r}, sampler_hash={sampler_hash!r}. "
             "Run Study.extract_point_features(...) first."
-        )
+    )
     return store_dir, read_manifest(manifest_path)
 
 
-def load_point_store_shared(store_dir: Path) -> dict[str, Any]:
-    shared_path = Path(store_dir) / "shared.pt"
-    if not shared_path.exists():
-        raise FileNotFoundError(f"shared.pt not found under: {store_dir}")
-    return torch.load(shared_path, map_location="cpu")
+def _row_idxs_numpy(row_idxs: np.ndarray | torch.Tensor | list[int]) -> np.ndarray:
+    if torch.is_tensor(row_idxs):
+        arr = row_idxs.detach().cpu().numpy()
+    else:
+        arr = np.asarray(row_idxs)
+    return np.asarray(arr, dtype=np.int64).reshape(-1)
 
 
-def load_point_store_bands(
-    *,
-    store_dir: Path,
-    manifest: PointFeatureManifest,
-    band_ids: list[str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if not band_ids:
-        shared_shape = list(manifest.shared["shared.pt"]["shape"])
-        return (
-            torch.zeros((shared_shape[0], 0, shared_shape[1]), dtype=torch.float32),
-            torch.zeros((shared_shape[0], 0, shared_shape[1]), dtype=torch.bool),
-        )
+def _numeric_shared_field(field: np.ndarray) -> torch.Tensor | np.ndarray:
+    arr = np.asarray(field)
+    if arr.dtype.kind in {"U", "S", "O"}:
+        return arr.copy()
+    return torch.from_numpy(np.array(arr, copy=True))
 
-    env_parts: list[torch.Tensor] = []
-    valid_parts: list[torch.Tensor] = []
-    for band_id in band_ids:
-        meta = manifest.bands.get(band_id)
-        if meta is None:
-            raise ValueError(
-                f"Requested band_id {band_id!r} not present in point store"
+
+class PointStoreReader:
+    def __init__(self, *, store_dir: Path, manifest: PointFeatureManifest) -> None:
+        self.store_dir = Path(store_dir)
+        self.manifest = manifest
+        self._shared_memmap: np.ndarray | None = None
+        self._layer_memmaps: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    @property
+    def n_rows(self) -> int:
+        return int(self.manifest.n_rows)
+
+    @property
+    def points_per_step(self) -> int:
+        return int(self.manifest.points_per_step)
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state["_shared_memmap"] = None
+        state["_layer_memmaps"] = {}
+        return state
+
+    def _shared_array(self) -> np.ndarray:
+        if self._shared_memmap is None:
+            self._shared_memmap = np.load(
+                self.store_dir / str(self.manifest.shared["path"]),
+                mmap_mode="r",
+                allow_pickle=False,
             )
-        d = torch.load(Path(store_dir) / str(meta["path"]), map_location="cpu")
-        env = d["env"]
-        valid = d["valid"]
-        if env.ndim != 2 or valid.ndim != 2:
-            raise ValueError(f"Band {band_id!r} must have rank-2 env/valid tensors")
-        env_parts.append(env.unsqueeze(1))
-        valid_parts.append(valid.unsqueeze(1))
-    return torch.cat(env_parts, dim=1), torch.cat(valid_parts, dim=1)
+        return self._shared_memmap
+
+    def _layer_arrays(self, layer: str) -> tuple[np.ndarray, np.ndarray]:
+        cached = self._layer_memmaps.get(layer)
+        if cached is not None:
+            return cached
+        meta = self.manifest.layers[layer]
+        env = np.load(
+            self.store_dir / str(meta["env_path"]),
+            mmap_mode="r",
+            allow_pickle=False,
+        )
+        valid = np.load(
+            self.store_dir / str(meta["valid_path"]),
+            mmap_mode="r",
+            allow_pickle=False,
+        )
+        self._layer_memmaps[layer] = (env, valid)
+        return env, valid
+
+    def load_env_valid_rows(
+        self,
+        *,
+        band_ids: list[str],
+        row_idxs: np.ndarray | torch.Tensor | list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rows = _row_idxs_numpy(row_idxs)
+        batch_size = int(rows.shape[0])
+        if not band_ids:
+            return (
+                torch.zeros(
+                    (batch_size, 0, self.points_per_step),
+                    dtype=torch.float32,
+                ),
+                torch.zeros(
+                    (batch_size, 0, self.points_per_step),
+                    dtype=torch.bool,
+                ),
+            )
+
+        env_out = np.zeros(
+            (batch_size, len(band_ids), self.points_per_step),
+            dtype=np.float32,
+        )
+        valid_out = np.zeros_like(env_out, dtype=np.bool_)
+        by_layer: dict[str, list[tuple[int, int]]] = {}
+        for out_idx, band_id in enumerate(band_ids):
+            meta = self.manifest.bands.get(str(band_id))
+            if meta is None:
+                raise ValueError(
+                    f"Requested band_id {band_id!r} not present in point store"
+                )
+            by_layer.setdefault(str(meta["layer"]), []).append(
+                (int(out_idx), int(meta["channel_idx"]))
+            )
+
+        for layer, band_refs in by_layer.items():
+            layer_env, layer_valid = self._layer_arrays(layer)
+            slab_env = np.asarray(layer_env[rows])
+            slab_valid = np.asarray(layer_valid[rows])
+            out_positions = [ref[0] for ref in band_refs]
+            channel_idxs = [ref[1] for ref in band_refs]
+            env_out[:, out_positions, :] = slab_env[:, channel_idxs, :]
+            valid_out[:, out_positions, :] = slab_valid[:, channel_idxs, :]
+
+        return torch.from_numpy(env_out), torch.from_numpy(valid_out)
+
+    def load_shared_rows(
+        self,
+        *,
+        keys: list[str],
+        row_idxs: np.ndarray | torch.Tensor | list[int],
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        rows = _row_idxs_numpy(row_idxs)
+        shared = self._shared_array()
+        out: dict[str, torch.Tensor | np.ndarray] = {}
+        for key in keys:
+            out[str(key)] = _numeric_shared_field(shared[str(key)][rows])
+        return out
+
+    def iter_row_blocks(
+        self,
+        *,
+        band_ids: list[str] | None,
+        shared_keys: list[str],
+        block_size: int,
+    ) -> Iterator[dict[str, torch.Tensor | np.ndarray]]:
+        if int(block_size) <= 0:
+            raise ValueError(f"block_size must be > 0, got {block_size!r}")
+        for start in range(0, self.n_rows, int(block_size)):
+            stop = min(self.n_rows, start + int(block_size))
+            rows = np.arange(start, stop, dtype=np.int64)
+            block: dict[str, torch.Tensor | np.ndarray] = {
+                "row_idxs": torch.from_numpy(rows.copy())
+            }
+            if band_ids is not None:
+                env, valid = self.load_env_valid_rows(band_ids=band_ids, row_idxs=rows)
+                block["env"] = env
+                block["valid"] = valid
+            block.update(self.load_shared_rows(keys=shared_keys, row_idxs=rows))
+            yield block
 
 
 @dataclass(frozen=True)
@@ -714,10 +822,11 @@ def _subset_plan_for_band_ids(plan: LayerPlan, band_ids: list[str]) -> LayerPlan
     )
 
 
-def _torch_atomic_save(obj: Any, path: Path) -> None:
+def _atomic_save_npy(array: np.ndarray, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    torch.save(obj, tmp)
+    with open(tmp, "wb") as handle:
+        np.save(handle, array, allow_pickle=False)
     os.replace(tmp, path)
 
 
@@ -873,26 +982,6 @@ def _extract_env_block(
     return env, valid, shared
 
 
-def _shared_meta(
-    shared: dict[str, torch.Tensor], *, points_per_step: int
-) -> dict[str, dict[str, Any]]:
-    n_steps = int(shared["point_id_start"].shape[0])
-    return {"shared.pt": {"shape": [n_steps, int(points_per_step)], "dtype": "mixed"}}
-
-
-def _band_meta(
-    *, band_id: str, channel, n_steps: int, points_per_step: int
-) -> dict[str, Any]:
-    return {
-        "path": f"bands/{band_id}.pt",
-        "shape": [int(n_steps), int(points_per_step)],
-        "dtype": "float32/bool",
-        "layer": str(channel.layer),
-        "categorical": bool(channel.categorical),
-        "normalize": bool(channel.normalize),
-    }
-
-
 def _manifest_matches_request(
     manifest: PointFeatureManifest,
     *,
@@ -902,7 +991,7 @@ def _manifest_matches_request(
     selected_splits: list[str],
 ) -> bool:
     return (
-        manifest.schema_version == "3"
+        manifest.schema_version == "4"
         and manifest.rasters_hash == str(plan.rasters_hash)
         and manifest.sampler_hash == str(sampler_hash_value)
         and manifest.extraction.get("step_selector") == "interval"
@@ -913,8 +1002,111 @@ def _manifest_matches_request(
         and manifest.extraction.get("gap_cutoff_source") == "train"
         and int(manifest.extraction.get("points_per_step", -1)) == int(points_per_step)
         and list(manifest.extraction.get("selected_splits", [])) == list(selected_splits)
-        and int(manifest.extraction.get("shared_metadata_version", -1)) == 1
+        and manifest.shared.get("path") == "shared/shared.npy"
+        and set(manifest.bands.keys()) == set(plan.band_ids_in_order())
     )
+
+
+def _shared_structured_array(
+    shared: dict[str, Any],
+    *,
+    points_per_step: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    n_rows = int(len(shared["individual_id"]))
+    max_chars = (
+        max(1, max(len(str(x)) for x in shared["individual_id"]))
+        if n_rows > 0
+        else 1
+    )
+    dtype = np.dtype(
+        [
+            ("candidate_lon", np.float32, (points_per_step,)),
+            ("candidate_lat", np.float32, (points_per_step,)),
+            ("step_length_m", np.float32, (points_per_step,)),
+            ("turn_angle_rad", np.float32, (points_per_step,)),
+            ("start_lon", np.float32),
+            ("start_lat", np.float32),
+            ("burst_id", np.int64),
+            ("individual_id", f"U{max_chars}"),
+            ("point_id_start", np.int64),
+            ("point_id_end", np.int64),
+            ("timestamp_ns", np.int64),
+            ("timestamp_end_ns", np.int64),
+            ("actual_step_time_s", np.float32),
+            ("step_time_error_s", np.float32),
+        ]
+    )
+    out = np.zeros((n_rows,), dtype=dtype)
+    fields_meta: dict[str, Any] = {}
+    for key, value in shared.items():
+        if key == "individual_id":
+            arr = np.asarray([str(x) for x in value], dtype=f"U{max_chars}")
+            fields_meta[key] = {
+                "dtype": "unicode",
+                "shape": [],
+                "max_chars": int(max_chars),
+            }
+        else:
+            arr = (
+                value.detach().cpu().numpy()
+                if torch.is_tensor(value)
+                else np.asarray(value)
+            )
+            arr = np.array(arr, copy=False)
+            fields_meta[key] = {
+                "dtype": "float32"
+                if arr.dtype == np.float32
+                else "int64"
+                if arr.dtype == np.int64
+                else str(arr.dtype),
+                "shape": [points_per_step] if arr.ndim == 2 else [],
+            }
+        out[key] = arr
+    return out, {
+        "path": "shared/shared.npy",
+        "shape": [n_rows],
+        "dtype": "structured",
+        "fields": fields_meta,
+    }
+
+
+def _layer_store_meta(
+    *,
+    plan: LayerPlan,
+    env: torch.Tensor,
+    valid: torch.Tensor,
+    out_dir: Path,
+    n_rows: int,
+    points_per_step: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    layers_meta: dict[str, dict[str, Any]] = {}
+    bands_meta: dict[str, dict[str, Any]] = {}
+    for layer in plan.layers_in_order:
+        start, end = plan.layer_slice(layer)
+        layer_env = env[:, start:end, :].contiguous().cpu().numpy()
+        layer_valid = valid[:, start:end, :].contiguous().cpu().numpy()
+        env_path = out_dir / "layers" / f"{layer}.env.npy"
+        valid_path = out_dir / "layers" / f"{layer}.valid.npy"
+        _atomic_save_npy(layer_env, env_path)
+        _atomic_save_npy(layer_valid, valid_path)
+        layer_channels = plan.channels[start:end]
+        layer_band_ids = [channel.band_id for channel in layer_channels]
+        layers_meta[str(layer)] = {
+            "env_path": f"layers/{layer}.env.npy",
+            "valid_path": f"layers/{layer}.valid.npy",
+            "shape": [n_rows, len(layer_band_ids), points_per_step],
+            "env_dtype": "float32",
+            "valid_dtype": "bool",
+            "band_ids": layer_band_ids,
+        }
+        for channel_idx, channel in enumerate(layer_channels):
+            bands_meta[channel.band_id] = {
+                "layer": str(layer),
+                "channel_idx": int(channel_idx),
+                "categorical": bool(channel.categorical),
+                "normalize": bool(channel.normalize),
+            }
+    return layers_meta, bands_meta
 
 
 def extract_split_feature_store(
@@ -938,128 +1130,62 @@ def extract_split_feature_store(
         sampler_hash=str(sampler_hash),
     )
     manifest_path = out_dir / "manifest.json"
-    shared_path = out_dir / "shared.pt"
 
     reqs = _build_step_requests(steps)
     n_steps = int(len(reqs))
     points_per_step = int(sampler["num_candidates"]) + 1
 
-    existing_manifest: PointFeatureManifest | None = None
-    rebuild_store = False
     if manifest_path.exists():
         try:
             existing_manifest = read_manifest(manifest_path)
         except Exception:
-            rebuild_store = True
             existing_manifest = None
         else:
-            if not _manifest_matches_request(
-                existing_manifest,
-                plan=plan,
-                sampler_hash_value=sampler_hash,
-                points_per_step=points_per_step,
-                selected_splits=selected_splits,
+            if (
+                skip_existing
+                and _manifest_matches_request(
+                    existing_manifest,
+                    plan=plan,
+                    sampler_hash_value=sampler_hash,
+                    points_per_step=points_per_step,
+                    selected_splits=selected_splits,
+                )
             ):
-                rebuild_store = True
-                existing_manifest = None
-            elif not shared_path.exists():
-                rebuild_store = True
-                existing_manifest = None
+                return {
+                    "split": split,
+                    "status": "existing",
+                    "out_dir": str(out_dir),
+                    "n_steps": int(existing_manifest.n_rows),
+                }
 
-    if rebuild_store and out_dir.exists():
+    if out_dir.exists():
         shutil.rmtree(out_dir)
-
-    existing_band_ids = (
-        set(existing_manifest.bands.keys()) if existing_manifest is not None else set()
-    )
-    requested_band_ids = plan.band_ids_in_order()
-    missing_band_ids = [
-        band_id for band_id in requested_band_ids if band_id not in existing_band_ids
-    ]
-
-    if (
-        skip_existing
-        and existing_manifest is not None
-        and not missing_band_ids
-        and shared_path.exists()
-    ):
-        return {
-            "split": split,
-            "status": "existing",
-            "out_dir": str(out_dir),
-            "n_steps": int(existing_manifest.shared["shared.pt"]["shape"][0]),
-        }
-
-    if existing_manifest is None:
-        write_band_ids = requested_band_ids
-        write_plan = plan
-    else:
-        write_band_ids = missing_band_ids
-        write_plan = (
-            _subset_plan_for_band_ids(plan, write_band_ids) if write_band_ids else plan
-        )
-
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if existing_manifest is None:
-        env, valid, shared_data = _extract_env_block(
-            study_id=study_id,
-            study_dir=study_dir,
-            plan=write_plan,
-            reqs=reqs,
-            sampler_state=sampler_state,
-            n_workers=n_workers,
-        )
-        _torch_atomic_save(shared_data, shared_path)
-    else:
-        shared_data = torch.load(shared_path, map_location="cpu")
-        shape = list(existing_manifest.shared["shared.pt"]["shape"])
-        if shape != [n_steps, points_per_step]:
-            shutil.rmtree(out_dir)
-            return extract_split_feature_store(
-                study_id=study_id,
-                study_dir=study_dir,
-                split=split,
-                steps=steps,
-                plan=plan,
-                sampler=sampler,
-                sampler_state=sampler_state,
-                sampler_hash=sampler_hash,
-                selected_splits=selected_splits,
-                n_workers=n_workers,
-                skip_existing=skip_existing,
-            )
-        if write_band_ids:
-            env, valid, _unused_shared = _extract_env_block(
-                study_id=study_id,
-                study_dir=study_dir,
-                plan=write_plan,
-                reqs=reqs,
-                sampler_state=sampler_state,
-                n_workers=n_workers,
-            )
-
-    bands_meta = (
-        {}
-        if existing_manifest is None
-        else {k: dict(v) for k, v in existing_manifest.bands.items()}
+    env, valid, shared_data = _extract_env_block(
+        study_id=study_id,
+        study_dir=study_dir,
+        plan=plan,
+        reqs=reqs,
+        sampler_state=sampler_state,
+        n_workers=n_workers,
     )
-    if write_band_ids:
-        n_write_channels = int(write_plan.num_channels())
-        for i, channel in enumerate(write_plan.channels):
-            band_id = channel.band_id
-            band_path = out_dir / "bands" / f"{band_id}.pt"
-            _torch_atomic_save({"env": env[:, i, :], "valid": valid[:, i, :]}, band_path)
-            bands_meta[band_id] = _band_meta(
-                band_id=band_id,
-                channel=channel,
-                n_steps=n_steps,
-                points_per_step=points_per_step,
-            )
-        assert n_write_channels == len(write_band_ids)
+    shared_array, shared_meta = _shared_structured_array(
+        shared_data,
+        points_per_step=points_per_step,
+    )
+    _atomic_save_npy(shared_array, out_dir / "shared" / "shared.npy")
+    layers_meta, bands_meta = _layer_store_meta(
+        plan=plan,
+        env=env,
+        valid=valid,
+        out_dir=out_dir,
+        n_rows=n_steps,
+        points_per_step=points_per_step,
+    )
 
     manifest = PointFeatureManifest(
-        schema_version="3",
+        schema_version="4",
         study_id=str(study_id),
         split=str(split),
         created_at=utc_now_iso(),
@@ -1075,20 +1201,17 @@ def extract_split_feature_store(
             "points_per_step": int(points_per_step),
             "choice_policy": "last_is_true",
             "target_crs": TARGET_CRS,
-            "shared_metadata_version": 1,
         },
-        shared=_shared_meta(shared_data, points_per_step=points_per_step),
+        shared=shared_meta,
+        layers=layers_meta,
         bands=bands_meta,
     )
     write_manifest(manifest_path, manifest)
     return {
         "split": split,
-        "status": "written"
-        if write_band_ids or existing_manifest is None
-        else "existing",
+        "status": "written",
         "out_dir": str(out_dir),
         "n_steps": n_steps,
-        "n_bands_written": int(len(write_band_ids)),
     }
 
 

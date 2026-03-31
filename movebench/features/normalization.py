@@ -10,6 +10,7 @@ import torch
 from movebench.features.config import SamplerConfig
 from movebench.features.manifest import read_manifest, utc_now_iso
 from movebench.features.points import (
+    PointStoreReader,
     point_store_dir,
     point_store_train_stats_path,
     resolve_sampler_hash,
@@ -37,27 +38,25 @@ def load_points_normalization_mean_std(
             f"Expected: {stats_path}"
         )
 
-    with open(stats_path, "r") as f:
-        d = json.load(f)
-    band_stats: dict[str, Any] = dict(d.get("band_stats", {}))
+    with open(stats_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    band_stats: dict[str, Any] = dict(payload.get("band_stats", {}))
 
-    band_ids = plan.band_ids_in_order()
     mean = torch.zeros(int(plan.num_channels()), dtype=torch.float32)
     std = torch.ones(int(plan.num_channels()), dtype=torch.float32)
-    for i, ch in enumerate(plan.channels):
-        if not ch.normalize:
+    for idx, channel in enumerate(plan.channels):
+        if not channel.normalize:
             continue
-        band_id = band_ids[i]
-        st = band_stats.get(band_id)
-        if st is None:
+        stats = band_stats.get(channel.band_id)
+        if stats is None:
             raise ValueError(
-                f"Missing normalization stats for band_id={band_id!r} in {stats_path}"
+                f"Missing normalization stats for band_id={channel.band_id!r} in {stats_path}"
             )
-        mean[i] = float(st["mean"])
-        s = float(st["std"])
-        if not math.isfinite(s) or s < 1e-8:
-            s = 1.0
-        std[i] = s
+        mean[idx] = float(stats["mean"])
+        value = float(stats["std"])
+        if not math.isfinite(value) or value < 1e-8:
+            value = 1.0
+        std[idx] = value
     return mean, std
 
 
@@ -82,48 +81,60 @@ def compute_points_normalization_stats(
         sampler_hash=str(sampler_hash),
     )
     manifest_path = store_dir / "manifest.json"
-    shared_path = store_dir / "shared.pt"
     if not manifest_path.exists():
         raise FileNotFoundError(f"manifest.json not found: {manifest_path}")
-    if not shared_path.exists():
-        raise FileNotFoundError(f"shared.pt not found: {shared_path}")
     manifest = read_manifest(manifest_path)
+    reader = PointStoreReader(store_dir=store_dir, manifest=manifest)
+
     stats_path = point_store_train_stats_path(
         study_dir=study_dir,
         rasters_hash=str(plan.rasters_hash),
         sampler_hash=str(sampler_hash),
     )
-
     existing: dict[str, Any] = {}
     band_stats: dict[str, dict[str, Any]] = {}
     if stats_path.exists():
-        with open(stats_path, "r") as f:
-            existing = json.load(f)
+        with open(stats_path, "r", encoding="utf-8") as handle:
+            existing = json.load(handle)
         band_stats = {
-            str(k): dict(v) for k, v in existing.get("band_stats", {}).items()
+            str(key): dict(value) for key, value in existing.get("band_stats", {}).items()
         }
 
-    normalize_band_ids = [ch.band_id for ch in plan.channels if ch.normalize]
-    wanted = [band_id for band_id in normalize_band_ids if band_id in manifest.bands]
+    wanted = [
+        channel.band_id
+        for channel in plan.channels
+        if channel.normalize and channel.band_id in manifest.bands
+    ]
     if skip_existing:
         wanted = [band_id for band_id in wanted if band_id not in band_stats]
 
-    for band_id in wanted:
-        band_path = store_dir / str(manifest.bands[band_id]["path"])
-        d = torch.load(band_path, map_location="cpu")
-        env = d["env"]
-        valid = d["valid"]
-        count = int(valid.sum().item())
-        if count == 0:
-            mean = 0.0
-            std = 1.0
-        else:
-            vals = env[valid]
-            mean = float(vals.to(dtype=torch.float64).mean().item())
-            std = float(vals.to(dtype=torch.float64).std(unbiased=False).item())
-            if not math.isfinite(std) or std < 1e-8:
+    if wanted:
+        sums = torch.zeros(len(wanted), dtype=torch.float64)
+        sumsq = torch.zeros(len(wanted), dtype=torch.float64)
+        counts = torch.zeros(len(wanted), dtype=torch.float64)
+        for block in reader.iter_row_blocks(
+            band_ids=wanted,
+            shared_keys=[],
+            block_size=2048,
+        ):
+            env = block["env"].to(dtype=torch.float64)
+            valid = block["valid"].to(dtype=torch.float64)
+            sums += (env * valid).sum(dim=(0, 2))
+            sumsq += (env * env * valid).sum(dim=(0, 2))
+            counts += valid.sum(dim=(0, 2))
+
+        for idx, band_id in enumerate(wanted):
+            count = int(counts[idx].item())
+            if count == 0:
+                mean = 0.0
                 std = 1.0
-        band_stats[band_id] = {"mean": mean, "std": std, "count": count}
+            else:
+                mean = float((sums[idx] / counts[idx]).item())
+                var = float((sumsq[idx] / counts[idx]).item()) - (mean * mean)
+                std = math.sqrt(max(var, 0.0))
+                if not math.isfinite(std) or std < 1e-8:
+                    std = 1.0
+            band_stats[band_id] = {"mean": mean, "std": std, "count": count}
 
     stats = {
         "schema_version": "2",
@@ -137,8 +148,8 @@ def compute_points_normalization_stats(
         "band_stats": band_stats,
     }
     stats_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(stats_path, "w") as f:
-        json.dump(stats, f, indent=2, sort_keys=True)
+    with open(stats_path, "w", encoding="utf-8") as handle:
+        json.dump(stats, handle, indent=2, sort_keys=True)
     return {
         "status": "existing" if existing and not wanted else "written",
         "stats_path": str(stats_path),

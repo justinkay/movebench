@@ -511,12 +511,6 @@ def _resolve_point_artifacts(
                 "status": "blocked",
                 "reason": f"invalid point store manifest for {split}: {exc}",
             }
-        shared_path = store_dir / "shared.pt"
-        if not shared_path.exists():
-            return {
-                "status": "blocked",
-                "reason": f"missing shared.pt for {split}",
-            }
         missing_manifest_bands = [
             band_id for band_id in band_ids if band_id not in manifest.bands
         ]
@@ -536,17 +530,6 @@ def _resolve_point_artifacts(
     if str(run_payload["method"]) == "moveformer":
         expected_selected_splits: list[str] | None = None
         for split, store in point_stores.items():
-            shared_metadata_version = store["manifest"].extraction.get(
-                "shared_metadata_version"
-            )
-            if int(shared_metadata_version or -1) != 1:
-                return {
-                    "status": "blocked",
-                    "reason": (
-                        f"point store for {split} is missing "
-                        "extraction.shared_metadata_version=1 required for MoveFormer"
-                    ),
-                }
             selected_splits = store["manifest"].extraction.get("selected_splits")
             if not isinstance(selected_splits, list) or not selected_splits:
                 return {
@@ -965,16 +948,20 @@ def run_experiment(
     max_runs: int | None = None,
     rerun: bool = False,
 ) -> dict[str, object]:
+    print("Loading experiment")
     experiment = load_experiment(experiment_module)
     if methods is not None:
         experiment["methods"] = [str(method) for method in methods]
 
+    print("Expanding experiment")
     runs = expand_experiment(experiment, studies_override=studies_override)
     planner_blocked_runs = len(experiment.get("blocked", []))
+    print("Loading latest runs")
     latest_runs = bench_mlflow.search_latest_runs_by_key(
         [str(run["run_key"]) for run in runs]
     )
 
+    print("Prepping pending runs")
     pending_runs: list[dict[str, object]] = []
     skipped_runs = 0
     for run_payload in runs:

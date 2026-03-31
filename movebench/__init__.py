@@ -1,9 +1,13 @@
-"""Next-generation MoveBench pipeline (work-in-progress).
+"""Next-generation MoveBench pipeline (work-in-progress)."""
 
-This package is a greenfield implementation intended to provide a cleaner
-architecture (layer registry + YAML configs + feature store).
-"""
-
-from movebench.study import Study
+from __future__ import annotations
 
 __all__ = ["Study"]
+
+
+def __getattr__(name: str):
+    if name != "Study":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from movebench.study import Study
+
+    return Study

@@ -27,12 +27,15 @@ from shapely.prepared import prep
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = REPO_ROOT / "pngs" / "hero_atlas_blue_log.png"
-OUTPUT_PATH.parent.mkdir(exist_ok=True)
+MAP_OUTPUT_PATH = REPO_ROOT / "pngs" / "hero_atlas_blue_log_map.png"
+TRAJECTORY_OUTPUT_PATH = REPO_ROOT / "pngs" / "hero_atlas_blue_log_trajectories.png"
+MAP_OUTPUT_PATH.parent.mkdir(exist_ok=True)
 CACHE_DIR = REPO_ROOT / ".cache" / "hero"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 COUNTRY_POINTS_CACHE_VERSION = "v1"
 TRAJECTORY_OVERLAY_CACHE_VERSION = "v8"
+FIGURE_SIZE = (18, 8.5)
+OUTPUT_DPI = 400
 
 MARINE_SPECIES = {
     "Chelonia mydas",
@@ -127,6 +130,35 @@ def _hide_geo_outline(ax: plt.Axes) -> None:
     geo_spine = ax.spines.get("geo")
     if geo_spine is not None:
         geo_spine.set_visible(False)
+
+
+def _create_hero_figure(
+    *,
+    transparent_background: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    facecolor = (1.0, 1.0, 1.0, 0.0) if transparent_background else "#FFFFFF"
+    fig = plt.figure(figsize=FIGURE_SIZE, facecolor=facecolor)
+    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+    ax.set_position([0.0, 0.0, 1.0, 1.0])
+    ax.set_facecolor("none" if transparent_background else "#FFFFFF")
+    ax.set_global()
+    _hide_geo_outline(ax)
+    return fig, ax
+
+
+def _save_hero_figure(
+    fig: plt.Figure,
+    output_path: Path,
+    *,
+    output_dpi: int,
+    transparent_background: bool = False,
+) -> None:
+    fig.savefig(
+        output_path,
+        dpi=output_dpi,
+        transparent=transparent_background,
+        facecolor=fig.get_facecolor(),
+    )
 
 
 def _in_ipython_session() -> bool:
@@ -437,7 +469,8 @@ def load_country_gps_point_counts(
 def plot_hero_map(
     country_summary: pd.DataFrame | None = None,
     *,
-    output_path: Path = OUTPUT_PATH,
+    output_path: Path = MAP_OUTPUT_PATH,
+    output_dpi: int = OUTPUT_DPI,
 ) -> tuple[plt.Figure, plt.Axes]:
     if country_summary is None:
         country_summary = load_country_gps_point_counts()
@@ -457,11 +490,7 @@ def plot_hero_map(
         else mcolors.Normalize(vmin=0, vmax=max_value)
     )
 
-    fig = plt.figure(figsize=(18, 8.5), facecolor="#FFFFFF")
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-    ax.set_facecolor("#FFFFFF")
-    ax.set_global()
-    _hide_geo_outline(ax)
+    fig, ax = _create_hero_figure()
 
     for row in plot_df.itertuples(index=False):
         value = float(row.gps_point_count)
@@ -478,11 +507,62 @@ def plot_hero_map(
         )
 
     if output_path is not None:
-        fig.savefig(
-            output_path,
-            dpi=220,
-            bbox_inches="tight",
-            facecolor=fig.get_facecolor(),
+        _save_hero_figure(
+            fig=fig,
+            output_path=output_path,
+            output_dpi=output_dpi,
+        )
+
+    return fig, ax
+
+
+def plot_trajectory_overlay(
+    *,
+    overlay_data: dict[str, object] | None = None,
+    line_color: str = "#8F2D1F",
+    halo_color: str = "#F6D7CC",
+    line_alpha: float = 0.62,
+    halo_alpha: float = 0.26,
+    line_width: float = 1.6,
+    halo_width: float = 3.2,
+    output_path: Path | None = TRAJECTORY_OUTPUT_PATH,
+    output_dpi: int = OUTPUT_DPI,
+) -> tuple[plt.Figure, plt.Axes]:
+    fig, ax = _create_hero_figure(transparent_background=True)
+    if overlay_data is None:
+        overlay_data = load_trajectory_overlay_data()
+
+    segments = overlay_data["line_segments"]
+    halo_collection = LineCollection(
+        segments,
+        colors=halo_color,
+        linewidths=halo_width,
+        alpha=halo_alpha,
+        zorder=3,
+        capstyle="round",
+        joinstyle="round",
+    )
+    halo_collection.set_transform(ccrs.PlateCarree())
+    ax.add_collection(halo_collection)
+
+    collection = LineCollection(
+        segments,
+        colors=line_color,
+        linewidths=line_width,
+        alpha=line_alpha,
+        zorder=4,
+        capstyle="round",
+        joinstyle="round",
+    )
+    collection.set_transform(ccrs.PlateCarree())
+    ax.add_collection(collection)
+
+    if output_path is not None:
+        _save_hero_figure(
+            fig=fig,
+            output_path=output_path,
+            output_dpi=output_dpi,
+            transparent_background=True,
         )
 
     return fig, ax
@@ -690,7 +770,8 @@ def plot_hero_with_spaghetti(
     halo_alpha: float = 0.26,
     line_width: float = 1.6,
     halo_width: float = 3.2,
-    output_path: Path | None = REPO_ROOT / "pngs" / "hero_atlas_blue_log_spaghetti.png",
+    output_path: Path | None = None,
+    output_dpi: int = OUTPUT_DPI,
 ) -> tuple[plt.Figure, plt.Axes]:
     fig, ax = plot_hero_map(country_summary=country_summary, output_path=None)
     if overlay_data is None:
@@ -722,7 +803,11 @@ def plot_hero_with_spaghetti(
     ax.add_collection(collection)
 
     if output_path is not None:
-        fig.savefig(output_path, dpi=220, bbox_inches="tight", facecolor=fig.get_facecolor())
+        _save_hero_figure(
+            fig=fig,
+            output_path=output_path,
+            output_dpi=output_dpi,
+        )
 
     return fig, ax
 
@@ -755,17 +840,19 @@ if _in_ipython_session():
 
 
 # %% [markdown]
-# ## Cleaned Spaghetti Lines
+# ## Trajectory Layer
 
 # %%
 if _in_ipython_session():
-    fig, ax = plot_hero_with_spaghetti(
-        country_summary=country_gps_point_counts,
-        overlay_data=trajectory_overlay_data,
-    )
+    fig, ax = plot_trajectory_overlay(overlay_data=trajectory_overlay_data)
     plt.show()
 
 
 if __name__ == "__main__":
-    plot_hero_map()
+    country_gps_point_counts = load_country_gps_point_counts()
+    trajectory_overlay_data = load_trajectory_overlay_data()
+    plot_hero_map(country_gps_point_counts)
+    plot_trajectory_overlay(overlay_data=trajectory_overlay_data)
     plt.show()
+
+# %%

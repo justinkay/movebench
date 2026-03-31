@@ -4,11 +4,12 @@ import csv
 import math
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from pyproj import Transformer
 
-from movebench.features.points import load_point_store_shared
+from movebench.features.points import PointStoreReader
 from movebench.trajectories import (
     INDIVIDUAL_COL,
     LAT_COL,
@@ -25,7 +26,7 @@ _TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 def _step_context(shared: dict[str, torch.Tensor], trajectories_path: Path) -> dict[str, torch.Tensor]:
     point_ids = shared.get("point_id_start")
     if point_ids is None:
-        raise ValueError("shared.pt missing point_id_start required by baselines")
+        raise ValueError("point store shared rows missing point_id_start required by baselines")
 
     rows: list[dict[str, object]] = []
     with open(trajectories_path, "r", encoding="utf-8", newline="") as handle:
@@ -110,6 +111,18 @@ def _relative_candidate_coords(
     return xy
 
 
+def _load_shared(
+    *,
+    store_dir: Path,
+    manifest,
+) -> dict[str, torch.Tensor]:
+    reader = PointStoreReader(store_dir=store_dir, manifest=manifest)
+    return reader.load_shared_rows(
+        keys=["candidate_lon", "candidate_lat", "turn_angle_rad", "point_id_start"],
+        row_idxs=np.arange(manifest.n_rows, dtype=np.int64),
+    )
+
+
 def _write_predictions(
     run_dir: Path,
     *,
@@ -124,8 +137,9 @@ def _write_predictions(
 def run_nomove(*, run_payload, resolved_artifacts, run_dir, tracker):
     trajectories_path = Path(resolved_artifacts["trajectories_path"])
     for split_key in run_payload["evaluation_split_keys"]:
-        shared = load_point_store_shared(
-            Path(resolved_artifacts["point_stores"][split_key]["store_dir"])
+        shared = _load_shared(
+            store_dir=Path(resolved_artifacts["point_stores"][split_key]["store_dir"]),
+            manifest=resolved_artifacts["point_stores"][split_key]["manifest"],
         )
         ctx = _step_context(shared, trajectories_path)
         zeros = torch.zeros_like(ctx["start_x_m"])
@@ -149,8 +163,9 @@ def run_nomove(*, run_payload, resolved_artifacts, run_dir, tracker):
 def run_constvel(*, run_payload, resolved_artifacts, run_dir, tracker):
     trajectories_path = Path(resolved_artifacts["trajectories_path"])
     for split_key in run_payload["evaluation_split_keys"]:
-        shared = load_point_store_shared(
-            Path(resolved_artifacts["point_stores"][split_key]["store_dir"])
+        shared = _load_shared(
+            store_dir=Path(resolved_artifacts["point_stores"][split_key]["store_dir"]),
+            manifest=resolved_artifacts["point_stores"][split_key]["manifest"],
         )
         ctx = _step_context(shared, trajectories_path)
         dx_m = ctx["prev_step_length_m"] * torch.sin(ctx["start_bearing_rad"])
@@ -175,8 +190,9 @@ def run_constvel(*, run_payload, resolved_artifacts, run_dir, tracker):
 def run_randomwalk(*, run_payload, resolved_artifacts, run_dir, tracker):
     trajectories_path = Path(resolved_artifacts["trajectories_path"])
     for split_key in run_payload["evaluation_split_keys"]:
-        shared = load_point_store_shared(
-            Path(resolved_artifacts["point_stores"][split_key]["store_dir"])
+        shared = _load_shared(
+            store_dir=Path(resolved_artifacts["point_stores"][split_key]["store_dir"]),
+            manifest=resolved_artifacts["point_stores"][split_key]["manifest"],
         )
         ctx = _step_context(shared, trajectories_path)
         coords_m = _relative_candidate_coords(
