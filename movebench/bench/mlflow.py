@@ -9,12 +9,12 @@ import mlflow
 
 import movebench.paths as paths
 
-MLFLOW_EXPERIMENT_NAME = "movebench_bench_v2"
-MLFLOW_TRACKING_URI_ENV = "MOVEBENCH_BENCH_V2_MLFLOW_TRACKING_URI"
+MLFLOW_EXPERIMENT_NAME = "movebench_bench"
+MLFLOW_TRACKING_URI_ENV = "MOVEBENCH_BENCH_MLFLOW_TRACKING_URI"
 
 
 def _default_db_path() -> Path:
-    return paths.repo_root() / "results" / "bench_v2" / "mlflow.db"
+    return paths.repo_root() / "results" / "bench" / "mlflow.db"
 
 
 def _tracking_uri(*, create: bool) -> str | None:
@@ -30,7 +30,7 @@ def _tracking_uri(*, create: bool) -> str | None:
 
 
 def _artifacts_root() -> Path:
-    root = paths.repo_root() / "results" / "bench_v2" / "mlartifacts"
+    root = paths.repo_root() / "results" / "bench" / "mlartifacts"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

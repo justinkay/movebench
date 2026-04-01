@@ -45,7 +45,7 @@ def _register_missing_bench_parser(subparsers, *, missing_root: str) -> None:
 
 def _register_bench_commands(subparsers) -> None:
     try:
-        from movebench.bench_v2 import run as bench_run
+        from movebench.bench import run as bench_run
     except ModuleNotFoundError as exc:
         missing_root = _missing_bench_dependency_root(exc)
         if missing_root not in _BENCH_OPTIONAL_DEPENDENCIES:

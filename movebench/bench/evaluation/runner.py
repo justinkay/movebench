@@ -12,9 +12,9 @@ from pyproj import Transformer
 
 import movebench.paths as paths
 
-import movebench.bench_v2.config as bench_config
-import movebench.bench_v2.mlflow as bench_mlflow
-from movebench.bench_v2.evaluation import energy
+import movebench.bench.config as bench_config
+import movebench.bench.mlflow as bench_mlflow
+from movebench.bench.evaluation import energy
 from movebench.trajectories import (
     SET_COL,
     canonicalize_split_key,
@@ -562,5 +562,5 @@ def evaluate_run_dir(
 
 def evaluate_run(run_key: str) -> dict[str, object]:
     return evaluate_run_dir(
-        paths.repo_root() / "results" / "bench_v2" / "runs" / str(run_key)
+        paths.repo_root() / "results" / "bench" / "runs" / str(run_key)
     )

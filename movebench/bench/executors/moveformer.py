@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from movebench.bench_v2.train import TrainerConfig, run_training_loop
+from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+from movebench.lib.moveformer.geo_transformers.training_utils import (
+    collate_sequence_dicts,
+)
 from movebench.models.moveformer import build_moveformer_selection_model
-from movebench.train import collate_moveformer, eval_moveformer
 
 
 def _batch_to_device(
@@ -26,11 +30,64 @@ def _eval_metrics(
     *,
     device: torch.device,
 ) -> dict[str, float]:
-    metrics = eval_moveformer(model, loader, device)
+    metrics = _eval_moveformer(model, loader, device)
     return {
         "nll": float(metrics["nll"]),
         "nce": float(metrics["nce"]),
         "num_tokens": float(metrics["num_tokens"]),
+    }
+
+
+def _collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    return collate_sequence_dicts(batch)
+
+
+@torch.no_grad()
+def _eval_moveformer(
+    model: torch.nn.Module,
+    loader,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    total_nll = 0.0
+    total_tokens = 0
+    total_items = 0
+    num_classes = None
+
+    for batch in loader:
+        features = {key: value.to(device) for key, value in batch.items()}
+        logits, _loss, _metrics = model(features)
+        if logits.ndim != 3:
+            raise ValueError(
+                f"Expected logits with shape (B,L,P); got {tuple(logits.shape)}"
+            )
+        batch_size, _seq_len, num_classes = logits.shape
+        if int(num_classes) <= 0:
+            raise ValueError(f"P must be > 0; got {num_classes}")
+        total_items += int(batch_size)
+
+        mask = features.get("loss_mask", features["mask"]).to(torch.bool)
+        target = torch.zeros(
+            (int(batch_size), int(mask.shape[1])),
+            dtype=torch.long,
+            device=device,
+        )
+        ce = F.cross_entropy(logits.transpose(1, 2), target, reduction="none")
+        valid = int(mask.sum().item())
+        if valid == 0:
+            continue
+        total_nll += float((ce * mask.to(ce.dtype)).sum().item())
+        total_tokens += valid
+
+    if total_tokens == 0 or num_classes is None:
+        raise ValueError("Loader yielded zero valid tokens; cannot evaluate")
+
+    nll = float(total_nll / float(total_tokens))
+    return {
+        "nll": nll,
+        "nce": float(nll / float(math.log(int(num_classes)))),
+        "num_items": float(total_items),
+        "num_tokens": float(total_tokens),
     }
 
 
@@ -197,7 +254,7 @@ def _loader(dataset: Dataset, *, batch_size: int, shuffle: bool, seed: int):
         "batch_size": int(batch_size),
         "shuffle": bool(shuffle),
         "num_workers": 0,
-        "collate_fn": collate_moveformer,
+        "collate_fn": _collate_moveformer,
     }
     if shuffle:
         generator = torch.Generator()

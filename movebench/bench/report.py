@@ -11,9 +11,9 @@ import pandas as pd
 
 import movebench.paths as paths
 
-import movebench.bench_v2.config as bench_config
-import movebench.bench_v2.mlflow as bench_mlflow
-import movebench.bench_v2.run as bench_run
+import movebench.bench.config as bench_config
+import movebench.bench.mlflow as bench_mlflow
+import movebench.bench.run as bench_run
 
 EXPECTED_HELD_OUT_SPLITS = ["test_temporal", "test_individual"]
 TIMESCALE_ORDER = ["1h", "12h", "1d", "7d"]
@@ -37,7 +37,7 @@ COVARIATE_COLORS = {
 
 
 def _report_root() -> Path:
-    return paths.repo_root() / "results" / "bench_v2" / "report"
+    return paths.repo_root() / "results" / "bench" / "report"
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -468,7 +468,7 @@ def _final_summary_path(run_key: str, split_key: str) -> Path:
     return (
         paths.repo_root()
         / "results"
-        / "bench_v2"
+        / "bench"
         / "runs"
         / str(run_key)
         / "final_metrics"
@@ -564,7 +564,7 @@ def _refresh_final_metrics(
             continue
         try:
             if evaluate_run_fn is None:
-                from movebench.bench_v2.evaluation.runner import (
+                from movebench.bench.evaluation.runner import (
                     evaluate_run as evaluate_run_fn,
                 )
             evaluate_run_fn(run_key)
@@ -831,7 +831,7 @@ def _render_html(
             "<html lang=\"en\">",
             "<head>",
             "<meta charset=\"utf-8\">",
-            "<title>MoveBench Bench V2 Report</title>",
+            "<title>MoveBench Bench Report</title>",
             "<style>",
             "body { font-family: Georgia, 'Times New Roman', serif; margin: 24px auto; max-width: 1200px; line-height: 1.45; color: #222; background: linear-gradient(180deg, #fbf7ef 0%, #ffffff 280px); }",
             "h1, h2, h3, h4 { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }",
@@ -849,7 +849,7 @@ def _render_html(
             "</head>",
             "<body>",
             "<header>",
-            "<h1>MoveBench Bench V2 Report</h1>",
+            "<h1>MoveBench Bench Report</h1>",
             f"<p class=\"muted\">Generated {html.escape(generated_at)}</p>",
             "</header>",
             "<section>",

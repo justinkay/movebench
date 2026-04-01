@@ -24,9 +24,9 @@ from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
 from movebench.trajectories import canonicalize_split_key
 
-import movebench.bench_v2.mlflow as bench_mlflow
-import movebench.bench_v2.config as bench_config
-from movebench.bench_v2.mlflow import search_latest_runs_by_key
+import movebench.bench.mlflow as bench_mlflow
+import movebench.bench.config as bench_config
+from movebench.bench.mlflow import search_latest_runs_by_key
 
 PREFERRED_EARLY_STOP_SPLITS = ["test_temporal", "test_individual"]
 _SUPPORTED_METHODS = {
@@ -53,7 +53,7 @@ def _load_module_from_path(module_path: str | Path):
     if not path.exists():
         raise FileNotFoundError(f"Experiment module not found: {module_path}")
     spec = importlib.util.spec_from_file_location(
-        f"movebench_bench_v2_{path.stem}",
+        f"movebench_bench_{path.stem}",
         path,
     )
     if spec is None or spec.loader is None:
@@ -70,13 +70,13 @@ def _list_available_studies() -> list[str]:
 
 
 def _bench_report_module():
-    import movebench.bench_v2.report as bench_report
+    import movebench.bench.report as bench_report
 
     return bench_report
 
 
 def _evaluation_runner_module():
-    import movebench.bench_v2.evaluation.runner as evaluation_runner
+    import movebench.bench.evaluation.runner as evaluation_runner
 
     return evaluation_runner
 
@@ -333,7 +333,7 @@ def load_experiment(module_path: str) -> dict[str, object]:
 
 
 def checked_in_experiment_module_paths() -> list[str]:
-    experiments_dir = Path(__file__).resolve().parents[2] / "experiments" / "v2"
+    experiments_dir = Path(__file__).resolve().parents[2] / "experiments"
     if not experiments_dir.exists():
         return []
     return [
@@ -821,7 +821,7 @@ def _latest_run_status(latest_run: object | None) -> str:
 
 
 def _run_dir(run_key: str) -> Path:
-    return paths.repo_root() / "results" / "bench_v2" / "runs" / str(run_key)
+    return paths.repo_root() / "results" / "bench" / "runs" / str(run_key)
 
 
 def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]) -> None:
@@ -1166,7 +1166,7 @@ def _command_run(args: argparse.Namespace) -> int:
 
 
 def register(subparsers) -> None:
-    parser = subparsers.add_parser("bench", help="Plan and inspect the v2 benchmark runtime")
+    parser = subparsers.add_parser("bench", help="Plan and inspect the benchmark runtime")
     bench_subparsers = parser.add_subparsers(dest="bench_command", required=True)
 
     plan_parser = bench_subparsers.add_parser("plan", help="Plan a benchmark experiment")

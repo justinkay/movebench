@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from movebench.bench_v2.train import TrainerConfig, run_training_loop
+from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
 from movebench.models.deepssf import DeepSSF
 

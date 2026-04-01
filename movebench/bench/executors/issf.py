@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from pyproj import Transformer
 from torch.utils.data import DataLoader, Subset
 
-from movebench.bench_v2.train import TrainerConfig, run_training_loop
+from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.ssf import iSSFDataset
 from movebench.features.points import PointStoreReader
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect

@@ -89,63 +89,6 @@ def _compute_chips_meta(plan, *, registry) -> dict[str, Any]:
         }
     return {"schema_version": "1", "chip_groups": chip_groups_out}
 
-def _load_benchmark_like_deepssf_cfg(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return (dcfg, cache_cfg) similar to benchmark.py parsing.
-
-    If the file is missing or invalid, callers may fall back to these defaults.
-    """
-    # Defaults (match movebench/benchmark.py + movebench/datasets/deepssf_wds_cache.py)
-    dcfg: dict[str, Any] = {
-        "output_hw": (101, 101),
-        "normalize": True,
-        "step_multiplier": 2.0,
-        "step_q": 0.95,
-        "gap_q": 0.999,
-    }
-    cache_cfg: dict[str, Any] = {
-        "samples_per_shard": 256,
-        "spatial_dtype": "float16",
-        "target_dtype": "uint8",
-        "compression": "none",
-    }
-    raw = _load_yaml_mapping(path)
-    datasets = raw.get("datasets", {})
-    if not isinstance(datasets, dict):
-        raise ValueError(f"Expected mapping at datasets in {path}")
-    deepssf = datasets.get("deepssf", {})
-    if not isinstance(deepssf, dict):
-        raise ValueError(f"Expected mapping at datasets.deepssf in {path}")
-
-    # Dataset kwargs
-    if "output_hw" in deepssf:
-        v = deepssf["output_hw"]
-        if not (isinstance(v, (list, tuple)) and len(v) == 2):
-            raise ValueError(f"datasets.deepssf.output_hw must be a 2-item sequence like [101,101] in {path}")
-        dcfg["output_hw"] = (int(v[0]), int(v[1]))
-    for k in ("normalize", "step_multiplier", "step_q", "gap_q"):
-        if k in deepssf:
-            dcfg[k] = deepssf[k]
-
-    # Cache kwargs (subset used in make_deepssf_wds_train_test_loaders)
-    raw_cache = deepssf.get("cache", {})
-    if raw_cache is None:
-        raw_cache = {}
-    if not isinstance(raw_cache, dict):
-        raise ValueError(f"datasets.deepssf.cache must be a mapping/dict in {path}")
-    for k, default in (
-        ("samples_per_shard", 256),
-        ("spatial_dtype", "float16"),
-        ("target_dtype", "uint8"),
-        ("compression", "none"),
-    ):
-        if k in raw_cache:
-            cache_cfg[k] = raw_cache[k]
-        else:
-            cache_cfg[k] = default
-
-    return dict(dcfg), dict(cache_cfg)
-
-
 def _maybe_update_wds_manifest_cache_hash(cache_dir: Path, *, cache_hash: str) -> None:
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.exists():
@@ -208,7 +151,7 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help=(
             "Skip migrating deepSSF WebDataset caches under study_dir/cache/deepssf_wds. "
-            "By default, this script migrates caches using configs/benchmarks/deepssf.yaml."
+            "By default, this script migrates caches using the runtime's built-in deepSSF defaults."
         ),
     )
     parser.add_argument(
@@ -255,34 +198,22 @@ def main(argv: list[str]) -> int:
         chips_meta = _compute_chips_meta(plan, registry=REGISTRY)
 
     migrate_wds = not bool(args.skip_deepssf_wds_cache)
-    deepssf_bench_cfg_path = REPO_ROOT / "configs" / "benchmarks" / "deepssf.yaml"
-    dcfg: dict[str, Any]
-    cache_cfg: dict[str, Any]
-    if migrate_wds:
-        if deepssf_bench_cfg_path.exists():
-            try:
-                dcfg, cache_cfg = _load_benchmark_like_deepssf_cfg(deepssf_bench_cfg_path)
-            except Exception as e:
-                print(f"WARNING: Failed to parse deepSSF benchmark config; using defaults ({deepssf_bench_cfg_path}): {e}")
-                dcfg = {
-                    "output_hw": (101, 101),
-                    "normalize": True,
-                    "step_multiplier": 2.0,
-                    "step_q": 0.95,
-                    "gap_q": 0.999,
-                }
-                cache_cfg = {
-                    "samples_per_shard": 256,
-                    "spatial_dtype": "float16",
-                    "target_dtype": "uint8",
-                    "compression": "none",
-                }
-        else:
-            print(f"WARNING: deepSSF benchmark config not found; skipping deepSSF WDS cache migration: {deepssf_bench_cfg_path}")
-            migrate_wds = False
-            dcfg, cache_cfg = {}, {}
-    else:
-        dcfg, cache_cfg = {}, {}
+    dcfg = {
+        "output_hw": (101, 101),
+        "normalize": True,
+        "step_multiplier": 2.0,
+        "step_q": 0.95,
+        "gap_q": 0.999,
+    }
+    cache_cfg = {
+        "samples_per_shard": 256,
+        "spatial_dtype": "float16",
+        "target_dtype": "uint8",
+        "compression": "none",
+    }
+    if not migrate_wds:
+        dcfg = {}
+        cache_cfg = {}
     deepssf_splits = [str(s) for s in (args.deepssf_splits or ["train", "test"])]
     deepssf_sampler_hashes_cli = [str(s) for s in (args.deepssf_sampler_hashes or []) if str(s).strip()]
 
@@ -300,7 +231,7 @@ def main(argv: list[str]) -> int:
     print(f"Legacy rasters_hash (chip_groups-only; layers_all without alphaearth): {old_hash}")
     print(f"New rasters_hash (raster_params-only): {new_hash}")
     if migrate_wds:
-        print(f"Also migrating deepSSF WebDataset cache hashes (config: {deepssf_bench_cfg_path}).")
+        print("Also migrating deepSSF WebDataset cache hashes using built-in deepSSF defaults.")
         print(f"deepSSF WDS splits: {deepssf_splits}")
         print(f"deepSSF WDS config_hash: {legacy_config_hash} (legacy; without alphaearth_embeddings)")
         print(f"deepSSF WDS current config_hash: {config_hash}")
