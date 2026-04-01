@@ -254,10 +254,6 @@ def normalize_experiment(
     if not name:
         raise ValueError("Experiment must define a non-empty 'name'")
 
-    kind = str(merged.get("kind", "") or name).strip()
-    if not kind:
-        raise ValueError("Experiment must define a non-empty 'kind'")
-
     studies = merged.get("studies", "all")
     if studies != "all":
         if not isinstance(studies, list):
@@ -289,7 +285,6 @@ def normalize_experiment(
     normalized: dict[str, object] = {
         "version": 1,
         "name": name,
-        "kind": kind,
         "seed": int(merged.get("seed", 0)),
         "studies": studies,
         "timescales": timescales,

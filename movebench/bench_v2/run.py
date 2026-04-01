@@ -321,7 +321,7 @@ def _canonical_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in run_payload.items()
-        if key not in {"experiment_name", "experiment_kind", "run_key"}
+        if key not in {"experiment_name", "run_key"}
     }
 
 

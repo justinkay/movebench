@@ -291,8 +291,12 @@ def _run(
     tracker,
     model_kind: str,
 ) -> dict[str, object]:
+
+    # TODO: specify in config?
+    # issf currently not benefitting from GPU
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device("cpu")
+
     print("Using device", device)
     point_stores = resolved_artifacts["point_stores"]
     run_dir = Path(run_dir)

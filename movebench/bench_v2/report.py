@@ -60,7 +60,7 @@ def _empty_results_df() -> pd.DataFrame:
     return pd.DataFrame.from_records(
         [],
         columns=[
-            "experiment_kind",
+            "experiment_name",
             "run_key",
             "run_id",
             "run_status",
@@ -111,7 +111,6 @@ def _planned_run_index(
     for entry in expanded_experiments:
         experiment = dict(entry.get("experiment", {}))
         experiment_name = str(experiment.get("name", ""))
-        experiment_kind = str(experiment.get("kind", "") or experiment_name)
         for run in entry.get("runs", []):
             run_payload = dict(run)
             run_key = str(run_payload["run_key"])
@@ -119,18 +118,15 @@ def _planned_run_index(
                 planned[run_key] = {
                     **run_payload,
                     "experiment_names": [experiment_name],
-                    "experiment_kinds": [experiment_kind],
                 }
                 continue
             if experiment_name not in planned[run_key]["experiment_names"]:
                 planned[run_key]["experiment_names"].append(experiment_name)
-            if experiment_kind not in planned[run_key]["experiment_kinds"]:
-                planned[run_key]["experiment_kinds"].append(experiment_kind)
     return planned
 
 
-def _planned_runs_for_kind(
-    experiment_kind: str,
+def _planned_runs_for_experiment(
+    experiment_name: str,
     *,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
@@ -138,7 +134,7 @@ def _planned_runs_for_kind(
     return {
         run_key: run
         for run_key, run in planned.items()
-        if str(experiment_kind) in list(run["experiment_kinds"])
+        if str(experiment_name) in list(run["experiment_names"])
     }
 
 
@@ -156,14 +152,14 @@ def _sort_results_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _result_rows_for_kind(
-    experiment_kind: str,
+def _result_rows_for_experiment(
+    experiment_name: str,
     *,
     latest_run_records: dict[str, dict[str, object]] | None = None,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    planned_runs = _planned_runs_for_kind(
-        experiment_kind,
+    planned_runs = _planned_runs_for_experiment(
+        experiment_name,
         expanded_experiments=expanded_experiments,
     )
     if not planned_runs:
@@ -185,7 +181,7 @@ def _result_rows_for_kind(
                 continue
             rows.append(
                 {
-                    "experiment_kind": experiment_kind,
+                    "experiment_name": experiment_name,
                     "run_key": run_key,
                     "run_id": str(latest.get("run_id", "")),
                     "run_status": "completed",
@@ -208,7 +204,7 @@ def load_main_results(
     latest_run_records: dict[str, dict[str, object]] | None = None,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    return _result_rows_for_kind(
+    return _result_rows_for_experiment(
         "main_results",
         latest_run_records=latest_run_records,
         expanded_experiments=expanded_experiments,
@@ -220,7 +216,7 @@ def load_covariate_results(
     latest_run_records: dict[str, dict[str, object]] | None = None,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    return _result_rows_for_kind(
+    return _result_rows_for_experiment(
         "covariate_comparison",
         latest_run_records=latest_run_records,
         expanded_experiments=expanded_experiments,
@@ -621,7 +617,6 @@ def _planned_run_entries(
             "latest_status": status,
             "run_id": str(latest.get("run_id", "")),
             "experiment_names": list(planned_run.get("experiment_names", [])),
-            "experiment_kinds": list(planned_run.get("experiment_kinds", [])),
             "final_metrics": final_metrics,
             "missing_final_metrics_splits": missing_splits,
         }
