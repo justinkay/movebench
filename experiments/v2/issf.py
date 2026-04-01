@@ -5,6 +5,7 @@ EXPERIMENT = {
     "covariate_sets": ["all"],
     "methods": [
         "issf_linear",
+        "issf_mlp"
     ],
     "seed": 0,
 }
