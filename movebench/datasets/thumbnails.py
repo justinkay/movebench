@@ -39,8 +39,10 @@ from matplotlib import colormaps
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
+from sklearn.ensemble import IsolationForest
 
 from movebench.movement_math import safe_speed_m_s_numpy
+from movebench.thumbnail_config import normalize_anomaly_config
 from movebench.trajectories import (
     INDIVIDUAL_COL,
     LAT_COL,
@@ -55,9 +57,12 @@ _EPS = 1e-9  # guard against zero-range bounding boxes
 _GENERATED_OUTLIER_PREFIXES = ("frac_", "n_", "has_")
 _GENERATED_OUTLIER_NAMES = {"outlier_frac", "n_outlier_fixes", "has_any_outlier", "clean"}
 _COLOR_MOVEMENT_COLS = ("step_length_m", "step_dt_s", "speed_m_s")
-_COLOR_PREFIXES = ("gps:",)
+_COLOR_PREFIXES = ("gps:","height-above")
+_ANOMALY_MOVEMENT_COLS = ("step_length_m", "step_dt_s", "speed_m_s", "turn_angle_rad")
+_ANOMALY_RAW_MOVEMENT_COLS = ("ground-speed", "heading")
+_ANOMALY_PREFIXES = ("gps:", "height-above")
 _MIN_FINITE_COLOR_VALUES = 2
-_COLOR_QUANTILE_RANGE = (0.05, 0.95)
+_COLOR_QUANTILE_RANGE = (0.005, 0.995)
 _COLOR_BACKGROUND_RGB = np.array([244, 245, 247], dtype=np.uint8)
 _NEUTRAL_RGB = np.array([112, 122, 132], dtype=np.uint8)
 _VIRIDIS = colormaps["viridis"]
@@ -129,12 +134,128 @@ def _has_enough_finite_numeric(series: pd.Series) -> bool:
     return int(np.isfinite(values).sum()) >= _MIN_FINITE_COLOR_VALUES
 
 
-def detect_color_columns(df: pd.DataFrame) -> list[str]:
+def _candidate_anomaly_feature_columns(
+    df: pd.DataFrame,
+    *,
+    anomaly_config: dict[str, object] | None = None,
+) -> list[str]:
+    config = normalize_anomaly_config(anomaly_config)
+    requested = config.get("feature_columns")
+    if requested is None:
+        candidates: list[str] = []
+        for col in _ANOMALY_MOVEMENT_COLS + _ANOMALY_RAW_MOVEMENT_COLS:
+            if col in df.columns and col not in candidates:
+                candidates.append(col)
+        for col in df.columns:
+            if col in candidates:
+                continue
+            if any(col.startswith(prefix) for prefix in _ANOMALY_PREFIXES):
+                candidates.append(col)
+        return candidates
+    return [str(col) for col in requested if str(col) in df.columns]
+
+
+def anomaly_feature_columns(
+    df: pd.DataFrame,
+    *,
+    anomaly_config: dict[str, object] | None = None,
+) -> list[str]:
+    cols: list[str] = []
+    for col in _candidate_anomaly_feature_columns(df, anomaly_config=anomaly_config):
+        values = _coerce_numeric(df[col])
+        finite = np.isfinite(values)
+        if int(finite.sum()) < 2:
+            continue
+        std = float(np.nanstd(values))
+        if not np.isfinite(std) or std <= 0.0:
+            continue
+        cols.append(col)
+    return cols
+
+
+def add_iforest_anomaly_score(
+    df: pd.DataFrame,
+    *,
+    anomaly_config: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    config = normalize_anomaly_config(anomaly_config)
+    score_column = str(config["score_column"])
+    feature_columns = anomaly_feature_columns(df, anomaly_config=config)
+    if len(df) == 0 or not feature_columns:
+        return df.copy()
+
+    blocks: list[np.ndarray] = []
+    for col in feature_columns:
+        values = _coerce_numeric(df[col])
+        finite = np.isfinite(values)
+        if int(finite.sum()) < 2:
+            continue
+        std = float(np.nanstd(values))
+        if not np.isfinite(std) or std <= 0.0:
+            continue
+        median = float(np.nanmedian(values))
+        if not np.isfinite(median):
+            continue
+        mean = float(np.nanmean(values))
+        if not np.isfinite(mean):
+            continue
+        filled = values.copy()
+        filled[~finite] = median
+        scaled = (filled - mean) / std
+        if not np.isfinite(scaled).all():
+            continue
+        blocks.append(scaled.astype(np.float64, copy=False))
+
+    if not blocks:
+        return df.copy()
+
+    feature_matrix = np.stack(blocks, axis=1)
+    model = IsolationForest(
+        n_estimators=int(config["n_estimators"]),
+        contamination=config["contamination"],
+        random_state=int(config["random_state"]),
+    )
+    scores = -model.fit(feature_matrix).score_samples(feature_matrix)
+    out = df.copy()
+    out[score_column] = np.asarray(scores, dtype=np.float64)
+    return out
+
+
+def load_thumbnail_source_df_with_anomaly(
+    trajectories_path: Path | str,
+    *,
+    split: str | None = "train",
+    include_movement_features: bool = True,
+    anomaly_config: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    config = normalize_anomaly_config(anomaly_config)
+    full_df = load_thumbnail_source_df(
+        trajectories_path,
+        split=None,
+        include_movement_features=include_movement_features,
+    )
+    if include_movement_features:
+        full_df = add_iforest_anomaly_score(full_df, anomaly_config=config)
+    if split is not None and SET_COL in full_df.columns:
+        return full_df[full_df[SET_COL] == split].copy()
+    return full_df
+
+
+def detect_color_columns(
+    df: pd.DataFrame,
+    *,
+    extra_columns: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
     """Return numeric movement/GPS columns suitable for per-fix coloring."""
     cols: list[str] = []
     for col in _COLOR_MOVEMENT_COLS:
         if col in df.columns and _has_enough_finite_numeric(df[col]):
             cols.append(col)
+    for col in extra_columns or ():
+        if col in cols:
+            continue
+        if col in df.columns and _has_enough_finite_numeric(df[col]):
+            cols.append(str(col))
     for col in df.columns:
         if col in cols:
             continue
@@ -627,17 +748,28 @@ def build_track_thumbnails(
     scale_mode: str = "individual",
     scale_quantile: float = 0.5,
     color_by: str | None = None,
+    anomaly_config: dict[str, object] | None = None,
     exclude_outlier_cols: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
 ) -> TrackThumbnailBuild:
     """Build thumbnail images, metadata, and chunk paths for one trajectories CSV/split."""
     if scale_mode not in ("individual", "chunk"):
         raise ValueError(f"scale_mode must be 'individual' or 'chunk', got {scale_mode!r}")
 
-    df = load_thumbnail_source_df(trajectories_path, split=split, include_movement_features=True)
+    normalized_anomaly = normalize_anomaly_config(anomaly_config)
+    anomaly_score_column = str(normalized_anomaly["score_column"])
+    if color_by == anomaly_score_column:
+        df = load_thumbnail_source_df_with_anomaly(
+            trajectories_path,
+            split=split,
+            include_movement_features=True,
+            anomaly_config=normalized_anomaly,
+        )
+    else:
+        df = load_thumbnail_source_df(trajectories_path, split=split, include_movement_features=True)
     outlier_cols = detect_outlier_cols(df, exclude=exclude_outlier_cols)
     color_range: tuple[float, float] | None = None
     if color_by is not None:
-        color_cols = detect_color_columns(df)
+        color_cols = detect_color_columns(df, extra_columns=[anomaly_score_column])
         if color_by not in color_cols:
             raise KeyError(f"{color_by!r} is not an available color column. Available: {color_cols}")
         color_range = _fit_color_range(_coerce_numeric(df[color_by]))

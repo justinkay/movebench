@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ DEFAULT_EMBEDDING_CONFIG: dict[str, Any] = {
     "device_preference": "auto",
     "batch_size": 32,
     "image_size": 224,
+    "feature_source": "cls_token",
+    "intermediate_layer_offset": 2,
 }
 
 DEFAULT_PROJECTION_CONFIG: dict[str, Any] = {
@@ -143,18 +146,51 @@ def serialize_neighbors(
     return rows
 
 
+def serialize_row_index_neighbors(
+    neighbor_indices: np.ndarray,
+    *,
+    neighbor_distances: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, nbrs in enumerate(np.asarray(neighbor_indices)):
+        ids = [int(n) for n in np.asarray(nbrs).tolist() if int(n) >= 0]
+        payload: dict[str, Any] = {"ids": ids}
+        if neighbor_distances is not None and len(neighbor_distances) > idx:
+            payload["distances"] = [
+                float(v) for v in np.asarray(neighbor_distances[idx]).tolist()[: len(ids)]
+            ]
+        rows.append(payload)
+    return rows
+
+
+def thumbnail_png_bytes_list(images: np.ndarray) -> list[bytes]:
+    out: list[bytes] = []
+    for image in images:
+        mode = "L" if image.ndim == 2 else "RGB"
+        buf = io.BytesIO()
+        Image.fromarray(image, mode=mode).save(buf, format="PNG", optimize=True)
+        out.append(buf.getvalue())
+    return out
+
+
 def build_atlas_dataframe(
     metadata: pd.DataFrame,
     *,
     projection: np.ndarray,
     neighbors: list[dict[str, Any]],
-    thumbnail_paths: list[str],
+    thumbnail_paths: list[str | None],
+    atlas_neighbors: list[dict[str, Any]] | None = None,
+    thumbnail_images: list[bytes] | None = None,
 ) -> pd.DataFrame:
     df = metadata.copy()
+    df["atlas_row_id"] = np.arange(len(df), dtype=np.int64)
     df["projection_x"] = projection[:, 0] if len(projection) else np.array([], dtype=np.float32)
     df["projection_y"] = projection[:, 1] if len(projection) else np.array([], dtype=np.float32)
     df["neighbors"] = neighbors
+    df["atlas_neighbors"] = atlas_neighbors if atlas_neighbors is not None else [{} for _ in range(len(df))]
     df["thumbnail_path"] = thumbnail_paths
+    if thumbnail_images is not None:
+        df["thumbnail_image"] = thumbnail_images
     return df
 
 
@@ -206,11 +242,17 @@ def build_atlas_artifacts_from_config(
     )
     neighbor_idx, neighbor_dist = compute_neighbors(embeddings)
     neighbors = serialize_neighbors(neighbor_idx, meta["thumbnail_id"].astype(str).tolist(), neighbor_distances=neighbor_dist)
+    atlas_neighbors = serialize_row_index_neighbors(
+        neighbor_idx,
+        neighbor_distances=neighbor_dist,
+    )
     atlas_df = build_atlas_dataframe(
         meta,
         projection=projection,
         neighbors=neighbors,
         thumbnail_paths=thumb_paths,
+        atlas_neighbors=atlas_neighbors,
+        thumbnail_images=thumbnail_png_bytes_list(build.images),
     )
     save_atlas_artifacts(
         config=config,

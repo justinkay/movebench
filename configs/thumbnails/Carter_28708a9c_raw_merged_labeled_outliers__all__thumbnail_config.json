@@ -1,0 +1,42 @@
+{
+    "anomaly": {
+    "contamination": "auto",
+    "feature_columns": null,
+    "n_estimators": 1000,
+    "random_state": 0,
+    "score_column": "iforest_anomaly_score"
+  },
+  "data": {
+    "csv_path": "/data/vision/beery/scratch/shir/codes/movebench/notebooks/Carter_28708a9c_raw_merged_labeled_outliers.csv",
+    "split": "all"
+  },
+  "thumbnail": {
+    "chunk_size": 50,
+    "color_by": null,
+    "img_size": 64,
+    "line_width": 3,
+    "marker_radius": 4,
+    "min_chunk_size": 1,
+    "padding": 2,
+    "scale_mode": "individual",
+    "scale_quantile": 0.5,
+    "stride": null
+  },
+  "embedding": {
+    "model_name": "dinov2_vits14",
+    "device_preference": "cuda",
+    "batch_size": 64,
+    "image_size": 224,
+  "feature_source": "intermediate_patch_mean",
+  "intermediate_layer_offset": 3
+
+},
+"projection": {
+    "method": "umap",
+    "random_state": 17,
+    "n_neighbors": 20,
+    "min_dist": 0.10,
+    "perplexity": 30.0
+},
+  "version": "thumbnail_generation.v1"
+}

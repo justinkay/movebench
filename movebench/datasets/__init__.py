@@ -11,9 +11,12 @@ __all__ = [
     "iSSFDataset",
     "TrackThumbnailBuild",
     "TrackThumbnailDataset",
+    "add_iforest_anomaly_score",
+    "anomaly_feature_columns",
     "build_track_thumbnails",
     "detect_color_columns",
     "load_thumbnail_source_df",
+    "load_thumbnail_source_df_with_anomaly",
 ]
 
 _ATTR_TO_MODULE = {
@@ -23,9 +26,12 @@ _ATTR_TO_MODULE = {
     "iSSFDataset": ("movebench.datasets.ssf", "iSSFDataset"),
     "TrackThumbnailBuild": ("movebench.datasets.thumbnails", "TrackThumbnailBuild"),
     "TrackThumbnailDataset": ("movebench.datasets.thumbnail_dataset", "TrackThumbnailDataset"),
+    "add_iforest_anomaly_score": ("movebench.datasets.thumbnails", "add_iforest_anomaly_score"),
+    "anomaly_feature_columns": ("movebench.datasets.thumbnails", "anomaly_feature_columns"),
     "build_track_thumbnails": ("movebench.datasets.thumbnails", "build_track_thumbnails"),
     "detect_color_columns": ("movebench.datasets.thumbnails", "detect_color_columns"),
     "load_thumbnail_source_df": ("movebench.datasets.thumbnails", "load_thumbnail_source_df"),
+    "load_thumbnail_source_df_with_anomaly": ("movebench.datasets.thumbnails", "load_thumbnail_source_df_with_anomaly"),
 }
 
 
