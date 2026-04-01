@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     ) as tmp:
         json.dump(payload, tmp, indent=2, sort_keys=True)
         Path(tmp.name).replace(path)
+    os.chmod(path, 0o664)
 
 
 def write_chip_download_report(

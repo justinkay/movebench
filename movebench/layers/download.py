@@ -118,6 +118,7 @@ def download_tiff(url: str, out_path: Path, *, tries: int = 5) -> None:
                     if chunk:
                         tmp.write(chunk)
             tmp_path.replace(out_path)
+            os.chmod(out_path, 0o664)
             return
         except requests.RequestException:
             if tmp_path is not None and tmp_path.exists():
@@ -756,6 +757,7 @@ def _write_json_atomic(
     ) as tmp:
         json.dump(payload, tmp, indent=2, sort_keys=sort_keys)
         Path(tmp.name).replace(path)
+    os.chmod(path, 0o664)
 
 
 def _chips_meta_path(study_dir: Path, rasters_hash: str) -> Path:

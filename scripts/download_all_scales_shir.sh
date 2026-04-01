@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+umask 0002
 
 extra_args=("$@")
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +45,17 @@ study_ids=(
     "Klzsch_22d42221_2e9dace9_all"
     "Schwemmer_aa260e37_raw_merged"
     "Eby_c5d8e38f_raw_merged"
+    "Morganti_8371ef00_raw_merged"
+    "Newman_e7d1c177_raw_merged"
+    "Palomares_5e487e1e_raw_merged"
+    "Porteus_86f58f48_raw_merged"
+    "Roetman_0a9bcb2a_raw_merged"
+    "Serieys_ed70c4c7_raw_Lynx_rufus"
+    "Serieys_ed70c4c7_raw_Urocyon_cinereoargenteus"
+    "Todd_3cef8e9d_raw_merged"
+    "Wagner_6f734b0f_raw_merged"
+    "egan2025_deer"
+    "potts2022_pig"
 )
 
 for layers_config in "${layers_configs[@]}"; do
