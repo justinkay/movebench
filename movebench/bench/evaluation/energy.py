@@ -52,6 +52,19 @@ def _validate_coords_2d(coords_m: torch.Tensor) -> torch.Tensor:
     return coords_m
 
 
+def _weighted_pairwise_l2(coords_m: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
+    n = int(coords_m.shape[0])
+    total = torch.tensor(0.0, dtype=torch.float64)
+    block_size = min(256, n)
+    for start in range(0, n, block_size):
+        stop = min(n, start + block_size)
+        diff = coords_m[start:stop].unsqueeze(1) - coords_m.unsqueeze(0)
+        distances = torch.sqrt(torch.sum(diff * diff, dim=2))
+        weights = probs[start:stop].view(-1, 1) * probs.view(1, -1)
+        total = total + torch.sum(distances * weights)
+    return total
+
+
 def _regular_step(coords: torch.Tensor, *, field: str) -> float:
     coords = _as_float64_tensor(coords).reshape(-1)
     if int(coords.numel()) <= 0:
@@ -93,8 +106,7 @@ def _energy_terms_discrete(
         )
 
     accuracy = torch.matmul(torch.linalg.norm(coords_m - truth.view(1, 2), dim=1), probs)
-    pairwise = torch.cdist(coords_m, coords_m)
-    calibration = torch.sum(pairwise * probs.view(-1, 1) * probs.view(1, -1))
+    calibration = _weighted_pairwise_l2(coords_m, probs)
     score = accuracy - 0.5 * calibration
     return float(score), float(accuracy), float(calibration)
 

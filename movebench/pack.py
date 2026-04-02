@@ -13,7 +13,10 @@ from movebench.datasets.deepssf_wds_cache import (
     ensure_deepssf_wds_cache_split,
     read_deepssf_wds_manifest_if_complete,
 )
-from movebench.features.points import point_store_dir, point_store_train_stats_path
+from movebench.features.points import (
+    load_point_store_manifest,
+    point_store_train_stats_path,
+)
 from movebench.study import normalize_split_keys
 
 
@@ -240,16 +243,23 @@ def _require_pack_inputs(job: PackJob) -> None:
     rasters_hash = str(job.timescale["rasters_hash"])
     sampler_hash = str(job.timescale["sampler_hash"])
     for split in job.split_keys:
-        store_dir = point_store_dir(
-            study_dir=study_dir,
-            split=str(split),
-            rasters_hash=rasters_hash,
-            sampler_hash=sampler_hash,
-        )
-        if not Path(store_dir).exists():
-            raise FileNotFoundError(
-                f"Missing point store for study={job.study_id} timescale={job.timescale_key} split={split}: {store_dir}"
+        try:
+            load_point_store_manifest(
+                study_dir=study_dir,
+                split=str(split),
+                rasters_hash=rasters_hash,
+                sampler_hash=sampler_hash,
             )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Pack prerequisites missing for study={job.study_id} "
+                f"timescale={job.timescale_key} split={split}: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise ValueError(
+                f"Pack prerequisites invalid for study={job.study_id} "
+                f"timescale={job.timescale_key} split={split}: {exc}"
+            ) from exc
     if bool(job.timescale["normalize"]):
         stats_path = point_store_train_stats_path(
             study_dir=study_dir,
