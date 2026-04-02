@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from movebench.cli import download, extract, ingest
+from movebench.cli import download, extract, ingest, pack, slurm
 
 _BENCH_OPTIONAL_DEPENDENCIES = {"mlflow", "matplotlib"}
 
@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     download.register(subparsers)
     extract.register(subparsers)
     ingest.register(subparsers)
+    pack.register(subparsers)
+    slurm.register(subparsers)
     _register_bench_commands(subparsers)
 
     return parser

@@ -105,13 +105,15 @@ def _prediction_payload(
         for batch in loader:
             features = _batch_to_device(batch, device)
             logits, _loss, _metrics = model(features)
-            loss_mask = batch["loss_mask"].to(torch.bool)
-            if not bool(loss_mask.any().item()):
+            prediction_mask = batch.get("prediction_mask", batch["loss_mask"]).to(
+                torch.bool
+            )
+            if not bool(prediction_mask.any().item()):
                 continue
             pseudo_probs = F.softmax(logits[..., 1:], dim=-1).detach().cpu()
-            point_ids.append(batch["point_id_start"][loss_mask].to(torch.int64))
-            coords.append(batch["coords_m"][loss_mask].to(torch.float32))
-            probs.append(pseudo_probs[loss_mask].to(torch.float32))
+            point_ids.append(batch["point_id_start"][prediction_mask].to(torch.int64))
+            coords.append(batch["coords_m"][prediction_mask].to(torch.float32))
+            probs.append(pseudo_probs[prediction_mask].to(torch.float32))
     return {
         "prediction_kind": "discrete",
         "point_id_start": torch.cat(point_ids, dim=0),

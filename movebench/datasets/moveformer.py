@@ -88,16 +88,45 @@ def _coords_m(
     return coords[:, 1:, :]
 
 
-def _loss_mask(
-    chain: list[_StepRecord], start: int, end: int, split_key: str
+def _split_mask(
+    chain: list[_StepRecord],
+    start: int,
+    end: int,
+    split_key: str,
+    *,
+    require_previous_token: bool,
 ) -> np.ndarray:
     mask = np.asarray(
         [record.split_key == split_key for record in chain[start:end]],
         dtype=np.bool_,
     )
-    if len(mask) > 0:
+    if len(mask) > 0 and (int(start) > 0 or require_previous_token):
         mask[0] = False
     return mask
+
+
+def _loss_mask(
+    chain: list[_StepRecord], start: int, end: int, split_key: str
+) -> np.ndarray:
+    return _split_mask(
+        chain,
+        start,
+        end,
+        split_key,
+        require_previous_token=True,
+    )
+
+
+def _prediction_mask(
+    chain: list[_StepRecord], start: int, end: int, split_key: str
+) -> np.ndarray:
+    return _split_mask(
+        chain,
+        start,
+        end,
+        split_key,
+        require_previous_token=False,
+    )
 
 
 class MoveFormerPointStoreDataset(Dataset):
@@ -371,6 +400,7 @@ class MoveFormerPointStoreDataset(Dataset):
         }
         encoded = self._processor.encode(traj)
         encoded["loss_mask"] = _loss_mask(chain, start, end, self.split)
+        encoded["prediction_mask"] = _prediction_mask(chain, start, end, self.split)
         encoded["point_id_start"] = np.asarray(
             [record.point_id_start for record in window],
             dtype=np.int64,
