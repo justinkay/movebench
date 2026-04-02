@@ -22,11 +22,12 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
 - [x] (2026-04-01 22:15Z) Updated this plan after the benchmark namespace cutover so active runtime references now point at `movebench/bench/`, `experiments/`, `tests/bench`, and `results/bench`.
 - [x] (2026-04-01 22:38Z) Implemented the shared package-native Slurm launcher/runtime helpers and top-level CLI registration in `movebench/cli/main.py`, `movebench/cli/slurm.py`, and `movebench/slurm/`.
 - [x] (2026-04-01 22:38Z) Implemented the first-class local `movebench pack` runtime and CLI in `movebench/cli/pack.py` and `movebench/pack.py`, including shared pack argument parsing, study/timescale queue resolution, cache skip detection, prerequisite checks, and per-job execution helpers.
-- [ ] Implement native `movebench slurm extract` and `movebench slurm pack` commands, including worker mode and `--dry-run`.
+- [x] (2026-04-02 18:45Z) Implemented native `movebench slurm extract` and `movebench slurm pack` in `movebench/slurm/extract.py` and `movebench/slurm/pack.py`, including hidden worker mode, shared `srun` command construction, `--dry-run`, extract skip/block planning, and Slurm pack reuse of `movebench/pack.py`.
 - [ ] Refactor `movebench/bench/run.py` so local execution and Slurm execution share the same pending-run selection and run execution helpers.
 - [ ] Implement native `movebench slurm bench run`.
 - [x] (2026-04-01 22:38Z) Added `tests/test_pack.py` and ran `python -m unittest -v tests.test_pack` to verify the Milestone 1 parser/launcher skeleton and the Milestone 2 local pack planner/executor.
-- [ ] Add or update unit tests for parser shape, local pack execution, launcher logic, extract, pack, and benchmark run selection; then run the targeted suites and `python -m unittest -v` (completed so far: `tests.test_pack`; remaining: the future extract, Slurm pack, Slurm bench, affected `bench` suites, and the full test run).
+- [ ] Add or update unit tests for parser shape, local pack execution, launcher logic, extract, pack, and benchmark run selection; then run the targeted suites and `python -m unittest -v` (completed so far: `tests.test_pack`, `tests.test_slurm_extract`, and `tests.test_slurm_pack`; remaining: Slurm bench, the affected `bench` suites, and the full test run).
+- [x] (2026-04-02 18:45Z) Added `tests/test_slurm_extract.py` and `tests/test_slurm_pack.py`, confirmed they failed against the placeholder implementations, then reran `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack` with the MoveBench micromamba environment after implementation and reviewed the passing output.
 
 ## Surprises & Discoveries
 
@@ -50,6 +51,12 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
 
 - Observation: the legacy local cache script is stale in one pack-prerequisite detail: it imports a helper that no longer exists in the active points module.
   Evidence: importing `select_point_store_dir` from `movebench.features.points` now raises `ImportError`, while the current exported path helpers are `point_store_dir(...)` and `point_store_train_stats_path(...)`.
+
+- Observation: `movebench/pack.py`’s shared argument registration makes `--studies` and `--timescales` required, which conflicts with Slurm worker mode even though the worker should reuse the same parsing and execution helpers.
+  Evidence: the first pre-implementation run of `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack` failed in `tests.test_slurm_pack.SlurmPackTests.test_worker_executes_shared_pack_job` because the parser exited before hidden worker flags could be handled.
+
+- Observation: the current local extract CLI no longer computes train normalization stats itself, so the Slurm extract worker needs to keep that step explicit to satisfy the milestone’s skip contract.
+  Evidence: `movebench/cli/extract.py` currently calls `Study.extract_point_features(...)` but does not call `Study.compute_normalization_vals(...)`, while `scripts/slurm/extract.py` still performs the train-stats step after extraction.
 
 ## Decision Log
 
@@ -89,9 +96,17 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
   Rationale: the current `movebench.features.points` module no longer exports `select_point_store_dir(...)`, so the native runtime should validate prerequisites through the active path helpers that correspond to the current point-store and normalization artifacts.
   Date/Author: 2026-04-01 / assistant
 
+- Decision: keep Slurm worker identity in hidden flags (`--worker-study`, `--worker-timescale`, `--worker-layers-config`, `--worker-sampler-config`) while reusing the visible `--splits` and pack build-option flags for both launcher and worker parsing.
+  Rationale: this keeps the worker commands short, lets explicit split/build overrides round-trip through the same canonicalization code as the user-facing CLI, and avoids a second set of worker-only option names for settings that already exist.
+  Date/Author: 2026-04-02 / assistant
+
+- Decision: relax `--studies` and `--timescales` from “argparse-required” to “launcher-required” only inside `movebench/slurm/pack.py`, without changing `movebench/pack.py`.
+  Rationale: local `movebench pack` should keep its strict user-facing parser contract, but `movebench slurm pack` still needs to accept hidden worker mode that identifies the job with `--worker-study` and `--worker-timescale` instead of the visible selection flags.
+  Date/Author: 2026-04-02 / assistant
+
 ## Outcomes & Retrospective
 
-This plan started as the design and implementation blueprint for the native Slurm and pack work. It resolved the main architecture questions that mattered before writing code: where the CLI should live, what the benchmark job boundary should be, how cache packaging should relate to `bench`, and why the legacy `scripts/slurm/` files should not become the permanent runtime. On 2026-03-28 it was revised first to reflect the current split contract, and then to make cache packaging a first-class `pack` workflow with a local CLI and a Slurm wrapper. On 2026-04-01 it was updated again to follow the permanent benchmark namespace and paths. Later on 2026-04-01, Milestones 1 and 2 were implemented and validated with `python -m unittest -v tests.test_pack`, which means the first user-visible slice now exists: `movebench pack ...` is registered, plans work from timescale metadata, skips complete caches, and executes pending study/timescale jobs locally, while the top-level `slurm` parser tree and shared launcher helper are in place for the remaining milestones.
+This plan started as the design and implementation blueprint for the native Slurm and pack work. It resolved the main architecture questions that mattered before writing code: where the CLI should live, what the benchmark job boundary should be, how cache packaging should relate to `bench`, and why the legacy `scripts/slurm/` files should not become the permanent runtime. On 2026-03-28 it was revised first to reflect the current split contract, and then to make cache packaging a first-class `pack` workflow with a local CLI and a Slurm wrapper. On 2026-04-01 it was updated again to follow the permanent benchmark namespace and paths. Later on 2026-04-01, Milestones 1 and 2 were implemented and validated with `python -m unittest -v tests.test_pack`, which means the first user-visible slice now exists: `movebench pack ...` is registered, plans work from timescale metadata, skips complete caches, and executes pending study/timescale jobs locally, while the top-level `slurm` parser tree and shared launcher helper are in place for the remaining milestones. On 2026-04-02, Milestones 3 and 4 were implemented and validated with `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack`, so the supported CLI now includes `movebench slurm extract ...` and `movebench slurm pack ...` with dry-run planning, hidden worker mode, extract skip/block checks, and shared pack runtime reuse; benchmark Slurm execution and the broader full-suite validation still remain for later milestones.
 
 ## Context and Orientation
 
@@ -307,3 +322,4 @@ Revision note (2026-03-28 / assistant): updated the plan after the split-trackin
 Revision note (2026-03-28 / assistant): revised the plan so deepSSF cache building becomes a first-class `movebench pack` workflow, with `movebench slurm pack` as a wrapper over the same runtime and `wds` retained only as an internal artifact name.
 Revision note (2026-04-01 / assistant): updated the plan after the benchmark namespace cutover so active references point at the permanent `bench` worktree and paths: `movebench/bench/`, `experiments/`, `tests/bench`, and `results/bench`.
 Revision note (2026-04-01 / assistant): implemented Milestones 1 and 2, recorded the active point-store prerequisite helpers that replaced the stale legacy import, and updated the plan state to reflect the passing `tests.test_pack` validation for the first `movebench pack` slice.
+Revision note (2026-04-02 / assistant): implemented Milestones 3 and 4, added `tests.test_slurm_extract` and `tests.test_slurm_pack`, recorded the parser/normalization discoveries that affected the worker shape, and updated the plan state after the passing targeted slice validation in the MoveBench micromamba environment.
