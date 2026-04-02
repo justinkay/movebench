@@ -11,9 +11,10 @@ from movebench.datasets.deepssf_wds_cache import (
     cache_dir_for_study,
     deepssf_wds_cache_hash,
     ensure_deepssf_wds_cache_split,
+    read_deepssf_wds_manifest_if_complete,
 )
 from movebench.features.points import point_store_dir, point_store_train_stats_path
-from movebench.trajectories import canonicalize_split_key
+from movebench.study import normalize_split_keys
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ def _normalize_split_values(values: list[str] | None) -> list[str] | None:
     normalized = _split_arg_values(values)
     if normalized is None:
         return None
-    return [canonicalize_split_key(value) for value in normalized]
+    return normalize_split_keys(normalized)
 
 
 def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
@@ -166,12 +167,7 @@ def _expected_cache_hash(
 
 
 def _cache_split_complete(cache_dir: Path) -> bool:
-    if not (cache_dir / "manifest.json").exists():
-        return False
-    for pattern in ("*.tar", "*.tar.gz"):
-        if any(cache_dir.rglob(pattern)):
-            return True
-    return False
+    return read_deepssf_wds_manifest_if_complete(cache_dir) is not None
 
 
 def resolve_pack_jobs(

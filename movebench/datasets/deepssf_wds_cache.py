@@ -138,6 +138,21 @@ def list_deepssf_wds_shards(cache_dir: str | Path) -> list[Path]:
     return sorted([p for p in shards_dir.glob("shard-*.tar*") if p.is_file()])
 
 
+def read_deepssf_wds_manifest_if_complete(
+    cache_dir: str | Path,
+) -> dict[str, Any] | None:
+    cache_dir = Path(cache_dir)
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    if not list_deepssf_wds_shards(cache_dir):
+        return None
+    try:
+        return read_deepssf_wds_manifest(manifest_path)
+    except Exception:
+        return None
+
+
 def build_deepssf_wds_cache(
     dataset: Any,
     out_dir: str | Path,
@@ -541,6 +556,7 @@ def ensure_deepssf_wds_cache_split(
         cache_hash=str(cache_hash),
     )
     manifest_path = cache_dir / "manifest.json"
+    manifest = read_deepssf_wds_manifest_if_complete(cache_dir)
 
     if bool(overwrite) and cache_dir.exists():
         ds = study.deepssf_dataset(**ds_kwargs)
@@ -557,12 +573,13 @@ def ensure_deepssf_wds_cache_split(
             resume=bool(resume),
             progress=True,
         )
-    elif not manifest_path.exists():
+    elif manifest is None:
         if not build_if_missing:
             raise FileNotFoundError(
                 f"deepSSF cache missing: {manifest_path} (set datasets.deepssf.cache.build_if_missing=true)"
             )
         ds = study.deepssf_dataset(**ds_kwargs)
+        rebuild_stale_cache = manifest_path.exists()
         build_deepssf_wds_cache(
             ds,
             cache_dir,
@@ -572,12 +589,13 @@ def ensure_deepssf_wds_cache_split(
             compression=compression,
             seed=int(seed),
             num_workers=int(build_workers),
-            overwrite=False,
-            resume=bool(resume),
+            overwrite=bool(rebuild_stale_cache),
+            resume=bool(resume) and not bool(rebuild_stale_cache),
             progress=True,
         )
-
-    manifest = read_deepssf_wds_manifest(manifest_path)
+        manifest = None
+    if manifest is None:
+        manifest = read_deepssf_wds_manifest(manifest_path)
     return cache_dir, manifest
 
 

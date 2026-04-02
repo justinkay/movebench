@@ -51,7 +51,7 @@ def _rows_for_raster_downloads(
     return sub[sub[POINT_ID_COL].astype(int).isin(wanted)].copy()
 
 
-def _normalize_split_keys(split_keys: list[object]) -> list[str]:
+def normalize_split_keys(split_keys: list[object]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for raw in split_keys:
@@ -64,7 +64,7 @@ def _normalize_split_keys(split_keys: list[object]) -> list[str]:
 
 
 def _build_split_inventory(split_keys: list[object]) -> dict[str, object]:
-    ordered = _normalize_split_keys(list(split_keys))
+    ordered = normalize_split_keys(list(split_keys))
     held_out = [split for split in ordered if split != "train"]
     return {
         "has_train": "train" in ordered,
