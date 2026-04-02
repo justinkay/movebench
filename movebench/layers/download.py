@@ -658,6 +658,7 @@ def download_tiled_image(
             finally:
                 for ds in src_files:
                     ds.close()
+        os.chmod(out_path, 0o664)
 
         _fix_geotiff_colorinterp(out_path, num_bands=int(num_bands))
 
@@ -1151,6 +1152,7 @@ def _write_compat_index(index_path: Path, source_index_path: Path) -> None:
         payload = json.load(f)
     with open(index_path, "w") as f:
         json.dump(payload, f, indent=2)
+    os.chmod(index_path, 0o664)
 
 
 def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str, Any]:
@@ -1349,42 +1351,15 @@ def download_chips(
             for group_name in plan.chip_groups.keys()
         )
         if can_skip_all:
-            completed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-            chip_group_stats = {
-                group_name: {
-                    "downloaded": 0,
-                    "existing": len(reqs),
-                    "failed": 0,
-                    "failures": [],
-                }
-                for group_name in plan.chip_groups.keys()
-            }
-            report_path = write_chip_download_report(
-                study_dir=study_dir,
-                rasters_hash=plan.rasters_hash,
-                request_hash=request_hash,
-                requested_splits=requested_splits,
-                requested_point_count=len(reqs),
-                started_at=started_at,
-                completed_at=completed_at,
-                chip_groups=chip_group_stats,
-                status="ok",
-            )
-            update_request_status(
-                meta,
-                request_hash=request_hash,
-                status="ok",
-                report_path=report_path,
-                completed_at=completed_at,
-            )
-            _write_json_atomic(meta_path, meta)
+            # Keep the skip-existing fast path read-only so one user can reuse
+            # another user's completed download without mutating shared metadata.
             return {
                 "total_points": len(reqs),
                 "downloaded": 0,
                 "existing": len(reqs) * len(plan.chip_groups),
                 "failed": 0,
                 "failures": [],
-                "report_path": str(report_path),
+                "report_path": None,
                 "request_hash": request_hash,
                 "status": "ok",
             }
@@ -1640,8 +1615,9 @@ def download_tile_layer(
                 years_out[int(y)]["existing"] = int(n)
 
             if all_complete:
-                src = tile_dir / f"index_{int(resolved_years[0])}.json"
-                _write_compat_index(index_path, src)
+                if not index_path.exists():
+                    src = tile_dir / f"index_{int(resolved_years[0])}.json"
+                    _write_compat_index(index_path, src)
                 return {
                     "temporal": "annual",
                     "years": years_out,
