@@ -113,6 +113,7 @@ def download_tiff(url: str, out_path: Path, *, tries: int = 5) -> None:
                 prefix=f"{out_path.name}.",
                 suffix=".tmp",
             ) as tmp:
+                os.fchmod(tmp.fileno(), 0o664)
                 tmp_path = Path(tmp.name)
                 for chunk in r.iter_content(1 << 20):
                     if chunk:
@@ -756,6 +757,7 @@ def _write_json_atomic(
         suffix=".tmp",
         encoding="utf-8",
     ) as tmp:
+        os.fchmod(tmp.fileno(), 0o664)
         json.dump(payload, tmp, indent=2, sort_keys=sort_keys)
         Path(tmp.name).replace(path)
     os.chmod(path, 0o664)

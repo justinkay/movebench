@@ -61,6 +61,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         suffix=".tmp",
         encoding="utf-8",
     ) as tmp:
+        os.fchmod(tmp.fileno(), 0o664)
         json.dump(payload, tmp, indent=2, sort_keys=True)
         Path(tmp.name).replace(path)
     os.chmod(path, 0o664)
