@@ -8,7 +8,7 @@ This document must be maintained in accordance with [PLANS.md](/data/vision/beer
 
 After this change, a user will be able to run the deepSSF cache-packaging workflow directly from the main CLI as `movebench pack ...`, and submit the three batch-oriented workflows from the main CLI instead of jumping into `scripts/slurm/`: `movebench slurm extract ...`, `movebench slurm pack ...`, and `movebench slurm bench run ...`. The visible proof is that the Slurm commands support `--dry-run`, print the exact `srun` commands they would launch, and use the same underlying runtime code as the non-Slurm workflows instead of a second, drifting implementation.
 
-For extraction in particular, the supported source of truth is the current local CLI behavior in `movebench/cli/extract.py`. `movebench slurm extract` is only allowed to add Slurm queue planning, repeated config expansion, and worker submission; it must preserve the current local extract semantics for study selection, split resolution, skip-existing behavior, environment overrides, and known download failure handling.
+Extraction is no longer an open design question in this plan. The prerequisite follow-up [execplans/extract_workflow_alignment_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/extract_workflow_alignment_execplan.md) already promoted the authoritative extract behavior into `movebench/extract.py`, and `movebench extract`, `movebench slurm extract`, and `scripts/slurm/extract.py` now delegate to that shared runtime. This broader plan therefore treats extract as a completed dependency and focuses the remaining implementation on the benchmark Slurm path while keeping the aligned extract and pack behavior green.
 
 For benchmarking, Slurm support applies only to execution. Planning, status inspection, and report generation stay local as `movebench bench plan`, `movebench bench status`, and `movebench bench report`. The new Slurm benchmark path must therefore extend `movebench/bench/` instead of reviving the legacy YAML benchmark launcher in `scripts/slurm/bench.py`.
 
@@ -25,12 +25,17 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
 - [x] (2026-04-01 22:38Z) Implemented the shared package-native Slurm launcher/runtime helpers and top-level CLI registration in `movebench/cli/main.py`, `movebench/cli/slurm.py`, and `movebench/slurm/`.
 - [x] (2026-04-01 22:38Z) Implemented the first-class local `movebench pack` runtime and CLI in `movebench/cli/pack.py` and `movebench/pack.py`, including shared pack argument parsing, study/timescale queue resolution, cache skip detection, prerequisite checks, and per-job execution helpers.
 - [x] (2026-04-02 18:45Z) Implemented an initial native `movebench slurm extract` and `movebench slurm pack` in `movebench/slurm/extract.py` and `movebench/slurm/pack.py`, including hidden worker mode, shared `srun` command construction, `--dry-run`, extract skip/block planning, and Slurm pack reuse of `movebench/pack.py`.
-- [x] (2026-04-02 19:39Z) Reviewed the Milestone 3 extract implementation against the supported local `movebench extract` behavior and identified parity drift in study resolution, split resolution, `skip_existing`, environment overrides, known download failure handling, and the unexpected normalization side effect.
-- [ ] Correct Milestone 3 so `movebench slurm extract` becomes a strict Slurm wrapper over the current local extract runtime, with launcher-only planning limited to queue construction, completion pruning when `skip_existing` is enabled, and GEE raster-root blocking that also considers derived dependencies.
-- [ ] Refactor `movebench/bench/run.py` so local execution and Slurm execution share the same pending-run selection and run execution helpers.
-- [ ] Implement native `movebench slurm bench run`.
+- [x] (2026-04-02 19:39Z) Reviewed the initial Milestone 3 extract implementation, identified parity drift, and split the corrective work into the prerequisite [execplans/extract_workflow_alignment_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/extract_workflow_alignment_execplan.md) so the broader plan could stop evolving against the wrong extract contract.
+- [x] (2026-04-04 17:03Z) Revalidated the completed extract prerequisite: `movebench extract`, `movebench slurm extract`, and `scripts/slurm/extract.py` now share `movebench/extract.py`, and `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_cli_extract tests.test_slurm_extract` still passed (`Ran 9 tests in 31.488s`, `OK`).
+- [x] (2026-04-04 17:03Z) Updated this broader plan to treat extract as complete background context and narrowed the remaining work to the shared benchmark helpers plus native `movebench slurm bench run`.
+- [x] (2026-04-04 17:18Z) Added `tests/test_slurm_bench.py` and extended `tests/bench/test_runner.py`, then ran `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner` and captured the expected failing baseline: the Slurm bench parser does not accept `--studies` or worker flags yet, `movebench/bench/run.py` has no `resolve_pending_runs(...)` or `load_resolved_run(...)`, and `run_experiment(...)` still bypasses the planned shared helper boundary.
+- [x] (2026-04-04 17:23Z) Refactored `movebench/bench/run.py` so local execution and Slurm execution now share `resolve_pending_runs(...)`, `load_resolved_run(...)`, and `execute_run_payload(...)`, with manifest path/payload resolution centralized alongside pending-run selection.
+- [x] (2026-04-04 17:23Z) Implemented native `movebench slurm bench run` in `movebench/slurm/bench.py`, including launcher mode, worker mode, hidden `--manifest-path` / `--run-key` flags, method-specific GPU defaults, `--dry-run`, and manifest writing only for real launches.
 - [x] (2026-04-01 22:38Z) Added `tests/test_pack.py` and ran `python -m unittest -v tests.test_pack` to verify the Milestone 1 parser/launcher skeleton and the Milestone 2 local pack planner/executor.
-- [ ] Add or update unit tests for parser shape, local pack execution, launcher logic, extract, pack, and benchmark run selection; then run the targeted suites and `python -m unittest -v` (completed so far: `tests.test_pack`, `tests.test_slurm_extract`, and `tests.test_slurm_pack`; remaining: Slurm bench, the affected `bench` suites, and the full test run).
+- [x] (2026-04-04 17:23Z) Reran the benchmark-focused targeted suite after implementation: `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner` passed (`Ran 8 tests`, `OK`).
+- [x] (2026-04-04 17:23Z) Reran the broader targeted suites after implementation: `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_pack tests.test_cli_extract tests.test_slurm_extract tests.test_slurm_pack tests.test_slurm_bench` passed (`Ran 25 tests`, `OK`), and `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench.test_experiment_config tests.bench.test_runner` passed (`Ran 7 tests`, `OK`).
+- [x] (2026-04-04 17:23Z) Recorded the repo-wide verification result in `/tmp/full_unittest_movebench_20260404_native_slurm_bench.log`: `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v` still failed in unrelated pre-existing areas (`Ran 186 tests in 1.929s`, `FAILED (failures=5, errors=95)`).
+- [x] (2026-04-04 17:23Z) Ran a real CLI dry-run with local data: `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m movebench.cli.main slurm bench run experiments/smoke_one_study.py --studies Accio_967b7813_raw_merged --dry-run` returned `planned=3 pending=0 skipped=0 blocked=3`, which matches the current environment’s lack of fully runnable benchmark pairs.
 - [x] (2026-04-02 18:45Z) Added `tests/test_slurm_extract.py` and `tests/test_slurm_pack.py`, confirmed they failed against the placeholder implementations, then reran `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack` with the MoveBench micromamba environment after implementation and reviewed the passing output.
 
 ## Surprises & Discoveries
@@ -59,14 +64,20 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
 - Observation: `movebench/pack.py`’s shared argument registration makes `--studies` and `--timescales` required, which conflicts with Slurm worker mode even though the worker should reuse the same parsing and execution helpers.
   Evidence: the first pre-implementation run of `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack` failed in `tests.test_slurm_pack.SlurmPackTests.test_worker_executes_shared_pack_job` because the parser exited before hidden worker flags could be handled.
 
-- Observation: the current local extract CLI is the only supported source of truth for extract behavior, and the first native Slurm extract implementation drifted because it reimplemented that behavior instead of sharing it.
-  Evidence: `movebench/cli/extract.py` supports omitted or `all` studies, `--no-skip-existing`, `--allow-known-download-failures`, `--data-root`, `--paths-config`, and `_default_splits(...)` with a `["train"]` fallback, while `movebench/slurm/extract.py` currently omits several of those flags, requires `--studies`, passes `splits=None`, and computes normalization stats that local extract does not compute.
-
-- Observation: the earlier Milestone 3 wording about train-normalization work in the Slurm extract path is stale relative to the current local CLI.
-  Evidence: `movebench/cli/extract.py` now stops after `Study.extract_point_features(...)`; the explicit `Study.compute_normalization_vals(...)` call only exists in `movebench/slurm/extract.py`, so preserving that side effect would make Slurm extract differ from the supported local command.
+- Observation: extract-specific design guidance in this broader plan became stale once the prerequisite alignment work landed.
+  Evidence: `movebench/extract.py` now owns `build_extraction_runs(...)`, `resolve_requested_studies(...)`, `default_splits(...)`, `is_extract_complete(...)`, `uses_gee_layers(...)`, and `run_extract_job(...)`, while `movebench/cli/extract.py`, `movebench/slurm/extract.py`, and `scripts/slurm/extract.py` are thin wrappers over that shared runtime.
 
 - Observation: GEE raster prerequisite detection for extract planning must consider derived layer dependencies, not only `plan.layers_in_order`.
   Evidence: `movebench.layers.plan.LayerPlan` records `derived_dependencies`, and other Slurm planning code already walks those parents before deciding whether a plan depends on GEE-backed rasters.
+
+- Observation: the benchmark-focused tests were specific enough to catch the missing parser and helper boundaries immediately, and they passed without any follow-up redesign once those boundaries were implemented.
+  Evidence: the pre-change `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner` run failed with parser and missing-helper errors, while the post-change rerun passed (`Ran 8 tests`, `OK`).
+
+- Observation: method-specific GPU defaults required overriding the shared Slurm parser default only for the benchmark command.
+  Evidence: `register_common_slurm_arguments(...)` defaults `gpus_per_node` to `0`, which would suppress the desired per-method defaults; `movebench/slurm/bench.py` now sets the benchmark parser default to `None` and fills in `0` or `1` GPUs per run based on the method family unless the user passes `--gpus-per-node`.
+
+- Observation: the current local data root contains zero fully runnable benchmark pairs, so a real `movebench slurm bench run ... --dry-run` can legitimately report no pending jobs even though the command is implemented correctly.
+  Evidence: `/data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m movebench.cli.main bench status --format text` reported `Fully runnable pairs: 0`, and the real dry-run for `Accio_967b7813_raw_merged` printed `[bench] planned=3 pending=0 skipped=0 blocked=3` followed by `[bench] No pending runs.`.
 
 ## Decision Log
 
@@ -114,25 +125,25 @@ For benchmarking, Slurm support applies only to execution. Planning, status insp
   Rationale: local `movebench pack` should keep its strict user-facing parser contract, but `movebench slurm pack` still needs to accept hidden worker mode that identifies the job with `--worker-study` and `--worker-timescale` instead of the visible selection flags.
   Date/Author: 2026-04-02 / assistant
 
-- Decision: treat `movebench/cli/extract.py` as the authoritative extract runtime and make `movebench/slurm/extract.py` import its extract semantics instead of maintaining a second implementation.
-  Rationale: the user wants current `movebench extract` behavior preserved exactly. The initial native Slurm extract implementation drifted because it duplicated study selection, split handling, and preflight logic instead of sharing the current runtime.
-  Date/Author: 2026-04-02 / assistant
+- Decision: this broader plan will no longer reopen extract semantics. The authoritative extract contract now lives in `movebench/extract.py` and is maintained by the prerequisite [execplans/extract_workflow_alignment_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/extract_workflow_alignment_execplan.md).
+  Rationale: keeping two plans independently redefining extract behavior caused drift. The shared extract runtime is now in place, so this plan should treat extract as completed context and only guard it with regression tests while the benchmark Slurm work proceeds.
+  Date/Author: 2026-04-04 / assistant
 
-- Decision: remove the Slurm-only train-normalization side effect from `movebench slurm extract` unless local `movebench extract` is changed to compute normalization too.
-  Rationale: preserving parity with the supported local CLI matters more than preserving an older side effect from `scripts/slurm/extract.py` or stale milestone wording.
-  Date/Author: 2026-04-02 / assistant
+- Decision: native Slurm benchmark execution will reuse `movebench/bench/run.py` by exposing public “resolve pending runs”, “load one resolved run”, and “execute one run payload” helpers rather than adding a second planner in `movebench/slurm/bench.py`.
+  Rationale: the current benchmark runtime already knows how to expand experiments, derive stable `run_key` values, and execute one run payload safely. Rebuilding that logic in the Slurm module would repeat the same mistake that the first extract implementation made.
+  Date/Author: 2026-04-04 / assistant
 
-- Decision: launcher-side extract completion pruning must honor `skip_existing`; when `--no-skip-existing` is set, the launcher must still queue work even if point-store manifests already exist.
-  Rationale: otherwise the Slurm launcher would block a rerun that the local extract CLI explicitly allows.
-  Date/Author: 2026-04-02 / assistant
+- Decision: `movebench slurm bench run --dry-run` must compute and print the resolved manifest path without writing the manifest file.
+  Rationale: the plan’s global `--dry-run` contract is “no mutation”. The launcher still needs a stable path to show in the printed worker command, so the manifest path must be derivable from the resolved payloads even when the file is not written.
+  Date/Author: 2026-04-04 / assistant
 
 ## Outcomes & Retrospective
 
-This plan started as the design and implementation blueprint for the native Slurm and pack work. It resolved the main architecture questions that mattered before writing code: where the CLI should live, what the benchmark job boundary should be, how cache packaging should relate to `bench`, and why the legacy `scripts/slurm/` files should not become the permanent runtime. On 2026-03-28 it was revised first to reflect the current split contract, and then to make cache packaging a first-class `pack` workflow with a local CLI and a Slurm wrapper. On 2026-04-01 it was updated again to follow the permanent benchmark namespace and paths. Later on 2026-04-01, Milestones 1 and 2 were implemented and validated with `python -m unittest -v tests.test_pack`, which means the first user-visible slice now exists: `movebench pack ...` is registered, plans work from timescale metadata, skips complete caches, and executes pending study/timescale jobs locally, while the top-level `slurm` parser tree and shared launcher helper are in place for the remaining milestones. On 2026-04-02, Milestones 3 and 4 were implemented and validated with `python -m unittest -v tests.test_slurm_extract tests.test_slurm_pack`, but the extract slice is now known to drift from the supported local `movebench extract` CLI. The next required step is therefore a corrective extract-parity slice before any benchmark Slurm work continues; `movebench slurm pack` remains aligned with the shared `movebench/pack.py` runtime.
+This plan started as the design and implementation blueprint for the native Slurm and pack work. It resolved the main architecture questions that mattered before writing code: where the CLI should live, what the benchmark job boundary should be, how cache packaging should relate to `bench`, and why the legacy `scripts/slurm/` files should not become the permanent runtime. On 2026-03-28 it was revised first to reflect the current split contract, and then to make cache packaging a first-class `pack` workflow with a local CLI and a Slurm wrapper. On 2026-04-01, Milestones 1 and 2 landed and were validated with `tests.test_pack`, which means the first user-visible slice now exists: `movebench pack ...` is registered, plans work from timescale metadata, skips complete caches, and executes pending study/timescale jobs locally, while the top-level `slurm` parser tree and shared launcher helper are in place. On 2026-04-02 through 2026-04-04, the extract milestone was pulled into the prerequisite [execplans/extract_workflow_alignment_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/extract_workflow_alignment_execplan.md) and completed there; extract is now shared through `movebench/extract.py` and revalidated in the current worktree. Later on 2026-04-04, Milestones 5 and 6 landed: `movebench/bench/run.py` now exposes shared pending-run and worker helpers, `movebench/slurm/bench.py` is a real launcher/worker instead of a stub, the targeted benchmark and CLI suites pass, and the full unittest record still fails only in unrelated pre-existing areas.
 
 ## Context and Orientation
 
-The current top-level CLI lives in `movebench/cli/main.py`. It registers `download`, `extract`, `ingest`, and `bench`. `movebench/cli/extract.py` is the supported source of truth for extraction behavior: it resolves studies, resolves default splits, applies environment overrides, checks known download failures, and calls `Study.extract_point_features(...)`. `movebench/bench/run.py` owns the benchmark runtime. It already defines the `bench` subcommands `plan`, `status`, `report`, and `run`, and its `run` path is based on concrete run payloads and stable `run_key` values. This plan adds two new user-facing surfaces: a local `pack` command and a top-level `slurm` group.
+The current top-level CLI lives in `movebench/cli/main.py`. It already registers `download`, `extract`, `ingest`, `pack`, `slurm`, and `bench`. `movebench/extract.py` owns the shared extraction workflow, while `movebench/cli/extract.py` and `movebench/slurm/extract.py` are thin local and Slurm wrappers over that runtime. `movebench/pack.py` owns the shared local and Slurm pack planner/executor helpers. `movebench/bench/run.py` owns the benchmark runtime and now also exposes the shared pending-run and worker helpers used by both local `bench run` and native Slurm execution. `movebench/slurm/bench.py` is the native benchmark launcher and worker. At this point the command surface described by this plan exists; the remaining value of the plan is as a self-contained record of the design, validation steps, and residual environment limitations.
 
 In this plan, “pack” means building the deepSSF WebDataset cache shards and manifest files that live under each study’s `cache/deepssf_wds/` directory. The internal code and on-disk paths can keep the existing `deepssf_wds` name because that is the artifact format, but the user-facing CLI should call this workflow `pack`.
 
@@ -147,16 +158,16 @@ The legacy scripts are useful references for CLI flags and for the queue/poll ou
 - `scripts/slurm/wds.py` now uses the study split inventory too, but it is still tied to legacy YAML benchmark configs rather than `movebench/bench/config.py`, and its user-facing name no longer matches the desired CLI.
 - `scripts/slurm/bench.py` is entirely built around the deleted `movebench.benchmark` path, not `movebench/bench/`.
 
-The important current files for this work are:
+The important current files for the finished implementation are:
 
-- `movebench/cli/main.py`, which must gain the new top-level `pack` command and the new top-level `slurm` group.
-- `movebench/cli/pack.py`, which will provide the first-class local `movebench pack` command.
-- `movebench/cli/extract.py`, which is the extract source of truth and must expose the minimal helper functions needed so `movebench slurm extract` can preserve the current local semantics instead of reimplementing them.
-- `movebench/pack.py`, which should hold the shared pack argument registration, queue resolution, and worker execution helpers used by both `movebench pack` and `movebench slurm pack`.
-- `movebench/download_reports.py`, which provides the current extract preflight check for known failed chip-download requests.
-- `movebench/bench/run.py`, which must expose shared helpers for “plan runs, choose pending runs, execute one resolved run payload”.
+- `movebench/cli/main.py`, which already exposes the supported top-level command tree and must keep doing so after the benchmark refactor.
+- `movebench/extract.py`, which is now the authoritative shared extract runtime and should only need regression coverage from this plan.
+- `movebench/cli/pack.py` and `movebench/pack.py`, which already provide the first-class local `movebench pack` command plus the shared planner/executor used by `movebench slurm pack`.
+- `movebench/bench/run.py`, which now exposes the shared helpers for “plan runs, choose pending runs, load one resolved run payload, execute one resolved run payload”.
+- `movebench/slurm/bench.py`, which implements the native Slurm benchmark launcher and worker.
+- `tests/bench/test_runner.py`, which covers the shared helper boundaries inside `movebench/bench/run.py`.
+- `tests/test_slurm_bench.py`, which covers the launcher dry-run, worker reload path, and per-method resource defaults.
 - `movebench/bench/config.py`, which is the authoritative source for timescale-specific layer configs, sampler configs, and deepSSF cache hashes.
-- `movebench/datasets/deepssf_wds_cache.py`, which already contains the low-level cache build primitives that `pack` should orchestrate instead of reimplementing.
 - `movebench/study.py`, which already owns high-level study operations and now centralizes split discovery through `Study.split_inventory()`.
 - `movebench/trajectories.py`, which canonicalizes split keys so user input like `test-temporal` and stored metadata like `test_temporal` resolve to the same on-disk paths.
 
@@ -168,7 +179,7 @@ The shared launcher module should define a small dataclass for Slurm resources a
 
 Milestone 2 implements the first-class local `pack` workflow. Create `movebench/cli/pack.py` for the user-facing command and `movebench/pack.py` for the shared runtime helpers that local and Slurm execution both call. Reuse the useful cache-build behavior from `scripts/deepssf_cache_wds.py`, but do not carry over its throughput benchmarking helpers into the main CLI. The local command should accept `--studies`, `--timescales`, and optional `--splits`, along with the cache build knobs already supported by `ensure_deepssf_wds_cache_split(...)`. If `--splits` is omitted, it should use `Study.split_inventory()["split_keys"]`. It should resolve each timescale through `movebench/bench/config.py`, compute the expected cache hash with `deepssf_cache_hash_for_split(...)`, skip complete study/timescale pairs by checking both manifest and shards, and then call `ensure_deepssf_wds_cache_split(...)` for the required splits of one study/timescale pair at a time.
 
-Milestone 3 corrects native extraction submission so `movebench slurm extract` is a strict Slurm wrapper around the current local extract workflow. Keep file count low. Do not add a new parallel extract runtime. Instead, refactor only the minimum needed inside `movebench/cli/extract.py` so its current behavior can be imported and reused by `movebench/slurm/extract.py`. The shared helper path must own the current local semantics for applying `--data-root` and `--paths-config`, resolving omitted or `all` studies, resolving default splits with the existing `["train"]` fallback, honoring `--no-skip-existing`, and blocking known failed chip-download requests unless `--allow-known-download-failures` is set. Then update `movebench/slurm/extract.py` so the worker path calls those shared helpers for exactly one study plus one layer-config/sampler-config combination, while the launcher remains responsible only for repeated or comma-separated `--layers-config`, repeated or comma-separated `--sampler-config`, per-combination log directories, completion-based queue pruning when `skip_existing` is enabled, and dry-run output. The worker must accept and forward the same extract behavior flags as local `movebench extract`: `--no-skip-existing`, `--allow-known-download-failures`, `--data-root`, and `--paths-config`. Do not compute train normalization stats in the Slurm path unless local `movebench extract` is changed to do so. The launcher must block a job when the required raster cache root is missing for a GEE-backed layer plan, and that GEE check must inspect both direct layers and derived dependencies.
+Milestone 3 is complete under the prerequisite [execplans/extract_workflow_alignment_execplan.md](/data/vision/beery/scratch/justin/movebench/execplans/extract_workflow_alignment_execplan.md). Do not reopen extract design work here unless the benchmark refactor exposes a regression. The current extract contract is the shared package runtime in `movebench/extract.py`: omitted `--studies` resolves all available studies, omitted `--splits` resolves `Study.split_inventory()["split_keys"]` with a `["train"]` fallback, GEE detection inspects both direct and derived layer dependencies, known failed download requests block unless overridden, completion checks include train normalization stats, and both the local CLI and the Slurm worker compute train normalization after extraction.
 
 Milestone 4 implements native Slurm pack submission in a way that matches the local `pack` command, not the legacy benchmark path. Create `movebench/slurm/pack.py`. Its user-facing arguments should be the same work-selection and cache-build arguments as local `movebench pack`, plus the shared Slurm resource flags. If `--splits` is omitted, the launcher should use `Study.split_inventory()["split_keys"]`, which yields `train` plus every held-out split recorded in the study manifest and falls back to `trajectories.csv` only when that metadata is absent. Reuse `movebench/pack.py` directly so the local and Slurm pack commands read the same split contract, plan the same study/timescale queue, and execute the same per-job worker helper. Each Slurm job should still correspond to one study/timescale pair, and the worker should call the shared pack execution helper so local and Slurm behavior stay aligned.
 
@@ -199,18 +210,56 @@ Work from the repository root in the MoveBench micromamba environment:
 
     cd /data/vision/beery/scratch/justin/movebench
 
-Before correcting Milestone 3, add or update the extract parity tests in `tests/test_slurm_extract.py` before making code changes. Cover omitted `--studies`, `--studies all`, `--no-skip-existing`, `--allow-known-download-failures`, `--data-root`, `--paths-config`, the current local default-split behavior, and the derived-dependency GEE raster block. Run:
+The extract prerequisite is already complete, so the next code change starts with the missing benchmark tests. Before editing `movebench/bench/run.py` or `movebench/slurm/bench.py`, add `tests/test_slurm_bench.py` and extend `tests/bench/test_runner.py` to cover the public pending-run helpers. Cover at least: pending-run filtering with and without `--rerun`, manifest-path computation, loading one resolved run by `run_key`, launcher dry-run command generation, per-method GPU defaults, and worker execution through the shared run executor. Run:
 
-    python -m unittest -v tests.test_slurm_extract
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner
 
-After the corrective extract slice passes, keep using the broader targeted commands for the remaining milestones:
+Observed pre-implementation result:
 
-    python -m unittest -v tests.test_pack tests.test_slurm_extract tests.test_slurm_pack tests.test_slurm_bench
-    python -m unittest -v tests.bench.test_experiment_config tests.bench.test_runner
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner
+
+Result:
+
+    FAILED (failures=1, errors=5)
+
+The failure reasons were the expected contract gaps: the Slurm bench parser did not accept `--studies` or worker flags, `movebench.bench.run` did not expose `resolve_pending_runs(...)` or `load_resolved_run(...)`, and `run_experiment(...)` still bypassed the planned shared helper boundary.
+
+After the benchmark helper slice lands, keep using the broader targeted commands for the remaining milestones:
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_pack tests.test_cli_extract tests.test_slurm_extract tests.test_slurm_pack tests.test_slurm_bench
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench.test_experiment_config tests.bench.test_runner
 
 After each milestone, rerun the targeted suites before moving on. When the implementation is complete, run:
 
-    python -m unittest -v
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v
+
+Observed post-implementation results:
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_slurm_bench tests.bench.test_runner
+
+    Ran 8 tests in 0.155s
+    OK
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.test_pack tests.test_cli_extract tests.test_slurm_extract tests.test_slurm_pack tests.test_slurm_bench
+
+    Ran 25 tests in 4.529s
+    OK
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v tests.bench.test_experiment_config tests.bench.test_runner
+
+    Ran 7 tests in 0.080s
+    OK
+
+Repo-wide verification record for this environment:
+
+    /data/vision/beery/scratch/justin/micromamba/envs/movebench/bin/python -m unittest -v
+
+Observed result:
+
+    Ran 186 tests in 1.929s
+    FAILED (failures=5, errors=95)
+
+See `/tmp/full_unittest_movebench_20260404_native_slurm_bench.log`. The remaining failures are unrelated to this task and continue to come from `old_tests_dont_use` plus environment-level optional import and native-library issues.
 
 The expected commands after implementation are:
 
@@ -245,7 +294,7 @@ Acceptance for this task is behavioral.
 
 First, `movebench pack ...` must resolve study/timescale work from `bench` metadata, detect missing point-store and normalization prerequisites, detect complete caches by manifest plus shards, and process one study/timescale pair at a time locally. If `--splits` is omitted, it must default to `Study.split_inventory()["split_keys"]`, and cache paths must use canonical underscore-form split keys.
 
-Second, `movebench slurm extract ... --dry-run` and its worker mode must preserve the current `movebench extract` semantics exactly for study selection, split resolution, `skip_existing`, known download failure handling, and environment overrides. Slurm adds only queue planning, repeated config expansion, log placement, and `srun` submission. If `--splits` is omitted, the worker must resolve the same split list that local extract uses today, including the existing `["train"]` fallback when the study split inventory is empty. The launcher may skip already-complete extraction outputs only when `skip_existing` is enabled. It must block missing raster prerequisites for GEE-backed plans, including plans whose GEE dependency appears only through `derived_dependencies`. The worker must not compute train normalization stats unless local extract is changed to do so.
+Second, the previously completed extract milestone must stay correct. `movebench slurm extract ... --dry-run` and its worker mode must continue to preserve the shared `movebench/extract.py` semantics for study selection, split resolution, `skip_existing`, known download failure handling, GEE derived-dependency detection, completion checks, and post-extract train normalization. The benchmark refactor in this plan must not reintroduce extract drift.
 
 Third, `movebench slurm pack ... --dry-run` must use the same queue resolution and per-job execution helper as local `movebench pack`, but instead of executing jobs inline it must print one `srun` command per pending study/timescale pair that still needs cache work.
 
@@ -283,7 +332,7 @@ The intended command surface is:
     movebench slurm pack ...
     movebench slurm bench run ...
 
-For extraction, `movebench/cli/extract.py` is the source of truth. `movebench/slurm/extract.py` should reuse the local extract semantics directly and keep only the extra parsing and queue helpers that exist solely because the Slurm launcher expands one logical extract request into many `srun` jobs.
+For extraction, `movebench/extract.py` is now the source of truth. `movebench/cli/extract.py`, `movebench/slurm/extract.py`, and `scripts/slurm/extract.py` are wrappers over that shared runtime and should remain unchanged unless the benchmark work exposes a regression.
 
 The benchmark worker path should always load the already-written resolved manifest instead of reconstructing run payloads from ad hoc CLI flags. That keeps local and Slurm execution paths identical at the run-payload level.
 
@@ -299,14 +348,16 @@ Define in `movebench/cli/slurm.py`:
 
     def register(subparsers: argparse._SubParsersAction) -> None: ...
 
-Define the minimal shared extract helpers in `movebench/cli/extract.py` so the local CLI and Slurm worker can share the same current runtime behavior:
+Reuse the existing shared extract interfaces in `movebench/extract.py`:
 
-    def apply_extract_environment(*, data_root: str | None, paths_config: str | None) -> None: ...
-    def resolve_requested_studies(studies: list[str] | None) -> list[str]: ...
-    def resolve_splits_for_study(study: Study, splits: list[str] | None) -> list[str]: ...
-    def run_extract_for_study(...) -> int: ...
+    def build_extraction_runs(...) -> list[ExtractionRun]: ...
+    def resolve_requested_studies(studies_arg: str | None) -> list[str]: ...
+    def default_splits(study: Study) -> list[str]: ...
+    def is_extract_complete(...) -> tuple[bool, str]: ...
+    def uses_gee_layers(plan: Any) -> bool: ...
+    def run_extract_job(...) -> int: ...
 
-`run_extract_for_study(...)` must own the current local extract semantics for `skip_existing`, known download failure blocking, and the call to `Study.extract_point_features(...)`. `movebench/slurm/extract.py` may keep launcher-only helpers for multi-config argument parsing, completion checks, GEE prerequisite checks, worker argument construction, and log-path layout, but it should not duplicate the local extract rules.
+These interfaces already own the extract semantics for local execution, Slurm worker execution, completion checks, and known-download preflight behavior. This plan should only preserve them with regression tests.
 
 Define in `movebench/pack.py`:
 
@@ -314,9 +365,9 @@ Define in `movebench/pack.py`:
     class PackJob:
         study_id: str
         timescale_key: str
-        splits: tuple[str, ...]
+        split_keys: tuple[str, ...]
 
-    def add_pack_args(parser: argparse.ArgumentParser) -> None: ...
+    def register_pack_arguments(parser: argparse.ArgumentParser) -> None: ...
     def resolve_pack_jobs(...) -> list[PackJob]: ...
     def execute_pack_job(...) -> dict[str, object]: ...
 
@@ -329,11 +380,12 @@ Define in `movebench/slurm/launcher.py`:
         account: str | None
         time: str | None
         mem: str | None
-        cpus_per_task: int | None
-        gpus_per_node: int | None
+        cpus_per_task: int
+        gpus_per_node: int
 
-    def add_slurm_args(parser: argparse.ArgumentParser, *, defaults: SlurmResources) -> None: ...
-    def launch_queue(...) -> int: ...
+    def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None: ...
+    def build_srun_command(...) -> list[str]: ...
+    def run_srun_queue(...) -> int: ...
 
 Define in `movebench/slurm/extract.py`, `movebench/slurm/pack.py`, and `movebench/slurm/bench.py`:
 
@@ -357,4 +409,6 @@ Revision note (2026-03-28 / assistant): revised the plan so deepSSF cache buildi
 Revision note (2026-04-01 / assistant): updated the plan after the benchmark namespace cutover so active references point at the permanent `bench` worktree and paths: `movebench/bench/`, `experiments/`, `tests/bench`, and `results/bench`.
 Revision note (2026-04-01 / assistant): implemented Milestones 1 and 2, recorded the active point-store prerequisite helpers that replaced the stale legacy import, and updated the plan state to reflect the passing `tests.test_pack` validation for the first `movebench pack` slice.
 Revision note (2026-04-02 / assistant): implemented Milestones 3 and 4, added `tests.test_slurm_extract` and `tests.test_slurm_pack`, recorded the parser/normalization discoveries that affected the worker shape, and updated the plan state after the passing targeted slice validation in the MoveBench micromamba environment.
-Revision note (2026-04-02 / assistant): revised the plan after reviewing the native extract slice against the current supported `movebench extract` CLI. The plan now treats `movebench/cli/extract.py` as the extract source of truth, removes the stale Slurm-only normalization requirement, and adds a corrective extract-parity slice before benchmark Slurm work continues.
+Revision note (2026-04-02 / assistant): split the extract corrective work into the prerequisite `execplans/extract_workflow_alignment_execplan.md` after confirming the broader plan was evolving against the wrong extract contract.
+Revision note (2026-04-04 / assistant): updated the broader plan after the extract prerequisite landed. The plan now treats extract as completed shared runtime work in `movebench/extract.py`, records the current revalidation results, and narrows the remaining implementation to the benchmark helper refactor plus native `movebench slurm bench run`.
+Revision note (2026-04-04 / assistant): implemented the remaining benchmark Slurm work, recorded the failing and passing benchmark test slices, captured the real CLI dry-run result for the current environment, and updated the repo-wide unittest record and interface notes to match the final code.

@@ -832,6 +832,49 @@ def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]
     )
 
 
+def _load_json(path: str | Path) -> dict[str, object]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _manifest_slug(name: str) -> str:
+    slug = "".join(
+        ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
+        for ch in str(name).strip()
+    ).strip("_")
+    return slug or "experiment"
+
+
+def _resolved_manifest_payload(
+    *,
+    experiment: dict[str, object],
+    planned_runs: list[dict[str, object]],
+    pending_runs: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "experiment": dict(experiment),
+        "planned_runs": [dict(run_payload) for run_payload in planned_runs],
+        "planner_blocked_runs": [dict(run) for run in experiment.get("blocked", [])],
+        "pending_run_keys": [str(run["run_key"]) for run in pending_runs],
+    }
+
+
+def _resolved_manifest_path(
+    *,
+    experiment: dict[str, object],
+    manifest_payload: dict[str, object],
+) -> Path:
+    payload_hash = hashlib.sha256(
+        bench_config.stable_payload(manifest_payload).encode("utf-8")
+    ).hexdigest()[:16]
+    return (
+        paths.repo_root()
+        / "results"
+        / "bench"
+        / "manifests"
+        / f"{_manifest_slug(str(experiment['name']))}__{payload_hash}.json"
+    )
+
+
 def _clear_runtime_outputs(run_dir: Path) -> None:
     for path in (
         run_dir / "training_summary.json",
@@ -940,7 +983,11 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
         return summary
 
 
-def run_experiment(
+def execute_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
+    return _execute_run(dict(run_payload))
+
+
+def resolve_pending_runs(
     experiment_module: str,
     *,
     studies_override: list[str] | None = None,
@@ -954,32 +1001,87 @@ def run_experiment(
         experiment["methods"] = [str(method) for method in methods]
 
     print("Expanding experiment")
-    runs = expand_experiment(experiment, studies_override=studies_override)
-    planner_blocked_runs = len(experiment.get("blocked", []))
+    planned_runs = expand_experiment(experiment, studies_override=studies_override)
+    planner_blocked_runs = [dict(run) for run in experiment.get("blocked", [])]
+
     print("Loading latest runs")
     latest_runs = bench_mlflow.search_latest_runs_by_key(
-        [str(run["run_key"]) for run in runs]
+        [str(run["run_key"]) for run in planned_runs]
     )
 
     print("Prepping pending runs")
     pending_runs: list[dict[str, object]] = []
     skipped_runs = 0
-    for run_payload in runs:
+    for run_payload in planned_runs:
         latest_status = _latest_run_status(
             latest_runs.get(str(run_payload["run_key"]))
         )
         if (not bool(rerun)) and latest_status in {"completed", "running"}:
             skipped_runs += 1
             continue
-        pending_runs.append(run_payload)
+        pending_runs.append(dict(run_payload))
 
     if max_runs is not None:
         pending_runs = pending_runs[: int(max_runs)]
 
+    manifest_payload = _resolved_manifest_payload(
+        experiment=experiment,
+        planned_runs=planned_runs,
+        pending_runs=pending_runs,
+    )
+    manifest_path = _resolved_manifest_path(
+        experiment=experiment,
+        manifest_payload=manifest_payload,
+    )
+
+    return {
+        "experiment": experiment,
+        "planned_runs": [dict(run_payload) for run_payload in planned_runs],
+        "pending_runs": pending_runs,
+        "planner_blocked_runs": planner_blocked_runs,
+        "latest_runs": latest_runs,
+        "manifest_payload": manifest_payload,
+        "manifest_path": manifest_path,
+        "counts": {
+            "planned_runs": len(planned_runs) + len(planner_blocked_runs),
+            "pending_runs": len(pending_runs),
+            "skipped_runs": skipped_runs,
+            "blocked_runs": len(planner_blocked_runs),
+        },
+    }
+
+
+def load_resolved_run(manifest_path: str | Path, run_key: str) -> dict[str, object]:
+    manifest = _load_json(manifest_path)
+    for run_payload in manifest.get("planned_runs", []):
+        if str(run_payload.get("run_key")) == str(run_key):
+            return dict(run_payload)
+    raise KeyError(f"Run key {run_key!r} not found in manifest {manifest_path}")
+
+
+def run_experiment(
+    experiment_module: str,
+    *,
+    studies_override: list[str] | None = None,
+    methods: list[str] | None = None,
+    max_runs: int | None = None,
+    rerun: bool = False,
+) -> dict[str, object]:
+    resolved = resolve_pending_runs(
+        experiment_module,
+        studies_override=studies_override,
+        methods=methods,
+        max_runs=max_runs,
+        rerun=rerun,
+    )
+
     executed_runs = 0
     executor_blocked_runs = 0
     failed_runs = 0
+    pending_runs = list(resolved["pending_runs"])
     total_pending_runs = len(pending_runs)
+    skipped_runs = int(resolved["counts"]["skipped_runs"])
+    planner_blocked_runs = int(resolved["counts"]["blocked_runs"])
     if total_pending_runs:
         _log_progress(
             "Executing "
@@ -989,7 +1091,7 @@ def run_experiment(
         _log_progress(
             f"[{run_index}/{total_pending_runs}] starting {run_payload['run_key']}"
         )
-        summary = _execute_run(run_payload)
+        summary = execute_run_payload(run_payload)
         executed_runs += 1
         status = str(summary.get("status", ""))
         if status == "blocked":
@@ -1001,7 +1103,7 @@ def run_experiment(
         )
 
     return {
-        "planned_runs": len(runs) + planner_blocked_runs,
+        "planned_runs": int(resolved["counts"]["planned_runs"]),
         "executed_runs": executed_runs,
         "skipped_runs": skipped_runs,
         "blocked_runs": planner_blocked_runs + executor_blocked_runs,
