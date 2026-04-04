@@ -8,7 +8,7 @@ from typing import Any
 
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
-from movebench.study import Study
+from movebench.study import Study, resolve_study_selection
 
 
 def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
@@ -183,7 +183,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--studies",
         nargs="+",
         default=None,
-        help="Only download these studies (by name). Default: all available studies.",
+        help="Only download these studies or a named set like 'mini'. Default: all available studies.",
     )
     parser.add_argument(
         "--no-skip-existing",
@@ -210,7 +210,7 @@ def run(args: argparse.Namespace) -> int:
         os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
 
     all_names = Study.list_available()
-    names = args.studies if args.studies else all_names
+    names = resolve_study_selection(args.studies)
 
     print(f"Studies to download: {len(names)}")
     if args.layers_config:

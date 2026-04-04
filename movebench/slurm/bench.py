@@ -149,7 +149,12 @@ def register(subparsers) -> None:
         description="Submit benchmark runs through Slurm.",
     )
     run_parser.add_argument("experiment_module", nargs="?")
-    run_parser.add_argument("--studies", nargs="+", default=None)
+    run_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Optional study ids or named sets like 'mini'. Default: use the experiment's studies value.",
+    )
     run_parser.add_argument("--methods", nargs="+", default=None)
     run_parser.add_argument("--max-runs", type=int, default=None)
     run_parser.add_argument("--rerun", action="store_true")

@@ -37,7 +37,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--studies",
         nargs="+",
         default=None,
-        help="Optional list of studies to extract. Pass 'all' or omit for all available studies.",
+        help="Optional list of studies or named sets like 'mini'. Pass 'all' or omit for all available studies.",
     )
     parser.add_argument(
         "--splits",

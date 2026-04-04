@@ -20,6 +20,7 @@ from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
 from movebench.layers.config import config_hash as _config_hash
 from movebench.layers.config import load_layers_config, parse_layers_config
 from movebench.layers.registry import REGISTRY
+from movebench.study import resolve_study_selection
 
 
 def _stable_hash_dict(d: dict[str, Any]) -> str:
@@ -138,7 +139,7 @@ def main(argv: list[str]) -> int:
         "--studies",
         nargs="*",
         default=None,
-        help="Optional list of study ids to migrate. Default: all studies under the studies root.",
+        help="Optional list of study ids or named sets like 'mini'. Default: all studies under the studies root.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print what would happen without renaming anything.")
     parser.add_argument(
@@ -219,7 +220,7 @@ def main(argv: list[str]) -> int:
 
     studies_root = paths.studies_root()
     if args.studies:
-        studies = [str(s) for s in args.studies]
+        studies = resolve_study_selection(list(args.studies))
     else:
         if not studies_root.exists():
             print(f"Studies root not found: {studies_root}")

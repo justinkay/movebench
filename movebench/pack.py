@@ -17,7 +17,7 @@ from movebench.features.points import (
     load_point_store_manifest,
     point_store_train_stats_path,
 )
-from movebench.study import normalize_split_keys
+from movebench.study import normalize_split_keys, resolve_study_selection
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
         "--studies",
         nargs="+",
         required=True,
-        help="Study ids. Accepts repeated values or comma-separated lists.",
+        help="Study ids or named sets like 'mini'. Accepts repeated values or comma-separated lists.",
     )
     parser.add_argument(
         "--timescales",
@@ -99,10 +99,7 @@ def normalize_cli_values(args: argparse.Namespace) -> None:
 
 
 def _resolve_study_ids(studies: list[str]) -> list[str]:
-    study_ids = _split_arg_values(studies) or []
-    if study_ids == ["all"]:
-        return Study.list_available()
-    return study_ids
+    return resolve_study_selection(_split_arg_values(studies))
 
 
 def _build_options(

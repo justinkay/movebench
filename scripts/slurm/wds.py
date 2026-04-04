@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from movebench.benchmark import load_config
-from movebench.benchmark import resolve_studies
 from movebench import Study, paths
 from movebench.datasets.deepssf_wds_cache import (
     cache_dir_for_study,
@@ -41,6 +40,7 @@ from movebench.features.points import (
 )
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
+from movebench.study import resolve_study_selection
 from movebench.trajectories import canonicalize_split_key
 
 _REPO_ROOT = bootstrap.REPO_ROOT
@@ -58,16 +58,10 @@ class _CacheParams:
     resume: bool
 
 
-def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
-    if val is None:
-        return "config_default", None
-    v = str(val).strip()
-    if not v:
-        return "config_default", None
-    if v.lower() == "all":
-        return "all", None
-    out = [p.strip() for p in v.split(",") if p.strip()]
-    return "explicit", out
+def _resolve_launcher_studies(cfg: dict[str, Any], override: str | None) -> list[str]:
+    if override is not None and str(override).strip():
+        return resolve_study_selection(str(override))
+    return resolve_study_selection(cfg.get("studies", "all"))
 
 
 def _parse_splits(val: str) -> list[str]:
@@ -96,7 +90,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--studies",
         type=str,
         default=None,
-        help="Launcher override: 'all' or comma-separated study ids. If omitted, use config's `studies` or all available.",
+        help="Launcher override: 'all', 'mini', or comma-separated study ids. If omitted, use config's studies value.",
     )
     p.add_argument(
         "--splits",
@@ -546,16 +540,7 @@ def _launcher(args: argparse.Namespace) -> int:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-    override_kind, override_list = _parse_studies_override(args.studies)
-    if override_kind == "config_default":
-        studies = resolve_studies(cfg)
-    elif override_kind == "all":
-        cfg2 = dict(cfg)
-        cfg2["studies"] = "all"
-        studies = resolve_studies(cfg2)
-    else:
-        assert override_list is not None
-        studies = sorted(dict.fromkeys([str(s) for s in override_list]))
+    studies = _resolve_launcher_studies(cfg, args.studies)
 
     config_stem = Path(str(args.config)).stem
     log_dir = (

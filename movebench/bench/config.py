@@ -11,6 +11,7 @@ from movebench.features.config import load_sampler_config
 from movebench.features.points import resolve_sampler_hash
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
+from movebench.study import is_named_study_set
 
 EXPERIMENT_DEFAULTS: dict[str, object] = {
     "version": 1,
@@ -257,9 +258,21 @@ def normalize_experiment(
         raise ValueError("Experiment must define a non-empty 'name'")
 
     studies = merged.get("studies", "all")
-    if studies != "all":
+    if isinstance(studies, str):
+        studies = studies.strip()
+        if studies.lower() == "all":
+            studies = "all"
+        elif is_named_study_set(studies):
+            studies = studies.lower()
+        else:
+            raise ValueError(
+                "'studies' must be 'all', a named study set, or a list of study ids"
+            )
+    else:
         if not isinstance(studies, list):
-            raise ValueError("'studies' must be 'all' or a list of study ids")
+            raise ValueError(
+                "'studies' must be 'all', a named study set, or a list of study ids"
+            )
         studies = _dedupe_strings(studies, label="studies")
 
     timescales = merged.get("timescales")

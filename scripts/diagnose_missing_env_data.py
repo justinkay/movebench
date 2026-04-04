@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 from movebench.datasets.chips import ChipDataset
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
-from movebench.study import Study
+from movebench.study import Study, resolve_study_selection
 from one_time_scripts.triage_missing_layers._common import (
     compute_candidate_missingness_counts,
 )
@@ -26,7 +26,7 @@ def main(argv: list[str]) -> int:
         "--studies",
         nargs="*",
         default=None,
-        help="Optional list of study ids to scan. Default: all available studies.",
+        help="Optional list of study ids or named sets like 'mini'. Default: all available studies.",
     )
     p.add_argument(
         "--from-point-stores",
@@ -97,7 +97,8 @@ def main(argv: list[str]) -> int:
                 return hint
         return None
 
-    study_ids = args.studies if args.studies else Study.list_available()
+    requested = args.studies if args.studies is not None else Study.list_available()
+    study_ids = resolve_study_selection(requested) if requested else []
     if not study_ids:
         print("No studies found under the configured studies root.")
         return 0

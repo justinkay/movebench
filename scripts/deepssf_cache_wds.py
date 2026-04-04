@@ -29,6 +29,7 @@ from movebench.datasets.deepssf_wds_cache import (
     make_deepssf_wds_loader,
 )
 from movebench.models.deepssf import DeepSSF
+from movebench.study import resolve_study_selection
 from movebench.train import collate_deepssf
 from movebench.trajectories import canonicalize_split_key
 
@@ -57,10 +58,7 @@ def _parse_splits(s: str) -> list[str]:
 
 
 def _parse_studies(val: str) -> list[str]:
-    v = str(val).strip()
-    if not v or v.lower() == "all":
-        return Study.list_available()
-    return [p.strip() for p in v.split(",") if p.strip()]
+    return resolve_study_selection(str(val))
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -629,7 +627,7 @@ def _parse_args() -> argparse.Namespace:
         "--studies",
         type=str,
         default="all",
-        help="Comma-separated study ids, or 'all' (default).",
+        help="Comma-separated study ids, 'all', or a named set like 'mini' (default: all).",
     )
     b.add_argument(
         "--splits",

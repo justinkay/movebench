@@ -22,6 +22,7 @@ from movebench.features.points import (
 )
 from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
+from movebench.study import resolve_study_selection
 from movebench.trajectories import canonicalize_split_key
 
 import movebench.bench.mlflow as bench_mlflow
@@ -62,13 +63,6 @@ def _load_module_from_path(module_path: str | Path):
     spec.loader.exec_module(module)
     return module, path.resolve()
 
-
-def _list_available_studies() -> list[str]:
-    from movebench.study import Study
-
-    return Study.list_available()
-
-
 def _bench_report_module():
     import movebench.bench.report as bench_report
 
@@ -86,25 +80,8 @@ def _resolve_studies(
     studies_override: list[str] | None = None,
 ) -> list[str]:
     if studies_override:
-        studies = [str(study_id).strip() for study_id in studies_override if str(study_id).strip()]
-        if len(studies) == 1 and studies[0].lower() == "all":
-            return _list_available_studies()
-        if not studies:
-            raise ValueError("No studies resolved from --studies")
-        return studies
-
-    studies = experiment.get("studies", "all")
-    if studies == "all":
-        resolved = _list_available_studies()
-        if not resolved:
-            raise ValueError(
-                "No studies resolved. Set MOVEBENCH_DATA_ROOT or pass --studies."
-            )
-        return resolved
-
-    if not isinstance(studies, list) or not studies:
-        raise ValueError("Experiment 'studies' must be 'all' or a non-empty list")
-    return [str(study_id) for study_id in studies]
+        return resolve_study_selection(studies_override)
+    return resolve_study_selection(experiment.get("studies", "all"))
 
 
 def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
@@ -1273,7 +1250,12 @@ def register(subparsers) -> None:
 
     plan_parser = bench_subparsers.add_parser("plan", help="Plan a benchmark experiment")
     plan_parser.add_argument("experiment_module")
-    plan_parser.add_argument("--studies", nargs="+", default=None)
+    plan_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Optional study ids or named sets like 'mini'. Default: use the experiment's studies value.",
+    )
     plan_parser.set_defaults(func=_command_plan)
 
     status_parser = bench_subparsers.add_parser("status", help="Inspect artifact and run readiness")
@@ -1286,7 +1268,12 @@ def register(subparsers) -> None:
 
     run_parser = bench_subparsers.add_parser("run", help="Execute runnable benchmark runs")
     run_parser.add_argument("experiment_module")
-    run_parser.add_argument("--studies", nargs="+", default=None)
+    run_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Optional study ids or named sets like 'mini'. Default: use the experiment's studies value.",
+    )
     run_parser.add_argument("--methods", nargs="+", default=None)
     run_parser.add_argument("--max-runs", type=int, default=None)
     run_parser.add_argument("--rerun", action="store_true")

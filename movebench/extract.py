@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from movebench import paths
 from movebench.download_reports import (
     load_chip_request_status_for_extract,
     summarize_failed_chip_report,
@@ -19,7 +18,7 @@ from movebench.features.points import (
 )
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
-from movebench.study import Study, normalize_split_keys
+from movebench.study import Study, normalize_split_keys, resolve_study_selection
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_LAYERS_CONFIG = _REPO_ROOT / "configs" / "layers" / "all.yaml"
@@ -91,24 +90,7 @@ def build_extraction_runs(
 
 
 def resolve_requested_studies(studies_arg: str | None) -> list[str]:
-    if studies_arg is None or not str(studies_arg).strip():
-        studies = Study.list_available()
-    else:
-        raw = str(studies_arg).strip()
-        if raw.lower() == "all":
-            studies = Study.list_available()
-        else:
-            studies = list(
-                dict.fromkeys(part.strip() for part in raw.split(",") if part.strip())
-            )
-
-    if not studies:
-        raise ValueError(
-            "No studies resolved. "
-            f"Expected studies under: {paths.studies_root()} "
-            "(override with env MOVEBENCH_DATA_ROOT or config.env)."
-        )
-    return list(studies)
+    return resolve_study_selection(studies_arg)
 
 
 def default_splits(study: Study) -> list[str]:

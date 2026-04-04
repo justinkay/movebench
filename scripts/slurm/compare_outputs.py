@@ -44,7 +44,6 @@ from tqdm.auto import tqdm
 import movebench.features.points as mb_points
 from movebench import Study
 from movebench.benchmark import load_config
-from movebench.benchmark import resolve_studies
 from movebench.datasets.deepssf import DeepSSFDataset
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import select_point_store_dir
@@ -53,6 +52,7 @@ from movebench.layers.registry import REGISTRY
 from movebench.models.deepssf import DeepSSF
 from movebench.models.moveformer import build_moveformer_selection_model
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
+from movebench.study import resolve_study_selection
 from movebench.train import collate_deepssf, collate_moveformer
 from movebench.trajectories import (
     POINT_ID_COL,
@@ -75,16 +75,10 @@ class _SamplerParams:
     bounds_buffer_deg: float
 
 
-def _parse_studies_override(val: str | None) -> tuple[str, list[str] | None]:
-    if val is None:
-        return "config_default", None
-    v = str(val).strip()
-    if not v:
-        return "config_default", None
-    if v.lower() == "all":
-        return "all", None
-    out = [p.strip() for p in v.split(",") if p.strip()]
-    return "explicit", out
+def _resolve_launcher_studies(cfg: dict[str, Any], override: str | None) -> list[str]:
+    if override is not None and str(override).strip():
+        return resolve_study_selection(str(override))
+    return resolve_study_selection(cfg.get("studies", "all"))
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -106,7 +100,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--studies",
         type=str,
         default=None,
-        help="Launcher override: 'all' or comma-separated study ids. If omitted, use config's `studies` or all available.",
+        help="Launcher override: 'all', 'mini', or comma-separated study ids. If omitted, use config's studies value.",
     )
     p.add_argument(
         "--checkpoint-root",
@@ -1231,16 +1225,7 @@ def _launcher(args: argparse.Namespace) -> int:
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-    override_kind, override_list = _parse_studies_override(args.studies)
-    if override_kind == "config_default":
-        studies = resolve_studies(cfg)
-    elif override_kind == "all":
-        cfg2 = dict(cfg)
-        cfg2["studies"] = "all"
-        studies = resolve_studies(cfg2)
-    else:
-        assert override_list is not None
-        studies = sorted(dict.fromkeys([str(s) for s in override_list]))
+    studies = _resolve_launcher_studies(cfg, args.studies)
 
     blocked: list[tuple[str, str]] = []
     skipped: list[str] = []

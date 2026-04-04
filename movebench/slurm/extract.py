@@ -221,7 +221,7 @@ def _register_arguments(parser: argparse.ArgumentParser) -> None:
         "--studies",
         nargs="+",
         default=None,
-        help="Study ids. Accepts repeated values or comma-separated lists.",
+        help="Study ids or named sets like 'mini'. Accepts repeated values or comma-separated lists.",
     )
     parser.add_argument(
         "--layers-config",

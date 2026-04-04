@@ -21,6 +21,23 @@ from movebench.trajectories import (
     select_step_starts_with_support,
 )
 
+MINI_STUDIES: tuple[str, ...] = (
+    "forrest2024_buffalo",
+    "Bellan_48c93576_raw_merged",
+    "Garthe_ae7b0b8c_raw_merged",
+    "aikens2024_pronghorn",
+    "costa2024_elephant_seals",
+    "Accio_967b7813_raw_merged",
+    "BartlamBrooks_c9b4f9b5_raw_merged",
+    "Lago_8b91498b_raw_merged",
+    "Bildstein_3e431f5b_raw_merged_Cathartes_aura",
+    "BastilleRousseau_9eaf99f2_raw_merged_Chelonoidis_porteri",
+)
+
+NAMED_STUDY_SETS: dict[str, tuple[str, ...]] = {
+    "mini": MINI_STUDIES,
+}
+
 
 def _load_sampler(sampler_config: str | Path | SamplerConfig) -> SamplerConfig:
     if isinstance(sampler_config, SamplerConfig):
@@ -61,6 +78,65 @@ def normalize_split_keys(split_keys: list[object]) -> list[str]:
         out.append(split)
         seen.add(split)
     return out
+
+
+def _list_available_studies() -> list[str]:
+    root = paths.studies_root()
+    if not root.exists():
+        return []
+    return sorted([p.name for p in root.iterdir() if p.is_dir()])
+
+
+def _selection_tokens(selection: str | list[str] | None) -> list[str]:
+    if selection is None:
+        return []
+    values = [selection] if isinstance(selection, str) else list(selection)
+    out: list[str] = []
+    for value in values:
+        for part in str(value).split(","):
+            text = part.strip()
+            if text:
+                out.append(text)
+    return out
+
+
+def is_named_study_set(name: str) -> bool:
+    return str(name).strip().lower() in NAMED_STUDY_SETS
+
+
+def resolve_study_selection(selection: str | list[str] | None) -> list[str]:
+    available = _list_available_studies()
+    available_set = set(available)
+    tokens = _selection_tokens(selection)
+    if not tokens:
+        studies = list(available)
+    else:
+        studies = []
+        seen: set[str] = set()
+        for token in tokens:
+            key = token.lower()
+            if key == "all":
+                candidates = available
+            elif key in NAMED_STUDY_SETS:
+                candidates = [
+                    study_id
+                    for study_id in NAMED_STUDY_SETS[key]
+                    if study_id in available_set
+                ]
+            else:
+                candidates = [token]
+            for study_id in candidates:
+                if study_id in seen:
+                    continue
+                studies.append(study_id)
+                seen.add(study_id)
+    if not studies:
+        raise ValueError(
+            "No studies resolved. "
+            f"Expected studies under: {paths.studies_root()} "
+            "(override with env MOVEBENCH_DATA_ROOT or config.env)."
+        )
+    return studies
 
 
 def _build_split_inventory(split_keys: list[object]) -> dict[str, object]:
@@ -123,10 +199,7 @@ class Study:
 
     @classmethod
     def list_available(cls) -> list[str]:
-        root = paths.studies_root()
-        if not root.exists():
-            return []
-        return sorted([p.name for p in root.iterdir() if p.is_dir()])
+        return _list_available_studies()
 
     def split_inventory(self) -> dict[str, object]:
         if self.manifest_path.exists():

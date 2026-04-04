@@ -28,7 +28,7 @@ from movebench.layers.download import (
     compute_group_scale,
 )
 from movebench.layers.registry import REGISTRY
-from movebench.study import Study
+from movebench.study import Study, resolve_study_selection
 from movebench.trajectories import (
     compute_step_length_extent_m,
     fit_interval_step_support,
@@ -554,7 +554,7 @@ def main(argv: list[str]) -> int:
         "--studies",
         nargs="*",
         default=None,
-        help="Optional list of study ids to scan. Default: all available studies.",
+        help="Optional list of study ids or named sets like 'mini'. Default: all available studies.",
     )
     p.add_argument(
         "--splits",
@@ -676,7 +676,8 @@ def main(argv: list[str]) -> int:
     max_step_time_s = buf_cfg.get("max_step_time_s")
 
     all_studies = Study.list_available()
-    study_ids = [str(x) for x in (args.studies if args.studies else all_studies)]
+    requested = args.studies if args.studies is not None else all_studies
+    study_ids = resolve_study_selection(requested) if requested else []
     study_ids = [s for s in study_ids if s in set(all_studies)]
     if not study_ids:
         print("No studies found under the configured studies root.")
