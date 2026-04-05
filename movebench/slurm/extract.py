@@ -21,11 +21,20 @@ from movebench.extract import (
 )
 from movebench.slurm.launcher import (
     SlurmResources,
+    apply_slurm_config,
     build_srun_command,
     register_common_slurm_arguments,
     run_srun_queue,
 )
 from movebench.study import Study
+
+_SLURM_DEFAULTS = {
+    "cpus_per_task": 16,
+    "gpus_per_node": 0,
+    "max_concurrent_jobs": 32,
+    "polling_interval": 5.0,
+    "log_dir": Path("results/slurm/extract_points"),
+}
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -56,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     args.splits = normalize_split_values(args.splits)
+    apply_slurm_config(args, command_name="extract", defaults=_SLURM_DEFAULTS)
     if args.worker_study:
         return _run_worker(args)
     return _run_launcher(args)
@@ -260,8 +270,4 @@ def _register_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--worker-layers-config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--worker-sampler-config", default=None, help=argparse.SUPPRESS)
     register_common_slurm_arguments(parser)
-    parser.set_defaults(
-        func=_run,
-        log_dir=Path("results/slurm/extract_points"),
-        cpus_per_task=16,
-    )
+    parser.set_defaults(func=_run)

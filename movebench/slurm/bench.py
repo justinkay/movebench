@@ -6,10 +6,18 @@ from pathlib import Path
 
 from movebench.slurm.launcher import (
     SlurmResources,
+    apply_slurm_config,
     build_srun_command,
     register_common_slurm_arguments,
     run_srun_queue,
 )
+
+_SLURM_DEFAULTS = {
+    "cpus_per_task": 1,
+    "max_concurrent_jobs": 32,
+    "polling_interval": 5.0,
+    "log_dir": Path("results/slurm/bench"),
+}
 
 _GPU_DEFAULTS = {
     "baseline_nomove": 0,
@@ -131,6 +139,7 @@ def _run_launcher(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    apply_slurm_config(args, command_name="bench", defaults=_SLURM_DEFAULTS)
     if args.manifest_path or args.run_key:
         return _run_worker(args)
     return _run_launcher(args)
@@ -163,6 +172,4 @@ def register(subparsers) -> None:
     register_common_slurm_arguments(run_parser)
     run_parser.set_defaults(
         func=_run,
-        log_dir=Path("results/slurm/bench"),
-        gpus_per_node=None,
     )

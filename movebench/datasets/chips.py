@@ -413,9 +413,12 @@ class ChipDataset(Dataset):
             if g not in needed_chip_groups:
                 needed_chip_groups.append(g)
 
-        chip_groups: dict[str, Raster] = {
-            g: self.io.load_chip_group(g, point_id=point_id) for g in needed_chip_groups
-        }
+        chip_groups: dict[str, Raster] = {}
+        for g in needed_chip_groups:
+            if g == ref_group:
+                chip_groups[g] = ref_raster
+                continue
+            chip_groups[g] = self.io.load_chip_group(g, point_id=point_id)
 
         # Build the set of non-chip output layers to load/compute once.
         non_chip_layers = [

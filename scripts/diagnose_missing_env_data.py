@@ -213,11 +213,6 @@ def main(argv: list[str]) -> int:
                         strict_missing += 1
                     finally:
                         total += 1
-                        # Prevent unbounded growth: LayerIO caches chips by (group, point_id).
-                        try:
-                            ds.io._chip_cache.clear()
-                        except Exception:
-                            pass
 
         if total == 0:
             if args.from_point_stores:

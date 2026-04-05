@@ -115,7 +115,6 @@ class LayerIO:
         self.plan = plan
         self.registry = registry
 
-        self._chip_cache: dict[tuple[str, int], Raster] = {}
         self._tile_index_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
         self._tile_index_years_cache: dict[str, list[int]] = {}
         self._hdf_index_cache: dict[str, _ModisFileIndex] = {}
@@ -283,11 +282,6 @@ class LayerIO:
         return band_ids
 
     def _load_gee_chip_group(self, chip_group: str, point_id: int) -> Raster:
-        key = (chip_group, int(point_id))
-        cached = self._chip_cache.get(key)
-        if cached is not None:
-            return cached
-
         chip_path = self._chip_path(chip_group, point_id)
         r = read_geotiff(chip_path)
 
@@ -303,7 +297,6 @@ class LayerIO:
             bounds=r.bounds,
             band_ids=self._chip_group_band_ids(chip_group),
         )
-        self._chip_cache[key] = r
         return r
 
     def _load_gee_chip_layer(self, layer: str, point_id: int) -> Raster:

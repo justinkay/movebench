@@ -6,10 +6,19 @@ from pathlib import Path
 from movebench import pack as pack_runtime
 from movebench.slurm.launcher import (
     SlurmResources,
+    apply_slurm_config,
     build_srun_command,
     register_common_slurm_arguments,
     run_srun_queue,
 )
+
+_SLURM_DEFAULTS = {
+    "cpus_per_task": 1,
+    "gpus_per_node": 0,
+    "max_concurrent_jobs": 32,
+    "polling_interval": 5.0,
+    "log_dir": Path("results/slurm/pack"),
+}
 
 
 def _make_pack_kwargs(
@@ -140,6 +149,7 @@ def _run_launcher(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     pack_runtime.normalize_cli_values(args)
+    apply_slurm_config(args, command_name="pack", defaults=_SLURM_DEFAULTS)
     if args.worker_study:
         return _run_worker(args)
     return _run_launcher(args)
@@ -158,4 +168,4 @@ def register(subparsers) -> None:
     parser.add_argument("--worker-study", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--worker-timescale", default=None, help=argparse.SUPPRESS)
     register_common_slurm_arguments(parser)
-    parser.set_defaults(func=_run, log_dir=Path("results/slurm/pack"))
+    parser.set_defaults(func=_run)
