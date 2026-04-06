@@ -386,7 +386,7 @@ def _latest_from_past_days(
     col = (
         ee.ImageCollection(collection_id)
         .filterDate(ts.advance(-int(days), "day"), ts.advance(1, "second"))
-        .filterBounds(region)
+        # .filterBounds(region)
         .select(bands)
         .sort("system:time_start", False)
     )

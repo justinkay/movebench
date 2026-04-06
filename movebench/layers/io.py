@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.errors import RasterioIOError
 from rasterio.merge import merge
 from rasterio.transform import from_bounds
@@ -492,12 +493,20 @@ class LayerIO:
             raise ValueError(f"local_tiff layer {layer!r} missing spec.path_pattern")
 
         cfg = paths.paths_config()
+        max_window_hw = (1000, 1000) # save us from OOM for very large study extents
 
         if "{band_num}" in spec.path_pattern:
             rasters: list[Raster] = []
             for i in range(1, len(spec.bands) + 1):
                 p = Path(spec.path_pattern.format(**cfg, band_num=i))
-                rasters.append(read_geotiff_window(p, bounds_latlon))
+                rasters.append(
+                    read_geotiff_window(
+                        p,
+                        bounds_latlon,
+                        max_window_hw=max_window_hw,
+                        resampling=Resampling.bilinear,
+                    )
+                )
 
             base = rasters[0]
             for r in rasters[1:]:
@@ -523,7 +532,12 @@ class LayerIO:
             spec.year_bounds,
         )
         p = Path(spec.path_pattern.format(**cfg, year=year))
-        r = read_geotiff_window(p, bounds_latlon)
+        r = read_geotiff_window(
+            p,
+            bounds_latlon,
+            max_window_hw=max_window_hw,
+            resampling=Resampling.bilinear,
+        )
         return Raster(
             array=r.array,
             transform=r.transform,

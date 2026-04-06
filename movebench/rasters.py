@@ -9,6 +9,7 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.merge import merge
+from rasterio.transform import from_bounds as transform_from_bounds
 from rasterio.warp import calculate_default_transform, reproject, transform_bounds
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import bounds as window_bounds
@@ -58,7 +59,11 @@ def read_geotiff(path: str | Path) -> Raster:
 
 
 def read_geotiff_window(
-    path: str | Path, bounds_latlon: tuple[float, float, float, float]
+    path: str | Path,
+    bounds_latlon: tuple[float, float, float, float],
+    *,
+    max_window_hw: tuple[int, int] | None = None,
+    resampling: Resampling = Resampling.nearest,
 ) -> Raster:
     """Read a window from a GeoTIFF using an EPSG:4326 bounds box.
 
@@ -92,8 +97,32 @@ def read_geotiff_window(
         b = window_bounds(window, ds.transform)
         win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
 
+        out_height = int(window.height)
+        out_width = int(window.width)
+        if max_window_hw is not None:
+            max_height = max(2, int(max_window_hw[0]))
+            max_width = max(2, int(max_window_hw[1]))
+            scale = min(
+                float(max_height) / float(out_height),
+                float(max_width) / float(out_width),
+                1.0,
+            )
+            if scale < 1.0:
+                out_height = min(
+                    max_height, max(2, int(math.ceil(float(out_height) * scale)))
+                )
+                out_width = min(
+                    max_width, max(2, int(math.ceil(float(out_width) * scale)))
+                )
+
         fill_val = ds.nodata if ds.nodata is not None else np.nan
-        arr = ds.read(window=window, boundless=True, fill_value=fill_val)
+        arr = ds.read(
+            window=window,
+            out_shape=(ds.count, out_height, out_width),
+            resampling=resampling,
+            boundless=True,
+            fill_value=fill_val,
+        )
         band_ids = (
             list(ds.descriptions)
             if ds.descriptions and any(ds.descriptions)
@@ -102,7 +131,7 @@ def read_geotiff_window(
 
         return Raster(
             array=arr,
-            transform=ds.window_transform(window),
+            transform=transform_from_bounds(*win_bounds, out_width, out_height),
             crs=ds.crs,
             nodata=fill_val,
             bounds=win_bounds,
