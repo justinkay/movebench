@@ -22,7 +22,7 @@ from movebench.features.points import (
 )
 from movebench.layers.plan import LayerPlan
 import movebench.paths as paths
-from movebench.study import resolve_study_selection
+from movebench.study import resolve_study_selection, _list_available_studies
 from movebench.trajectories import canonicalize_split_key
 
 import movebench.bench.mlflow as bench_mlflow

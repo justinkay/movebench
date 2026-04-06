@@ -22,8 +22,8 @@ study_ids=(
     "Accio_967b7813_raw_merged"
     "BartlamBrooks_c9b4f9b5_raw_merged"
     "Lago_8b91498b_raw_merged"
-    "Bildstein_3e431f5b_raw_merged_Cathartes_aura"
     "BastilleRousseau_9eaf99f2_raw_merged_Chelonoidis_porteri"
+    "Bildstein_3e431f5b_raw_merged_Cathartes_aura"
 )
 
 for layers_config in "${layers_configs[@]}"; do
