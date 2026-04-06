@@ -894,15 +894,39 @@ def _mlflow_run_id(mlflow_run: object | None) -> str | None:
     return run_id or None
 
 
-def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
+def _execute_run(
+    run_payload: dict[str, object],
+    *,
+    resume: bool = True,
+) -> dict[str, object]:
     """
     Note this deletes existing artifacts! It should only be called when you *really* want to execute the run;
     that's why it is a private method.
     """
     run_dir = _run_dir(str(run_payload["run_key"]))
     run_dir.mkdir(parents=True, exist_ok=True)
-    _clear_runtime_outputs(run_dir)
-    _write_json(run_dir / "resolved_run.json", _canonical_run_payload(run_payload))
+    canonical_payload = _canonical_run_payload(run_payload)
+    resume_run = False
+    resolved_run_path = run_dir / "resolved_run.json"
+    if bool(resume) and resolved_run_path.exists():
+        try:
+            resume_run = (
+                bench_config.stable_payload(_canonical_run_payload(_load_json(resolved_run_path)))
+                == bench_config.stable_payload(canonical_payload)
+            )
+        except Exception:
+            resume_run = False
+
+    if resume_run:
+        training_summary_path = run_dir / "training_summary.json"
+        if training_summary_path.exists():
+            training_summary_path.unlink()
+        final_metrics_dir = run_dir / "final_metrics"
+        if final_metrics_dir.exists():
+            shutil.rmtree(final_metrics_dir)
+    else:
+        _clear_runtime_outputs(run_dir)
+    _write_json(resolved_run_path, canonical_payload)
 
     if str(run_payload["method"]) not in _SUPPORTED_METHODS:
         return _write_blocked_run(
@@ -960,8 +984,12 @@ def _execute_run(run_payload: dict[str, object]) -> dict[str, object]:
         return summary
 
 
-def execute_run_payload(run_payload: dict[str, object]) -> dict[str, object]:
-    return _execute_run(dict(run_payload))
+def execute_run_payload(
+    run_payload: dict[str, object],
+    *,
+    resume: bool = True,
+) -> dict[str, object]:
+    return _execute_run(dict(run_payload), resume=resume)
 
 
 def resolve_pending_runs(
@@ -1068,7 +1096,7 @@ def run_experiment(
         _log_progress(
             f"[{run_index}/{total_pending_runs}] starting {run_payload['run_key']}"
         )
-        summary = execute_run_payload(run_payload)
+        summary = execute_run_payload(run_payload, resume=not bool(rerun))
         executed_runs += 1
         status = str(summary.get("status", ""))
         if status == "blocked":

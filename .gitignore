@@ -25,4 +25,6 @@ results/
 *.pt
 *.tar.gz
 __pycache__
-old_tests_dont_use
+old_tests_dont_use/
+pngs/
+one_time_scripts/

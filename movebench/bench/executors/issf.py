@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
+import movebench.bench.evaluation.runner as evaluation_runner
 from pyproj import Transformer
 from torch.utils.data import DataLoader, Subset
 
@@ -383,6 +386,7 @@ def _parametric_prediction_payload(
     study_dir: Path,
     num_candidates: int,
     batch_size: int,
+    num_workers: int,
     device: torch.device,
 ) -> dict[str, torch.Tensor | str]:
     steps = _prediction_steps_for_split(
@@ -407,14 +411,23 @@ def _parametric_prediction_payload(
         num_candidates=m,
     )
     reqs = _build_step_requests(steps)
-    step_batch_size = max(1, min(int(batch_size), 8))
+    train_points_per_step = int(train_manifest.sampler["num_candidates"]) + 1
+    prediction_points_per_step = int(m) + 1
+    scaled_batch = int(
+        int(batch_size) * train_points_per_step / prediction_points_per_step
+    )
+    step_batch_size = max(1, min(int(batch_size), scaled_batch))
     point_id_chunks: list[torch.Tensor] = []
     coords_chunks: list[torch.Tensor] = []
     probs_chunks: list[torch.Tensor] = []
 
     model.eval()
     with torch.no_grad():
-        for start in range(0, len(reqs), step_batch_size):
+        for start in tqdm(
+            range(0, len(reqs), step_batch_size),
+            desc=f"{study_id}:{split_key} prediction",
+            leave=False,
+        ):
             req_batch = reqs[start : start + step_batch_size]
             env, valid, shared = _extract_env_block(
                 study_id=str(study_id),
@@ -422,7 +435,7 @@ def _parametric_prediction_payload(
                 plan=dataset.plan,
                 reqs=req_batch,
                 sampler_state=sampler_state,
-                n_workers=0,
+                n_workers=int(num_workers),
             )
             batch = _prediction_batch(
                 dataset=dataset,
@@ -430,9 +443,15 @@ def _parametric_prediction_payload(
                 valid=valid,
                 shared=shared,
             )
-            logits = model(_move_batch_to_device(batch, device))[:, :-1]
-            probs_chunks.append(F.softmax(logits, dim=1).detach().cpu())
+            logits = model(_move_batch_to_device(batch, device))
             point_ids, coords_m = _coords_from_shared(shared)
+            probs = F.softmax(logits, dim=1).detach().cpu()
+            if int(coords_m.shape[1]) != int(probs.shape[1]):
+                raise ValueError(
+                    "iSSF discrete prediction payload support mismatch: "
+                    f"coords_m has {int(coords_m.shape[1])} candidates but probs has {int(probs.shape[1])}"
+                )
+            probs_chunks.append(probs)
             point_id_chunks.append(point_ids)
             coords_chunks.append(coords_m)
 
@@ -560,48 +579,96 @@ def _run(
         lr=float(method_hparams["lr"]),
         weight_decay=float(method_hparams["weight_decay"]),
     )
-    print("entering training loop")
-    fit = run_training_loop(
-        runtime,
-        TrainerConfig(
-            max_steps=int(method_hparams["max_steps"]),
-            eval_every_steps=int(method_hparams["eval_every_steps"]),
-            patience_evals=int(method_hparams["patience_evals"]),
-            seed=int(run_payload["seed"]),
-        ),
-        tracker,
-    )
-    _log_progress(
-        f"{run_key}: finished iSSF training steps={fit['completed_steps']} best_step={fit['best_step']}"
-    )
-
     checkpoint_path = run_dir / "checkpoint_best.pt"
-    torch.save(
-        {
-            "state_dict": {
-                key: value.detach().cpu()
-                for key, value in runtime.model.state_dict().items()
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
+        best_step = int(dict(checkpoint.get("meta", {})).get("best_step", 0))
+        train_steps_completed = best_step
+        history_path = run_dir / "history.json"
+        if history_path.exists():
+            history_payload = json.loads(history_path.read_text(encoding="utf-8"))
+            history_steps = [
+                int(float(entry["step"]))
+                for entry in history_payload
+                if isinstance(entry, dict) and "step" in entry
+            ]
+            if history_steps:
+                train_steps_completed = max(history_steps)
+        fit = {
+            "completed_steps": int(train_steps_completed),
+            "best_step": int(best_step),
+            "train_metrics": {},
+            "eval_metrics": {},
+        }
+        _log_progress(
+            f"{run_key}: reusing iSSF checkpoint best_step={fit['best_step']}"
+        )
+    else:
+        print("entering training loop")
+        fit = run_training_loop(
+            runtime,
+            TrainerConfig(
+                max_steps=int(method_hparams["max_steps"]),
+                eval_every_steps=int(method_hparams["eval_every_steps"]),
+                patience_evals=int(method_hparams["patience_evals"]),
+                seed=int(run_payload["seed"]),
+            ),
+            tracker,
+        )
+        _log_progress(
+            f"{run_key}: finished iSSF training steps={fit['completed_steps']} best_step={fit['best_step']}"
+        )
+        torch.save(
+            {
+                "state_dict": {
+                    key: value.detach().cpu()
+                    for key, value in runtime.model.state_dict().items()
+                },
+                "meta": {
+                    "method": str(run_payload["method"]),
+                    "best_step": int(fit["best_step"]),
+                    "covariate_set": str(run_payload["covariate_set"]),
+                },
             },
-            "meta": {
-                "method": str(run_payload["method"]),
-                "best_step": int(fit["best_step"]),
-                "covariate_set": str(run_payload["covariate_set"]),
-            },
-        },
-        checkpoint_path,
-    )
+            checkpoint_path,
+        )
 
-    trajectories_df = load_trajectories_csv(Path(resolved_artifacts["trajectories_path"]))
-    support, train_steps = _fit_prediction_support(
-        trajectories_df,
-        step_spec=resolved_artifacts["plan"].step_spec,
-    )
-    train_manifest = point_stores["train"]["manifest"]
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
+    trajectories_df = None
+    support = None
+    train_steps = None
+    train_manifest = point_stores["train"]["manifest"]
     for split_key in run_payload["evaluation_split_keys"]:
+        pred_path = pred_dir / f"{split_key}.pt"
+        if pred_path.exists():
+            try:
+                evaluation_runner._score_split(
+                    split_key=str(split_key),
+                    pred_artifact=dict(torch.load(pred_path, map_location="cpu")),
+                    run_payload=run_payload,
+                )
+                _log_progress(f"{run_key}: reusing iSSF predictions split={split_key}")
+                continue
+            except Exception as exc:
+                _log_progress(
+                    f"{run_key}: regenerating iSSF predictions split={split_key}: {exc}"
+                )
+        if trajectories_df is None:
+            trajectories_df = load_trajectories_csv(
+                Path(resolved_artifacts["trajectories_path"])
+            )
+            support, train_steps = _fit_prediction_support(
+                trajectories_df,
+                step_spec=resolved_artifacts["plan"].step_spec,
+            )
         dataset = _dataset_for(str(split_key))
         split_manifest = point_stores[split_key]["manifest"]
+        _log_progress(
+            f"{run_key}: starting iSSF prediction split={split_key} "
+            f"candidates={energy_score_num_candidates} workers={num_workers}"
+        )
         torch.save(
             _parametric_prediction_payload(
                 model=runtime.model,
@@ -616,9 +683,10 @@ def _run(
                 study_dir=Path(resolved_artifacts["study_dir"]),
                 num_candidates=energy_score_num_candidates,
                 batch_size=batch_size,
+                num_workers=num_workers,
                 device=device,
             ),
-            pred_dir / f"{split_key}.pt",
+            pred_path,
         )
         _log_progress(f"{run_key}: wrote iSSF predictions split={split_key}")
 

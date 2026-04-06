@@ -59,8 +59,13 @@ def _resources_for_run(
     )
 
 
-def _worker_args(manifest_path: Path, run_key: str) -> list[str]:
-    return [
+def _worker_args(
+    manifest_path: Path,
+    run_key: str,
+    *,
+    rerun: bool,
+) -> list[str]:
+    worker_args = [
         "slurm",
         "bench",
         "run",
@@ -69,6 +74,9 @@ def _worker_args(manifest_path: Path, run_key: str) -> list[str]:
         "--run-key",
         str(run_key),
     ]
+    if bool(rerun):
+        worker_args.append("--rerun")
+    return worker_args
 
 
 def _log_path_for_run(args: argparse.Namespace, run_key: str) -> Path:
@@ -85,7 +93,10 @@ def _run_worker(args: argparse.Namespace) -> int:
         raise ValueError("Worker mode requires --manifest-path and --run-key")
     bench_run = _bench_run_module()
     run_payload = bench_run.load_resolved_run(Path(args.manifest_path), str(args.run_key))
-    summary = bench_run.execute_run_payload(run_payload)
+    summary = bench_run.execute_run_payload(
+        run_payload,
+        resume=not bool(args.rerun),
+    )
     return 0 if str(summary.get("status", "completed")) == "completed" else 2
 
 
@@ -124,7 +135,11 @@ def _run_launcher(args: argparse.Namespace) -> int:
         commands.append(
             build_srun_command(
                 resources=_resources_for_run(args, run_payload=run_payload),
-                worker_args=_worker_args(manifest_path, str(run_payload["run_key"])),
+                worker_args=_worker_args(
+                    manifest_path,
+                    str(run_payload["run_key"]),
+                    rerun=bool(args.rerun),
+                ),
                 log_path=log_path,
             )
         )

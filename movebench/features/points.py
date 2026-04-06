@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from tqdm.auto import tqdm
 
 from movebench.features.config import SamplerConfig
 from movebench.features.manifest import (
@@ -888,10 +887,7 @@ def _extract_env_block(
     if n_workers <= 1:
         LayerIO, _Raster, _Transformer = _extraction_runtime()
         io = LayerIO(study_dir=Path(study_dir), plan=plan)
-        iterator = enumerate(reqs)
-        for i, req in tqdm(
-            iterator, total=n_steps, desc=f"{study_id}:{plan.rasters_hash} steps"
-        ):
+        for i, req in enumerate(reqs):
             (
                 e,
                 v,
@@ -956,10 +952,8 @@ def _extract_env_block(
                 ts_end,
                 actual_step_time_s,
                 step_time_error_s,
-            ) in tqdm(
-                pool.imap_unordered(_worker_run, list(enumerate(reqs)), chunksize=10),
-                total=n_steps,
-                desc=f"{study_id}:{plan.rasters_hash} steps",
+            ) in pool.imap_unordered(
+                _worker_run, list(enumerate(reqs)), chunksize=10
             ):
                 env[idx] = torch.from_numpy(e)
                 valid[idx] = torch.from_numpy(v)
