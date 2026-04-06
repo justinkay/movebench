@@ -2,7 +2,7 @@
 
 ## Installation
 
-1. Make sure to **build GDAL with HDF4 drivers**. It's recommended to do this with **conda-forge**.
+1. Make sure to **build GDAL with HDF4 drivers**. It's recommended to do this with conda-forge.
 
 ```bash
 conda create -n movebench -c conda-forge python=3.11 gdal hdf4 rasterio pyproj libgdal-hdf4
@@ -21,20 +21,48 @@ pip install -e .
 earthengine authenticate --auth_mode=notebook
 ```
 
-## Download rasters
+## CLI functionality
 
-Download GEE rasters for a single study:
+### Download
 
-```bash
-python scripts/download_study.py <study_id> --config configs/layers_all.yaml
-```
-
-Download GEE rasters for all studies present under the studies root:
+Download all GEE rasters for all studies at at a 1 hour timescale:
 
 ```bash
-movebench download --config configs/layers_all.yaml
+movebench download --layers-config configs/layers/all_ae_1h_1h.yaml --studies all
 ```
 
-## Example notebook
+For "MoveBench-Mini", specify `--studies mini`. 
 
-See `notebooks/example.ipynb` to get started.
+### Extract
+
+Extract point features for training SSF-style methods. To extract the default layers for all studies at a 1 hour timescale:
+
+```bash
+movebench extract --layers-config configs/layers/all_ae_1h_1h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies all
+```
+
+To launch this on many slurm jobs,
+
+```bash
+movebench slurm extract --layers-config configs/layers/all_ae_1h_1h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies all --slurm-config {path/to/slurm/config.yaml}
+```
+
+### Pack
+
+Create WebDataset shards for training raster-based methods like DeepSSF. 
+
+```bash
+
+```
+
+To launch on slurm,
+
+### Bench
+
+```bash
+```
+
+To launch on slurm,
+
+```bash
+```
