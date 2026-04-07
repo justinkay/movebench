@@ -18,6 +18,7 @@ from movebench.trajectories import (
 )
 
 GRID_QUADRATURE_SUBCELLS = 2
+MIXED_MARGINAL_QUANTILES = 256
 
 
 def _wrap_to_pi(values: np.ndarray) -> np.ndarray:
@@ -319,41 +320,69 @@ def _empirical_raw_cell_mass(
 ) -> tuple[np.ndarray, np.ndarray]:
     height, width = (int(output_hw[0]), int(output_hw[1]))
     buffer_m = (float(pixel_size_m) * float(width - 1)) / 2.0
-    length_values, length_counts = np.unique(
-        sampler_state["valid_lengths"],
-        return_counts=True,
+    length_values, length_counts = np.unique(sampler_state["valid_lengths"], return_counts=True)
+    turn_values, turn_counts = np.unique(sampler_state["valid_turns"], return_counts=True)
+    return _weighted_endpoint_raw_cell_mass(
+        start_bearing_rad=start_bearing_rad,
+        output_hw=output_hw,
+        pixel_size_m=pixel_size_m,
+        length_values=length_values.astype(np.float64, copy=False),
+        length_probs=length_counts.astype(np.float64) / float(length_counts.sum()),
+        turn_values=turn_values.astype(np.float64, copy=False),
+        turn_probs=turn_counts.astype(np.float64) / float(turn_counts.sum()),
+        height=height,
+        width=width,
+        buffer_m=buffer_m,
     )
-    turn_values, turn_counts = np.unique(
-        sampler_state["valid_turns"],
-        return_counts=True,
-    )
-    length_probs = length_counts.astype(np.float64) / float(length_counts.sum())
-    turn_probs = turn_counts.astype(np.float64) / float(turn_counts.sum())
 
+
+def _weighted_endpoint_raw_cell_mass(
+    *,
+    start_bearing_rad: np.ndarray,
+    output_hw: tuple[int, int],
+    pixel_size_m: float,
+    length_values: np.ndarray,
+    length_probs: np.ndarray,
+    turn_values: np.ndarray,
+    turn_probs: np.ndarray,
+    height: int | None = None,
+    width: int | None = None,
+    buffer_m: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if height is None or width is None:
+        height, width = (int(output_hw[0]), int(output_hw[1]))
+    else:
+        height, width = (int(height), int(width))
+    if buffer_m is None:
+        buffer_m = (float(pixel_size_m) * float(width - 1)) / 2.0
+    length_values = np.asarray(length_values, dtype=np.float64)
+    length_probs = np.asarray(length_probs, dtype=np.float64)
+    turn_values = np.asarray(turn_values, dtype=np.float64)
+    turn_probs = np.asarray(turn_probs, dtype=np.float64)
     headings = _wrap_to_pi(start_bearing_rad[:, None] + turn_values[None, :])
     sin_heading = np.sin(headings)
     cos_heading = np.cos(headings)
-
     raw = np.zeros((int(start_bearing_rad.shape[0]), height, width), dtype=np.float64)
     off_grid_mass = np.zeros((int(start_bearing_rad.shape[0]),), dtype=np.float64)
     length_chunk = 256
-    for start in range(0, int(length_values.shape[0]), length_chunk):
-        stop = min(int(length_values.shape[0]), start + length_chunk)
-        lengths = length_values[start:stop]
+    for start_idx in range(0, int(length_values.shape[0]), length_chunk):
+        stop_idx = min(int(length_values.shape[0]), start_idx + length_chunk)
+        lengths = length_values[start_idx:stop_idx]
         pair_weights = (
-            length_probs[start:stop, None] * turn_probs[None, :]
+            length_probs[start_idx:stop_idx, None] * turn_probs[None, :]
         ).reshape(-1)
         for batch_idx in range(int(start_bearing_rad.shape[0])):
             x = (lengths[:, None] * sin_heading[batch_idx][None, :]).reshape(-1)
             y = (lengths[:, None] * cos_heading[batch_idx][None, :]).reshape(-1)
-            rr = np.floor((buffer_m + 0.5 * float(pixel_size_m) - y) / float(pixel_size_m)).astype(np.int64)
-            cc = np.floor((x + buffer_m + 0.5 * float(pixel_size_m)) / float(pixel_size_m)).astype(np.int64)
-            in_window = (
-                (rr >= 0)
-                & (rr < height)
-                & (cc >= 0)
-                & (cc < width)
-            )
+            rr = np.floor(
+                (float(buffer_m) + 0.5 * float(pixel_size_m) - y)
+                / float(pixel_size_m)
+            ).astype(np.int64)
+            cc = np.floor(
+                (x + float(buffer_m) + 0.5 * float(pixel_size_m))
+                / float(pixel_size_m)
+            ).astype(np.int64)
+            in_window = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
             if in_window.any():
                 flat = raw[batch_idx].reshape(-1)
                 np.add.at(
@@ -363,6 +392,76 @@ def _empirical_raw_cell_mass(
                 )
             off_grid_mass[batch_idx] += float(pair_weights[~in_window].sum())
     return raw, off_grid_mass
+
+
+def _continuous_quantile_values(
+    *,
+    distribution: str,
+    params: tuple[float, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    quantiles = (
+        np.arange(int(MIXED_MARGINAL_QUANTILES), dtype=np.float64) + 0.5
+    ) / float(MIXED_MARGINAL_QUANTILES)
+    if distribution == "gamma":
+        values = stats.gamma.ppf(quantiles, *params)
+    elif distribution == "vonmises":
+        values = stats.vonmises.ppf(quantiles, *params)
+    else:
+        raise ValueError(f"Unsupported mixed marginal distribution {distribution!r}")
+    if not np.isfinite(values).all():
+        raise ValueError(f"Non-finite quantiles for mixed {distribution} marginal")
+    return (
+        np.asarray(values, dtype=np.float64),
+        np.full(int(MIXED_MARGINAL_QUANTILES), 1.0 / float(MIXED_MARGINAL_QUANTILES)),
+    )
+
+
+def _mixed_parametric_length_raw_cell_mass(
+    *,
+    start_bearing_rad: np.ndarray,
+    output_hw: tuple[int, int],
+    pixel_size_m: float,
+    sampler_state: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    length_values, length_probs = _continuous_quantile_values(
+        distribution="gamma",
+        params=tuple(sampler_state["gamma_params"]),
+    )
+    turn_values, turn_counts = np.unique(sampler_state["valid_turns"], return_counts=True)
+    turn_probs = turn_counts.astype(np.float64) / float(turn_counts.sum())
+    return _weighted_endpoint_raw_cell_mass(
+        start_bearing_rad=start_bearing_rad,
+        output_hw=output_hw,
+        pixel_size_m=pixel_size_m,
+        length_values=length_values,
+        length_probs=length_probs,
+        turn_values=turn_values.astype(np.float64, copy=False),
+        turn_probs=turn_probs,
+    )
+
+
+def _mixed_parametric_turn_raw_cell_mass(
+    *,
+    start_bearing_rad: np.ndarray,
+    output_hw: tuple[int, int],
+    pixel_size_m: float,
+    sampler_state: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    turn_values, turn_probs = _continuous_quantile_values(
+        distribution="vonmises",
+        params=tuple(sampler_state["vonmises_params"]),
+    )
+    length_values, length_counts = np.unique(sampler_state["valid_lengths"], return_counts=True)
+    length_probs = length_counts.astype(np.float64) / float(length_counts.sum())
+    return _weighted_endpoint_raw_cell_mass(
+        start_bearing_rad=start_bearing_rad,
+        output_hw=output_hw,
+        pixel_size_m=pixel_size_m,
+        length_values=length_values.astype(np.float64, copy=False),
+        length_probs=length_probs,
+        turn_values=turn_values,
+        turn_probs=turn_probs,
+    )
 
 
 def movement_log_prior_hw(
@@ -380,6 +479,24 @@ def movement_log_prior_hw(
         and sampler_state.get("vonmises_params") is not None
     ):
         raw, off_grid_mass = _parametric_raw_cell_mass(
+            start_bearing_rad=start,
+            output_hw=output_hw,
+            pixel_size_m=float(pixel_size_m),
+            sampler_state=sampler_state,
+        )
+    elif bool(sampler_state.get("gamma_used", False)) and sampler_state.get(
+        "gamma_params"
+    ) is not None:
+        raw, off_grid_mass = _mixed_parametric_length_raw_cell_mass(
+            start_bearing_rad=start,
+            output_hw=output_hw,
+            pixel_size_m=float(pixel_size_m),
+            sampler_state=sampler_state,
+        )
+    elif bool(sampler_state.get("vonmises_used", False)) and sampler_state.get(
+        "vonmises_params"
+    ) is not None:
+        raw, off_grid_mass = _mixed_parametric_turn_raw_cell_mass(
             start_bearing_rad=start,
             output_hw=output_hw,
             pixel_size_m=float(pixel_size_m),
