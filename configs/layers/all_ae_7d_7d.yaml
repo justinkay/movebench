@@ -34,7 +34,6 @@ layers:
   - thermal_uplift_hourly
   - hii
   - bioclim
-  - dynamic_world
   - alphaearth_embeddings
 
 chip_groups:
@@ -46,6 +45,5 @@ chip_groups:
     target_scale_m: 11132.0
   high_res:
     layers:
-      - dynamic_world
       - landsat
     target_scale_m: 30.0

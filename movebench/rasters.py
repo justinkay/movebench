@@ -84,7 +84,15 @@ def read_geotiff_window(
         # Rasterio can produce empty windows for tiny bounds. Convert to an
         # integer window and force at least 2 pixels in each dimension so
         # downstream derived layers such as slope/aspect can compute gradients.
-        win = from_bounds(*bounds_in_ds, transform=ds.transform)
+        try:
+            win = from_bounds(*bounds_in_ds, transform=ds.transform)
+        except Exception as exc:
+            raise ValueError(
+                "Failed to calculate raster window for "
+                f"path={Path(path)!s} bounds_latlon={bounds_latlon!r} "
+                f"bounds_in_ds={bounds_in_ds!r} crs={ds.crs!r} "
+                f"transform={ds.transform!r}: {exc}"
+            ) from exc
         col0 = int(math.floor(win.col_off))
         row0 = int(math.floor(win.row_off))
         col1 = int(math.ceil(win.col_off + win.width))
