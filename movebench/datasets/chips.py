@@ -91,6 +91,7 @@ class ChipDataset(Dataset):
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
         mode: Literal["points", "steps"] = "points",
+        selected_splits: list[str] | None = None,
         registry: LayerRegistry = REGISTRY,
     ) -> None:
         self.study_dir = Path(study_dir)
@@ -110,6 +111,9 @@ class ChipDataset(Dataset):
         self.output_hw = (oh_i, ow_i)
         self.normalize = bool(normalize)
         self.mode = str(mode)
+        self.selected_splits = (
+            None if selected_splits is None else [str(split_key) for split_key in selected_splits]
+        )
         self.sampler_config = sampler_config
         if self.mode not in {"points", "steps"}:
             raise ValueError(f"Unknown mode={mode!r} (expected 'points' or 'steps')")
@@ -132,22 +136,22 @@ class ChipDataset(Dataset):
             self._std = None
 
         df_all = load_trajectories_csv(str(self.trajectories_path))
-        df = df_all[df_all[SET_COL] == self.split].copy()
-        if len(df) == 0:
+        split_df = df_all[df_all[SET_COL] == self.split].copy()
+        if len(split_df) == 0:
             raise ValueError(
                 f"No rows found for split={split!r} in {self.trajectories_path}"
             )
-        self.df = df
+        self.df = split_df
 
-        if POINT_ID_COL not in df.columns:
+        if POINT_ID_COL not in split_df.columns:
             raise ValueError(
                 f"trajectories.csv missing required column: {POINT_ID_COL!r}"
             )
-        if LON_COL not in df.columns or LAT_COL not in df.columns:
+        if LON_COL not in split_df.columns or LAT_COL not in split_df.columns:
             raise ValueError(
                 f"trajectories.csv missing required columns: {LON_COL!r}, {LAT_COL!r}"
             )
-        if TIME_COL not in df.columns:
+        if TIME_COL not in split_df.columns:
             raise ValueError(f"trajectories.csv missing required column: {TIME_COL!r}")
 
         self._to_target = None
@@ -183,12 +187,18 @@ class ChipDataset(Dataset):
                 step_multiplier=float(self.plan.step_spec.step_multiplier),
             )
 
+            steps_source_df = split_df
+            if self.selected_splits:
+                steps_source_df = df_all[
+                    df_all[SET_COL].isin(self.selected_splits)
+                ].copy()
             steps = select_step_starts_with_support(
-                df,
+                steps_source_df,
                 step_time_s=int(self.plan.step_spec.step_time_s),
                 gap_q=float(self.plan.step_spec.gap_q),
                 support=support,
             )
+            steps = steps[steps[SET_COL] == self.split].reset_index(drop=True).copy()
             if len(steps) == 0:
                 raise ValueError(
                     f"No valid step starts found for split={split!r} in {self.trajectories_path}"
@@ -230,7 +240,7 @@ class ChipDataset(Dataset):
                     lon=float(row[LON_COL]),
                     lat=float(row[LAT_COL]),
                 )
-                for _, row in df.iterrows()
+                for _, row in split_df.iterrows()
             ]
 
         self._ref_layer = self._select_reference_layer()

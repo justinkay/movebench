@@ -3,28 +3,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from tqdm.auto import tqdm
 
+import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
-from pyproj import Transformer
+import movebench.bench.executors.ssf_grid as ssf_grid
 from torch.utils.data import DataLoader, Subset
 
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.ssf import iSSFDataset
-from movebench.features.points import _build_step_requests, _extract_env_block
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
-from movebench.trajectories import (
-    SET_COL,
-    canonicalize_split_key,
-    fit_interval_step_support,
-    load_trajectories_csv,
-    select_step_starts_with_support,
-)
-
-_TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+from movebench.trajectories import load_trajectories_csv
 
 
 def _log_progress(message: str) -> None:
@@ -201,18 +191,7 @@ class _ISSFRuntime:
 
 
 def _selected_splits_from_manifest(manifest) -> list[str] | None:
-    raw_selected_splits = manifest.extraction.get("selected_splits")
-    if not isinstance(raw_selected_splits, list) or not raw_selected_splits:
-        return None
-    selected_splits: list[str] = []
-    seen: set[str] = set()
-    for raw_split in raw_selected_splits:
-        split = canonicalize_split_key(raw_split)
-        if not split or split in seen:
-            continue
-        selected_splits.append(split)
-        seen.add(split)
-    return selected_splits or None
+    return ssf_grid.selected_splits_from_manifest(manifest)
 
 
 def _fit_prediction_support(
@@ -220,247 +199,45 @@ def _fit_prediction_support(
     *,
     step_spec,
 ) -> tuple[object, object]:
-    train_df = trajectories_df[trajectories_df[SET_COL] == "train"].copy()
-    if len(train_df) == 0:
-        raise ValueError("Study has no train split for iSSF prediction support")
-    support = fit_interval_step_support(
-        train_df,
-        step_time_s=int(step_spec.step_time_s),
-        gap_q=float(step_spec.gap_q),
-        step_q=float(step_spec.step_q),
-        max_step_q=float(step_spec.max_step_q),
-        step_multiplier=float(step_spec.step_multiplier),
-    )
-    train_steps = select_step_starts_with_support(
-        train_df,
-        step_time_s=int(step_spec.step_time_s),
-        gap_q=float(step_spec.gap_q),
-        support=support,
-    )
-    return support, train_steps
+    return ssf_grid.fit_train_step_support(trajectories_df, step_spec=step_spec)
 
 
-def _prediction_steps_for_split(
-    trajectories_df,
-    *,
-    split_key: str,
-    selected_splits: list[str] | None,
-    step_spec,
-    support,
-):
-    if selected_splits:
-        requested_df = trajectories_df[trajectories_df[SET_COL].isin(selected_splits)].copy()
-    else:
-        requested_df = trajectories_df[trajectories_df[SET_COL] == str(split_key)].copy()
-    steps = select_step_starts_with_support(
-        requested_df,
-        step_time_s=int(step_spec.step_time_s),
-        gap_q=float(step_spec.gap_q),
-        support=support,
-    )
-    return steps[steps[SET_COL] == str(split_key)].reset_index(drop=True).copy()
-
-
-def _replay_sampler_state(
-    *,
-    train_manifest,
-    train_steps,
-    num_candidates: int,
-) -> dict[str, object]:
-    valid_lengths = train_steps["step_length_m"].to_numpy(dtype=np.float64)
-    valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
-    valid_turns = train_steps["turn_angle_rad"].to_numpy(dtype=np.float64)
-    valid_turns = valid_turns[np.isfinite(valid_turns)]
-    if len(valid_lengths) == 0:
-        raise ValueError("No valid train step lengths available for iSSF prediction sampling")
-    if len(valid_turns) == 0:
-        raise ValueError("No valid train turn angles available for iSSF prediction sampling")
-
-    sampler = dict(train_manifest.sampler)
-    gamma = dict(sampler.get("gamma", {})) if isinstance(sampler.get("gamma"), dict) else {}
-    gamma_params = gamma.get("params")
-    if not (bool(gamma.get("used", False)) and isinstance(gamma_params, list) and gamma_params):
-        gamma_params = None
-    else:
-        gamma_params = tuple(float(x) for x in gamma_params)
-
-    vonmises = dict(sampler.get("vonmises", {})) if isinstance(sampler.get("vonmises"), dict) else {}
-    vonmises_params = vonmises.get("params")
-    if not (
-        bool(vonmises.get("used", False))
-        and isinstance(vonmises_params, list)
-        and vonmises_params
-    ):
-        vonmises_params = None
-    else:
-        vonmises_params = tuple(float(x) for x in vonmises_params)
-
-    return {
-        "valid_lengths": valid_lengths,
-        "valid_turns": valid_turns,
-        "num_candidates": int(num_candidates),
-        "random_seed": int(sampler["random_seed"]),
-        "gamma_used": gamma_params is not None,
-        "gamma_params": gamma_params,
-        "vonmises_used": vonmises_params is not None,
-        "vonmises_params": vonmises_params,
-    }
-
-
-def _prediction_batch(
-    *,
-    dataset: iSSFDataset,
-    env: torch.Tensor,
-    valid: torch.Tensor,
-    shared: dict[str, object],
-) -> dict[str, torch.Tensor | None]:
-    env = env[:, :, :-1].to(dtype=torch.float32)
-    valid = valid[:, :, :-1].to(dtype=torch.bool)
-    if dataset.normalize:
-        assert dataset._mean is not None
-        assert dataset._std is not None
-        env = (env - dataset._mean.view(1, -1, 1)) / dataset._std.view(1, -1, 1)
-    env = torch.where(valid, env, torch.zeros_like(env))
-
-    batch: dict[str, torch.Tensor | None] = {
-        "env": env,
-        "valid": valid,
-        "move": dataset._movement_tensor(
-            step_length_m=shared["step_length_m"][:, :-1],
-            turn_angle_rad=shared["turn_angle_rad"][:, :-1],
-        ),
-        "time": None,
-        "individual_idx": None,
-    }
-    if dataset.include_time:
-        batch["time"] = dataset._time_tensor(shared["timestamp_ns"])
-    if dataset.include_individual_id:
-        batch["individual_idx"] = dataset._individual_idx_tensor(
-            np.asarray(shared["individual_id"])
-        )
-    return batch
-
-
-def _coords_from_shared(
-    shared: dict[str, object],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    point_ids = shared["point_id_start"].to(dtype=torch.int64).cpu()
-    num_steps = int(point_ids.shape[0])
-    candidate_lon = shared["candidate_lon"][:, :-1].to(dtype=torch.float64)
-    candidate_lat = shared["candidate_lat"][:, :-1].to(dtype=torch.float64)
-    num_candidates = int(candidate_lon.shape[1])
-    if num_steps == 0:
-        return point_ids, torch.zeros((0, num_candidates, 2), dtype=torch.float32)
-
-    start_lon = shared["start_lon"].to(dtype=torch.float64)
-    start_lat = shared["start_lat"].to(dtype=torch.float64)
-    start_x_m, start_y_m = _TO_3857.transform(start_lon.tolist(), start_lat.tolist())
-    cand_x_m, cand_y_m = _TO_3857.transform(
-        candidate_lon.reshape(-1).tolist(),
-        candidate_lat.reshape(-1).tolist(),
-    )
-    coords_m = torch.tensor(
-        list(zip(cand_x_m, cand_y_m)),
-        dtype=torch.float32,
-    ).view(num_steps, num_candidates, 2)
-    start_xy_m = torch.tensor(
-        list(zip(start_x_m, start_y_m)),
-        dtype=torch.float32,
-    )
-    coords_m[:, :, 0] -= start_xy_m[:, 0].view(-1, 1)
-    coords_m[:, :, 1] -= start_xy_m[:, 1].view(-1, 1)
-    return point_ids, coords_m
-
-
-def _parametric_prediction_payload(
+def _grid_prediction_payload(
     *,
     model: torch.nn.Module,
     dataset: iSSFDataset,
-    trajectories_df,
     train_manifest,
     train_steps,
-    support,
     split_key: str,
     selected_splits: list[str] | None,
-    study_id: str,
     study_dir: Path,
-    num_candidates: int,
+    trajectories_path: Path,
+    sampler_config,
+    output_hw: tuple[int, int],
     batch_size: int,
     num_workers: int,
     device: torch.device,
-) -> dict[str, torch.Tensor | str]:
-    steps = _prediction_steps_for_split(
-        trajectories_df,
+) -> dict[str, object]:
+    grid_dataset = ssf_grid.make_grid_step_dataset(
+        study_dir=study_dir,
+        trajectories_path=trajectories_path,
         split_key=str(split_key),
+        plan=dataset.plan,
+        sampler_config=sampler_config,
+        output_hw=output_hw,
         selected_splits=selected_splits,
-        step_spec=dataset.plan.step_spec,
-        support=support,
+        include_env=True,
     )
-    m = int(num_candidates)
-    if len(steps) == 0:
-        return {
-            "prediction_kind": "discrete",
-            "point_id_start": torch.zeros((0,), dtype=torch.int64),
-            "coords_m": torch.zeros((0, m, 2), dtype=torch.float32),
-            "probs": torch.zeros((0, m), dtype=torch.float32),
-        }
-
-    sampler_state = _replay_sampler_state(
+    return ssf_grid.build_ssf_grid_artifact(
+        grid_dataset=grid_dataset,
         train_manifest=train_manifest,
         train_steps=train_steps,
-        num_candidates=m,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        device=device,
+        model=model,
+        feature_adapter=dataset,
     )
-    reqs = _build_step_requests(steps)
-    train_points_per_step = int(train_manifest.sampler["num_candidates"]) + 1
-    prediction_points_per_step = int(m) + 1
-    scaled_batch = int(
-        int(batch_size) * train_points_per_step / prediction_points_per_step
-    )
-    step_batch_size = max(1, min(int(batch_size), scaled_batch))
-    point_id_chunks: list[torch.Tensor] = []
-    coords_chunks: list[torch.Tensor] = []
-    probs_chunks: list[torch.Tensor] = []
-
-    model.eval()
-    with torch.no_grad():
-        for start in tqdm(
-            range(0, len(reqs), step_batch_size),
-            desc=f"{study_id}:{split_key} prediction",
-            leave=False,
-        ):
-            req_batch = reqs[start : start + step_batch_size]
-            env, valid, shared = _extract_env_block(
-                study_id=str(study_id),
-                study_dir=Path(study_dir),
-                plan=dataset.plan,
-                reqs=req_batch,
-                sampler_state=sampler_state,
-                n_workers=int(num_workers),
-            )
-            batch = _prediction_batch(
-                dataset=dataset,
-                env=env,
-                valid=valid,
-                shared=shared,
-            )
-            logits = model(_move_batch_to_device(batch, device))
-            point_ids, coords_m = _coords_from_shared(shared)
-            probs = F.softmax(logits, dim=1).detach().cpu()
-            if int(coords_m.shape[1]) != int(probs.shape[1]):
-                raise ValueError(
-                    "iSSF discrete prediction payload support mismatch: "
-                    f"coords_m has {int(coords_m.shape[1])} candidates but probs has {int(probs.shape[1])}"
-                )
-            probs_chunks.append(probs)
-            point_id_chunks.append(point_ids)
-            coords_chunks.append(coords_m)
-
-    return {
-        "prediction_kind": "discrete",
-        "point_id_start": torch.cat(point_id_chunks, dim=0),
-        "coords_m": torch.cat(coords_chunks, dim=0),
-        "probs": torch.cat(probs_chunks, dim=0),
-    }
 
 
 def _run(
@@ -485,19 +262,17 @@ def _run(
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams.get("batch_size", 256))
     num_workers = int(method_hparams.get("num_workers", 0) or 0)
-    energy_score_num_candidates = int(
-        method_hparams.get("energy_score_num_candidates", 5000)
-    )
     eval_max_items = (
         None
         if method_hparams.get("max_eval_items") is None
         else int(method_hparams["max_eval_items"])
     )
-    if energy_score_num_candidates <= 0:
-        raise ValueError(
-            "energy_score_num_candidates must be > 0; "
-            f"got {energy_score_num_candidates}"
-        )
+    output_hw = tuple(
+        int(v)
+        for v in bench_config.resolve_timescale(str(run_payload["timescale"]))[
+            "output_hw"
+        ]
+    )
 
     split_datasets: dict[str, iSSFDataset] = {}
 
@@ -637,7 +412,6 @@ def _run(
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
     trajectories_df = None
-    support = None
     train_steps = None
     train_manifest = point_stores["train"]["manifest"]
     for split_key in run_payload["evaluation_split_keys"]:
@@ -659,7 +433,7 @@ def _run(
             trajectories_df = load_trajectories_csv(
                 Path(resolved_artifacts["trajectories_path"])
             )
-            support, train_steps = _fit_prediction_support(
+            _support, train_steps = _fit_prediction_support(
                 trajectories_df,
                 step_spec=resolved_artifacts["plan"].step_spec,
             )
@@ -667,21 +441,20 @@ def _run(
         split_manifest = point_stores[split_key]["manifest"]
         _log_progress(
             f"{run_key}: starting iSSF prediction split={split_key} "
-            f"candidates={energy_score_num_candidates} workers={num_workers}"
+            f"grid={output_hw[0]}x{output_hw[1]} workers={num_workers}"
         )
         torch.save(
-            _parametric_prediction_payload(
+            _grid_prediction_payload(
                 model=runtime.model,
                 dataset=dataset,
-                trajectories_df=trajectories_df,
                 train_manifest=train_manifest,
                 train_steps=train_steps,
-                support=support,
                 split_key=str(split_key),
                 selected_splits=_selected_splits_from_manifest(split_manifest),
-                study_id=str(run_payload["study_id"]),
                 study_dir=Path(resolved_artifacts["study_dir"]),
-                num_candidates=energy_score_num_candidates,
+                trajectories_path=Path(resolved_artifacts["trajectories_path"]),
+                sampler_config=resolved_artifacts["sampler"],
+                output_hw=output_hw,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 device=device,
