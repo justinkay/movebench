@@ -88,7 +88,6 @@ def build_extraction_runs(
         ]
     )
 
-
 def resolve_requested_studies(studies_arg: str | None) -> list[str]:
     return resolve_study_selection(studies_arg)
 

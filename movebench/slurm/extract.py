@@ -129,11 +129,20 @@ def _run_launcher(args: argparse.Namespace) -> int:
                     )
                 )
                 continue
-            request_status = load_chip_request_status_for_extract(
-                study=study,
-                plan=run.plan,
-                splits=resolved_splits,
-            )
+            try:
+                request_status = load_chip_request_status_for_extract(
+                    study=study,
+                    plan=run.plan,
+                    splits=resolved_splits,
+                )
+            except ValueError as exc:
+                blocked.append(
+                    (
+                        f"study={study_id} layers={run.layers_config_path} sampler={run.sampler_config_path}",
+                        str(exc),
+                    )
+                )
+                continue
             if (
                 isinstance(request_status, dict)
                 and str(request_status.get("status")) == "failed"

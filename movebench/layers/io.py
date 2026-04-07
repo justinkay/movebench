@@ -493,7 +493,7 @@ class LayerIO:
             raise ValueError(f"local_tiff layer {layer!r} missing spec.path_pattern")
 
         cfg = paths.paths_config()
-        max_window_hw = (1000, 1000) # save us from OOM for very large study extents
+        max_window_hw = (250, 250) # save us from OOM for very large study extents
 
         if "{band_num}" in spec.path_pattern:
             rasters: list[Raster] = []
