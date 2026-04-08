@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import shlex
 import subprocess
 import sys
@@ -41,6 +44,17 @@ class SlurmResources:
                 else 0
             ),
         )
+
+
+@dataclass(frozen=True)
+class ArrayRequest:
+    resources: SlurmResources
+    array_concurrency: int
+    log_path: Path
+    worker_args_list: tuple[tuple[str, ...], ...]
+    manifest_dir: Path
+    manifest_stem: str
+    name: str | None = None
 
 
 def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
@@ -158,13 +172,8 @@ def apply_slurm_config(
             setattr(args, key, value)
 
 
-def build_srun_command(
-    *,
-    resources: SlurmResources,
-    worker_args: Sequence[str],
-    log_path: str | Path | None = None,
-) -> list[str]:
-    command = ["srun", "--export=ALL"]
+def _slurm_resource_flags(resources: SlurmResources) -> list[str]:
+    command: list[str] = []
     if resources.partition:
         command.extend(["--partition", str(resources.partition)])
     if resources.qos:
@@ -179,71 +188,205 @@ def build_srun_command(
         command.extend(["--cpus-per-task", str(resources.cpus_per_task)])
     if resources.gpus_per_node:
         command.extend(["--gpus-per-node", str(resources.gpus_per_node)])
-    if log_path is not None:
-        log_path = Path(log_path)
-        command.extend(["--output", str(log_path), "--error", str(log_path)])
-    command.extend([sys.executable, "-m", "movebench.cli.main", *worker_args])
     return command
 
 
-def run_srun_queue(
+def _worker_command(worker_args: Sequence[str]) -> list[str]:
+    return [sys.executable, "-m", "movebench.cli.main", *worker_args]
+
+
+def _array_manifest_payload(request: ArrayRequest) -> dict[str, object]:
+    return {
+        "tasks": [
+            {"worker_args": list(worker_args)}
+            for worker_args in request.worker_args_list
+        ]
+    }
+
+
+def _array_manifest_path(request: ArrayRequest) -> Path:
+    payload = json.dumps(
+        _array_manifest_payload(request),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return request.manifest_dir.resolve() / f"{request.manifest_stem}__{digest}.json"
+
+
+def _write_array_manifest(*, request: ArrayRequest, manifest_path: Path) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_array_manifest_payload(request), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def build_sbatch_command(*, request: ArrayRequest, manifest_path: Path) -> list[str]:
+    task_count = len(request.worker_args_list)
+    if task_count <= 0:
+        raise ValueError("Array requests must contain at least one task")
+    if int(request.array_concurrency) <= 0:
+        raise ValueError("Array requests must set array_concurrency > 0")
+
+    wrapped_command = shlex.join(
+        [
+            sys.executable,
+            "-m",
+            "movebench.slurm.launcher",
+            "--array-manifest",
+            str(Path(manifest_path).resolve()),
+        ]
+    )
+    return [
+        "sbatch",
+        "--wait",
+        "--parsable",
+        "--requeue",
+        "--export=ALL",
+        f"--array=0-{task_count - 1}%{int(request.array_concurrency)}",
+        *_slurm_resource_flags(request.resources),
+        "--output",
+        str(request.log_path),
+        "--error",
+        str(request.log_path),
+        "--wrap",
+        wrapped_command,
+    ]
+
+
+def _request_name(request: ArrayRequest, index: int) -> str:
+    if request.name:
+        return str(request.name)
+    return f"array={index}"
+
+
+def run_sbatch_queue(
     *,
     label: str,
-    commands: Sequence[Sequence[str]],
-    max_concurrent_jobs: int,
+    requests: Sequence[ArrayRequest],
     polling_interval: float,
     dry_run: bool,
+    max_concurrent_jobs: int | None = None,
 ) -> int:
-    if int(max_concurrent_jobs) <= 0:
-        raise ValueError("--max-concurrent-jobs must be > 0")
-
-    command_list = [list(command) for command in commands]
+    request_list = list(requests)
     if dry_run:
-        print(
-            f"[{label}] Dry-run: would launch {len(command_list)} jobs "
-            f"(max_concurrent={max_concurrent_jobs})."
-        )
-        for command in command_list:
-            print(f"[{label}] {shlex.join(command)}")
+        summary = f"[{label}] Dry-run: would launch {len(request_list)} array jobs"
+        if max_concurrent_jobs is not None:
+            summary += f" (max_concurrent={int(max_concurrent_jobs)})"
+        print(summary + ".")
+        for index, request in enumerate(request_list):
+            request_name = _request_name(request, index)
+            print(
+                f"[{label}] ARRAY {request_name} "
+                f"tasks={len(request.worker_args_list)} "
+                f"concurrency={int(request.array_concurrency)}"
+            )
+            manifest_path = _array_manifest_path(request)
+            print(
+                f"[{label}] "
+                f"{shlex.join(build_sbatch_command(request=request, manifest_path=manifest_path))}"
+            )
+            for task_index, worker_args in enumerate(request.worker_args_list):
+                print(
+                    f"[{label}] task[{task_index}] "
+                    f"{shlex.join(_worker_command(worker_args))}"
+                )
         return 0
 
-    pending = list(command_list)
-    running: list[tuple[list[str], subprocess.Popen[bytes]]] = []
-    failures: list[tuple[list[str], int]] = []
+    if not request_list:
+        return 0
+
+    running: list[tuple[str, subprocess.Popen[str]]] = []
+    failures: list[tuple[str, int]] = []
     completed = 0
-    total = len(pending)
     try:
-        while pending or running:
-            while pending and len(running) < int(max_concurrent_jobs):
-                command = pending.pop(0)
-                print(f"[{label}] Launching {completed + len(running) + 1}/{total}.")
-                print(f"[{label}] {shlex.join(command)}")
-                running.append((command, subprocess.Popen(command)))
+        for index, request in enumerate(request_list):
+            request_name = _request_name(request, index)
+            manifest_path = _array_manifest_path(request)
+            _write_array_manifest(request=request, manifest_path=manifest_path)
+            request.log_path.parent.mkdir(parents=True, exist_ok=True)
+            command = build_sbatch_command(request=request, manifest_path=manifest_path)
+            print(
+                f"[{label}] ARRAY {request_name} "
+                f"tasks={len(request.worker_args_list)} "
+                f"concurrency={int(request.array_concurrency)}"
+            )
+            print(f"[{label}] {shlex.join(command)}")
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            job_id = ""
+            if process.stdout is not None:
+                job_id = process.stdout.readline().strip()
+            if job_id:
+                print(f"[{label}] Submitted {request_name} job_id={job_id}")
+            running.append((request_name, process))
 
-            if not running:
-                continue
-
+        while running:
             time.sleep(float(polling_interval))
-            next_running: list[tuple[list[str], subprocess.Popen[bytes]]] = []
+            next_running: list[tuple[str, subprocess.Popen[str]]] = []
             progress_changed = False
-            for command, process in running:
+            for request_name, process in running:
                 return_code = process.poll()
                 if return_code is None:
-                    next_running.append((command, process))
+                    next_running.append((request_name, process))
                     continue
                 completed += 1
                 progress_changed = True
                 if int(return_code) != 0:
-                    failures.append((command, int(return_code)))
+                    failures.append((request_name, int(return_code)))
             if progress_changed:
                 print(
                     f"[{label}] Progress: completed={completed} "
-                    f"running={len(next_running)} pending={len(pending)} "
-                    f"failed={len(failures)}"
+                    f"running={len(next_running)} failed={len(failures)}"
                 )
             running = next_running
     except KeyboardInterrupt:
-        print(f"[{label}] Interrupted; {len(running)} jobs may still be running.")
+        print(f"[{label}] Interrupted; {len(running)} arrays may still be running.")
         return 130
 
     return 0 if not failures else 2
+
+
+def _load_array_manifest(manifest_path: Path) -> list[list[str]]:
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list):
+        raise ValueError(f"{manifest_path} must contain a tasks list")
+    worker_args_list: list[list[str]] = []
+    for task in tasks:
+        if not isinstance(task, dict) or not isinstance(task.get("worker_args"), list):
+            raise ValueError(f"{manifest_path} has an invalid task entry")
+        worker_args_list.append([str(arg) for arg in task["worker_args"]])
+    return worker_args_list
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = argparse.ArgumentParser(
+        prog="python -m movebench.slurm.launcher",
+        description="Internal runtime for MoveBench Slurm job arrays.",
+    )
+    parser.add_argument("--array-manifest", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
+    worker_args_list = _load_array_manifest(Path(args.array_manifest))
+    try:
+        worker_args = worker_args_list[task_id]
+    except IndexError as exc:
+        raise ValueError(
+            f"SLURM_ARRAY_TASK_ID={task_id} is out of range for {args.array_manifest}"
+        ) from exc
+
+    from movebench.cli.main import main as cli_main
+
+    return int(cli_main(["movebench", *worker_args]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

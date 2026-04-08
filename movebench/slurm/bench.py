@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 
 from movebench.slurm.launcher import (
+    ArrayRequest,
     SlurmResources,
     apply_slurm_config,
-    build_srun_command,
     register_common_slurm_arguments,
-    run_srun_queue,
+    run_sbatch_queue,
 )
 
 _SLURM_DEFAULTS = {
@@ -79,13 +79,54 @@ def _worker_args(
     return worker_args
 
 
-def _log_path_for_run(args: argparse.Namespace, run_key: str) -> Path:
-    return Path(args.log_dir) / f"{run_key}.%j.log"
-
-
 def _write_manifest(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _bucket_pending_runs(
+    args: argparse.Namespace,
+    pending_runs: list[dict[str, object]],
+) -> list[tuple[SlurmResources, list[dict[str, object]]]]:
+    buckets: dict[SlurmResources, list[dict[str, object]]] = {}
+    for run_payload in pending_runs:
+        resources = _resources_for_run(args, run_payload=run_payload)
+        buckets.setdefault(resources, []).append(run_payload)
+    return list(buckets.items())
+
+
+def _allocate_bucket_caps(task_counts: list[int], requested_cap: int) -> list[int]:
+    if int(requested_cap) <= 0:
+        raise ValueError("--max-concurrent-jobs must be > 0")
+
+    non_empty = [index for index, count in enumerate(task_counts) if int(count) > 0]
+    caps = [0 for _ in task_counts]
+    if not non_empty:
+        return caps
+    if len(non_empty) == 1:
+        index = non_empty[0]
+        caps[index] = min(int(task_counts[index]), int(requested_cap))
+        return caps
+    if len(non_empty) > int(requested_cap):
+        raise ValueError("bench resource buckets exceed --max-concurrent-jobs")
+
+    for index in non_empty:
+        caps[index] = 1
+
+    remaining = int(requested_cap) - len(non_empty)
+    while remaining > 0:
+        candidates = [
+            index for index in non_empty if int(task_counts[index]) > int(caps[index])
+        ]
+        if not candidates:
+            break
+        next_index = max(
+            candidates,
+            key=lambda index: (int(task_counts[index]) - int(caps[index]), -index),
+        )
+        caps[next_index] += 1
+        remaining -= 1
+    return caps
 
 
 def _run_worker(args: argparse.Namespace) -> int:
@@ -127,29 +168,42 @@ def _run_launcher(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _write_manifest(manifest_path, dict(resolved["manifest_payload"]))
 
-    commands: list[list[str]] = []
-    for run_payload in pending_runs:
-        log_path = _log_path_for_run(args, str(run_payload["run_key"]))
-        if not args.dry_run:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-        commands.append(
-            build_srun_command(
-                resources=_resources_for_run(args, run_payload=run_payload),
-                worker_args=_worker_args(
-                    manifest_path,
-                    str(run_payload["run_key"]),
-                    rerun=bool(args.rerun),
+    buckets = _bucket_pending_runs(args, pending_runs)
+    caps = _allocate_bucket_caps(
+        [len(bucket_runs) for _, bucket_runs in buckets],
+        int(args.max_concurrent_jobs),
+    )
+    requests: list[ArrayRequest] = []
+    for bucket_index, ((resources, bucket_runs), bucket_cap) in enumerate(
+        zip(buckets, caps)
+    ):
+        requests.append(
+            ArrayRequest(
+                resources=resources,
+                array_concurrency=int(bucket_cap),
+                log_path=Path(args.log_dir) / f"bucket-{bucket_index}.%A_%a.log",
+                worker_args_list=tuple(
+                    tuple(
+                        _worker_args(
+                            manifest_path,
+                            str(run_payload["run_key"]),
+                            rerun=bool(args.rerun),
+                        )
+                    )
+                    for run_payload in bucket_runs
                 ),
-                log_path=log_path,
+                manifest_dir=Path(args.log_dir) / "manifests",
+                manifest_stem=f"bucket{bucket_index}",
+                name=f"bucket={bucket_index}",
             )
         )
 
-    return run_srun_queue(
+    return run_sbatch_queue(
         label="bench",
-        commands=commands,
-        max_concurrent_jobs=int(args.max_concurrent_jobs),
+        requests=requests,
         polling_interval=float(args.polling_interval),
         dry_run=bool(args.dry_run),
+        max_concurrent_jobs=int(args.max_concurrent_jobs),
     )
 
 

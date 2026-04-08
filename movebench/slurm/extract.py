@@ -20,11 +20,11 @@ from movebench.extract import (
     uses_gee_layers,
 )
 from movebench.slurm.launcher import (
+    ArrayRequest,
     SlurmResources,
     apply_slurm_config,
-    build_srun_command,
     register_common_slurm_arguments,
-    run_srun_queue,
+    run_sbatch_queue,
 )
 from movebench.study import Study
 
@@ -102,7 +102,7 @@ def _run_launcher(args: argparse.Namespace) -> int:
         (str(study_id), run) for study_id in studies for run in runs
     ]
 
-    queued_commands: list[list[str]] = []
+    queued_worker_args: list[tuple[str, ...]] = []
     blocked: list[tuple[str, str]] = []
     skipped = 0
     resources = SlurmResources.from_args(args)
@@ -167,32 +167,37 @@ def _run_launcher(args: argparse.Namespace) -> int:
                     f"{describe_known_download_failure(request_status)}",
                     file=sys.stderr,
                 )
-
-        log_path = _log_path_for_run(args=args, study_id=study_id, run=run)
-        if not args.dry_run:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-        queued_commands.append(
-            build_srun_command(
-                resources=resources,
-                worker_args=_worker_args_for_run(args=args, study_id=study_id, run=run),
-                log_path=log_path,
-            )
+        queued_worker_args.append(
+            tuple(_worker_args_for_run(args=args, study_id=study_id, run=run))
         )
 
     print(
         f"[extract] combos={len(runs)} studies={len(studies)} "
-        f"requested_pairs={len(requested)} queued={len(queued_commands)} "
+        f"requested_pairs={len(requested)} queued={len(queued_worker_args)} "
         f"skipped={skipped} blocked={len(blocked)}"
     )
     for label, reason in blocked:
         print(f"[extract] BLOCKED {label} {reason}", file=sys.stderr)
 
-    rc = run_srun_queue(
+    requests = []
+    if queued_worker_args:
+        requests.append(
+            ArrayRequest(
+                resources=resources,
+                array_concurrency=int(args.max_concurrent_jobs),
+                log_path=Path(args.log_dir) / "extract.%A_%a.log",
+                worker_args_list=tuple(queued_worker_args),
+                manifest_dir=Path(args.log_dir) / "manifests",
+                manifest_stem="extract",
+            )
+        )
+
+    rc = run_sbatch_queue(
         label="extract",
-        commands=queued_commands,
-        max_concurrent_jobs=int(args.max_concurrent_jobs),
+        requests=requests,
         polling_interval=float(args.polling_interval),
         dry_run=bool(args.dry_run),
+        max_concurrent_jobs=int(args.max_concurrent_jobs),
     )
     return 2 if blocked else rc
 
@@ -222,10 +227,6 @@ def _worker_args_for_run(
     if bool(args.allow_known_download_failures):
         worker_args.append("--allow-known-download-failures")
     return worker_args
-
-
-def _log_path_for_run(*, args: argparse.Namespace, study_id: str, run: ExtractionRun) -> Path:
-    return Path(args.log_dir) / run.log_dir_name / f"{study_id}.%j.log"
 
 
 def _collapse_cli_values(values: list[str] | None) -> str | None:

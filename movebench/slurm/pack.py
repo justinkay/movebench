@@ -5,11 +5,11 @@ from pathlib import Path
 
 from movebench import pack as pack_runtime
 from movebench.slurm.launcher import (
+    ArrayRequest,
     SlurmResources,
     apply_slurm_config,
-    build_srun_command,
     register_common_slurm_arguments,
-    run_srun_queue,
+    run_sbatch_queue,
 )
 
 _SLURM_DEFAULTS = {
@@ -82,10 +82,6 @@ def _worker_args_for_job(args: argparse.Namespace, study_id: str, timescale_key:
     return worker_args
 
 
-def _log_path_for_job(args: argparse.Namespace, study_id: str, timescale_key: str) -> Path:
-    return Path(args.log_dir) / f"{study_id}__{timescale_key}.%j.log"
-
-
 def _run_worker(args: argparse.Namespace) -> int:
     if not args.worker_study or not args.worker_timescale:
         raise ValueError("Worker mode requires --worker-study and --worker-timescale")
@@ -124,26 +120,29 @@ def _run_launcher(args: argparse.Namespace) -> int:
         )
     )
     resources = SlurmResources.from_args(args)
-    commands: list[list[str]] = []
-    for job in jobs:
-        log_path = _log_path_for_job(args, job.study_id, job.timescale_key)
-        if not args.dry_run:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-        commands.append(
-            build_srun_command(
+    requests = []
+    if jobs:
+        requests.append(
+            ArrayRequest(
                 resources=resources,
-                worker_args=_worker_args_for_job(args, job.study_id, job.timescale_key),
-                log_path=log_path,
+                array_concurrency=int(args.max_concurrent_jobs),
+                log_path=Path(args.log_dir) / "pack.%A_%a.log",
+                worker_args_list=tuple(
+                    tuple(_worker_args_for_job(args, job.study_id, job.timescale_key))
+                    for job in jobs
+                ),
+                manifest_dir=Path(args.log_dir) / "manifests",
+                manifest_stem="pack",
             )
         )
-    if not commands:
+    if not jobs:
         print("[pack] No pending study/timescale jobs.")
-    return run_srun_queue(
+    return run_sbatch_queue(
         label="pack",
-        commands=commands,
-        max_concurrent_jobs=int(args.max_concurrent_jobs),
+        requests=requests,
         polling_interval=float(args.polling_interval),
         dry_run=bool(args.dry_run),
+        max_concurrent_jobs=int(args.max_concurrent_jobs),
     )
 
 
