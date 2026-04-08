@@ -41,7 +41,7 @@ def _make_pack_kwargs(
         kwargs["target_dtype"] = args.target_dtype
     if args.compression is not None:
         kwargs["compression"] = args.compression
-    if int(args.build_workers):
+    if int(args.build_workers) != 16:
         kwargs["build_workers"] = int(args.build_workers)
     if bool(args.overwrite):
         kwargs["overwrite"] = True
@@ -71,7 +71,7 @@ def _worker_args_for_job(args: argparse.Namespace, study_id: str, timescale_key:
         worker_args.extend(["--target-dtype", str(args.target_dtype)])
     if args.compression is not None:
         worker_args.extend(["--compression", str(args.compression)])
-    if int(args.build_workers):
+    if int(args.build_workers) != 16:
         worker_args.extend(["--build-workers", str(int(args.build_workers))])
     if bool(args.overwrite):
         worker_args.append("--overwrite")

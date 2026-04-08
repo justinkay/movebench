@@ -83,7 +83,7 @@ def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("uint8", "float16", "float32"),
     )
     parser.add_argument("--compression", type=str, default=None, choices=("none", "gz"))
-    parser.add_argument("--build-workers", type=int, default=0)
+    parser.add_argument("--build-workers", type=int, default=16)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
@@ -176,7 +176,7 @@ def resolve_pack_jobs(
     spatial_dtype: str | None = None,
     target_dtype: str | None = None,
     compression: str | None = None,
-    build_workers: int = 0,
+    build_workers: int = 16,
     overwrite: bool = False,
     resume: bool = False,
     seed: int = 0,
@@ -279,7 +279,7 @@ def execute_pack_job(job: PackJob) -> list[tuple[Path, dict[str, Any]]]:
                 _job_option(job, "compression", str(job.timescale["compression"]))
             ),
             seed=int(_job_option(job, "seed", 0)),
-            build_workers=int(_job_option(job, "build_workers", 0)),
+            build_workers=int(_job_option(job, "build_workers", 16)),
             build_if_missing=True,
             overwrite=bool(_job_option(job, "overwrite", False)),
             resume=bool(_job_option(job, "resume", False)),
@@ -297,7 +297,7 @@ def run_local_pack(
     spatial_dtype: str | None = None,
     target_dtype: str | None = None,
     compression: str | None = None,
-    build_workers: int = 0,
+    build_workers: int = 16,
     overwrite: bool = False,
     resume: bool = False,
     seed: int = 0,
@@ -316,7 +316,7 @@ def run_local_pack(
         resolve_kwargs["target_dtype"] = target_dtype
     if compression is not None:
         resolve_kwargs["compression"] = compression
-    if build_workers:
+    if int(build_workers) != 16:
         resolve_kwargs["build_workers"] = build_workers
     if overwrite:
         resolve_kwargs["overwrite"] = overwrite

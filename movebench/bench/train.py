@@ -69,7 +69,7 @@ def run_training_loop(
     stopped_early = False
 
     try:
-        for step in tqdm(range(1, int(config.max_steps) + 1), desc="Training..."):
+        for step in tqdm(range(1, int(config.max_steps) + 1), desc=f"Training..."):
             completed_steps = int(step)
             train_step_metrics = {
                 str(key): float(value)
@@ -90,6 +90,8 @@ def run_training_loop(
                 for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
             }
             last_eval_step = int(step)
+            print("Train:", train_metrics)
+            print("Eval:", eval_metrics)
 
             history_entry: dict[str, float] = {"step": float(step)}
             history_entry.update(
@@ -126,10 +128,12 @@ def run_training_loop(
                     stopped_early = True
                     break
 
+        print("Training done; loading best state")
         if best_state is None:
             best_step = int(last_eval_step or completed_steps)
             best_state = copy.deepcopy(dict(runtime.state_dict()))
 
+        print("Computing final train and eval metrics")
         runtime.load_state_dict(best_state)
         final_train_metrics = {
             str(key): float(value)
@@ -139,6 +143,8 @@ def run_training_loop(
             str(key): float(value)
             for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
         }
+        print("Train final:", final_train_metrics)
+        print("Eval final:", final_eval_metrics)
         _write_history(tracker, history)
         return {
             "best_step": int(best_step),

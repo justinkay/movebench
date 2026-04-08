@@ -215,7 +215,7 @@ def _grid_prediction_payload(
     sampler_config,
     output_hw: tuple[int, int],
     batch_size: int,
-    num_workers: int,
+    prediction_num_workers: int,
     device: torch.device,
 ) -> dict[str, object]:
     grid_dataset = ssf_grid.make_grid_step_dataset(
@@ -233,7 +233,7 @@ def _grid_prediction_payload(
         train_manifest=train_manifest,
         train_steps=train_steps,
         batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=prediction_num_workers,
         device=device,
         model=model,
         feature_adapter=dataset,
@@ -261,7 +261,8 @@ def _run(
 
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams.get("batch_size", 256))
-    num_workers = int(method_hparams.get("num_workers", 0) or 0)
+    train_num_workers = int(method_hparams.get("num_workers", 0) or 0)
+    prediction_num_workers = int(method_hparams.get("prediction_num_workers", 4) or 0)
     eval_max_items = (
         None
         if method_hparams.get("max_eval_items") is None
@@ -299,7 +300,7 @@ def _run(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=train_num_workers,
         device=device,
     )
     print("Creating eval loaders")
@@ -308,7 +309,7 @@ def _run(
         batch_size=batch_size,
         seed=int(run_payload["seed"]) + 0,
         max_items=eval_max_items,
-        num_workers=num_workers,
+        num_workers=train_num_workers,
         device=device,
     )
     eval_loader = _subset_loader(
@@ -316,7 +317,7 @@ def _run(
         batch_size=batch_size,
         seed=int(run_payload["seed"]) + 1,
         max_items=eval_max_items,
-        num_workers=num_workers,
+        num_workers=train_num_workers,
         device=device,
     )
 
@@ -380,7 +381,7 @@ def _run(
             f"{run_key}: reusing iSSF checkpoint best_step={fit['best_step']}"
         )
     else:
-        print("entering training loop")
+        print("Entering training loop")
         fit = run_training_loop(
             runtime,
             TrainerConfig(
@@ -418,6 +419,7 @@ def _run(
         pred_path = pred_dir / f"{split_key}.pt"
         if pred_path.exists():
             try:
+                print("Preds exist. Scoring.")
                 evaluation_runner._score_split(
                     split_key=str(split_key),
                     pred_artifact=dict(torch.load(pred_path, map_location="cpu")),
@@ -429,6 +431,7 @@ def _run(
                 _log_progress(
                     f"{run_key}: regenerating iSSF predictions split={split_key}: {exc}"
                 )
+        print("Preds don't exist. Computing.")
         if trajectories_df is None:
             trajectories_df = load_trajectories_csv(
                 Path(resolved_artifacts["trajectories_path"])
@@ -441,7 +444,7 @@ def _run(
         split_manifest = point_stores[split_key]["manifest"]
         _log_progress(
             f"{run_key}: starting iSSF prediction split={split_key} "
-            f"grid={output_hw[0]}x{output_hw[1]} workers={num_workers}"
+            f"grid={output_hw[0]}x{output_hw[1]} workers={prediction_num_workers}"
         )
         torch.save(
             _grid_prediction_payload(
@@ -456,7 +459,7 @@ def _run(
                 sampler_config=resolved_artifacts["sampler"],
                 output_hw=output_hw,
                 batch_size=batch_size,
-                num_workers=num_workers,
+                prediction_num_workers=prediction_num_workers,
                 device=device,
             ),
             pred_path,

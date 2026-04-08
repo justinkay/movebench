@@ -109,6 +109,23 @@ def start_benchmark_run(run_payload: dict[str, object]) -> object:
     return run
 
 
+def terminate_run(
+    run_id: str,
+    *,
+    status: str,
+    tags: dict[str, object] | None = None,
+) -> None:
+    run_id = str(run_id).strip()
+    if not run_id:
+        return
+    client = _client(create=True)
+    if client is None:
+        return
+    for key, value in dict(tags or {}).items():
+        client.set_tag(run_id, str(key), str(value))
+    client.set_terminated(run_id, status=str(status))
+
+
 def search_all_benchmark_runs(filter_string: str | None = None) -> list[object]:
     experiment_id = get_existing_experiment_id()
     if experiment_id is None:

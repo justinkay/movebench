@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -500,6 +501,8 @@ def build_ssf_grid_artifact(
         train_points_per_step=int(train_manifest.sampler["num_candidates"]) + 1,
         output_hw=grid_dataset.output_hw,
     )
+    print("Computed step batch size, workers", step_batch_size, num_workers)
+
     loader = make_grid_loader(
         grid_dataset,
         batch_size=step_batch_size,
@@ -514,7 +517,7 @@ def build_ssf_grid_artifact(
             raise ValueError("feature_adapter is required when model is provided")
         model.eval()
 
-    for batch in loader:
+    for batch in tqdm(loader, desc=f"Generating predictions with batch size {step_batch_size} and num_workers {num_workers}"):
         point_id_start = batch["point_id_start"].to(dtype=torch.int64).cpu()
         log_q_hw, _off_grid_mass = movement_log_prior_hw(
             start_bearing_rad=batch["start_bearing_rad"],

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
+import movebench.bench.evaluation.runner as evaluation_runner
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
 from movebench.models.deepssf import DeepSSF
@@ -132,6 +134,22 @@ def _prediction_payload(
         "scores": torch.cat(scores_chunks, dim=0),
         "pixel_size_m": float(pixel_size_m),
     }
+
+
+def _completed_steps_from_history(run_dir: Path, *, fallback: int = 0) -> int:
+    history_path = Path(run_dir) / "history.json"
+    if not history_path.exists():
+        return int(fallback)
+    try:
+        history_payload = json.loads(history_path.read_text(encoding="utf-8"))
+    except Exception:
+        return int(fallback)
+    steps = [
+        int(float(entry["step"]))
+        for entry in history_payload
+        if isinstance(entry, dict) and "step" in entry
+    ]
+    return max(steps) if steps else int(fallback)
 
 
 def _make_loader(
@@ -322,39 +340,63 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         channel_indices=channel_indices,
         eval_max_items=eval_max_items,
     )
-    fit = run_training_loop(
-        runtime,
-        TrainerConfig(
-            max_steps=int(schedule["max_steps"]),
-            eval_every_steps=int(schedule["eval_every_steps"]),
-            patience_evals=int(schedule["patience_evals"]),
-            seed=seed,
-        ),
-        tracker,
-    )
-
     checkpoint_path = run_dir / "checkpoint_best.pt"
-    torch.save(
-        {
-            "state_dict": {
-                key: value.detach().cpu()
-                for key, value in runtime.model.state_dict().items()
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
+        best_step = int(dict(checkpoint.get("meta", {})).get("best_step", 0))
+        fit = {
+            "completed_steps": _completed_steps_from_history(
+                run_dir,
+                fallback=best_step,
+            ),
+            "best_step": int(best_step),
+            "train_metrics": {},
+            "eval_metrics": {},
+        }
+    else:
+        fit = run_training_loop(
+            runtime,
+            TrainerConfig(
+                max_steps=int(schedule["max_steps"]),
+                eval_every_steps=int(schedule["eval_every_steps"]),
+                patience_evals=int(schedule["patience_evals"]),
+                seed=seed,
+            ),
+            tracker,
+        )
+        torch.save(
+            {
+                "state_dict": {
+                    key: value.detach().cpu()
+                    for key, value in runtime.model.state_dict().items()
+                },
+                "meta": {
+                    "method": str(run_payload["method"]),
+                    "best_step": int(fit["best_step"]),
+                    "covariate_set": str(run_payload["covariate_set"]),
+                    "env_channels": len(channel_indices),
+                    "image_dim": image_dim,
+                    "pixel_size_m": pixel_size_m,
+                },
             },
-            "meta": {
-                "method": str(run_payload["method"]),
-                "best_step": int(fit["best_step"]),
-                "covariate_set": str(run_payload["covariate_set"]),
-                "env_channels": len(channel_indices),
-                "image_dim": image_dim,
-                "pixel_size_m": pixel_size_m,
-            },
-        },
-        checkpoint_path,
-    )
+            checkpoint_path,
+        )
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
     for split_key in run_payload["evaluation_split_keys"]:
+        pred_path = pred_dir / f"{split_key}.pt"
+        if pred_path.exists():
+            try:
+                evaluation_runner._score_split(
+                    split_key=str(split_key),
+                    pred_artifact=dict(torch.load(pred_path, map_location="cpu")),
+                    run_payload=run_payload,
+                )
+                continue
+            except Exception:
+                pass
         loader = _make_loader(
             Path(resolved_artifacts["cache_manifests"][split_key]["cache_dir"]),
             batch_size=batch_size,
@@ -369,7 +411,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
                 channel_indices=runtime._channel_indices,
                 pixel_size_m=pixel_size_m,
             ),
-            pred_dir / f"{split_key}.pt",
+            pred_path,
         )
 
     return {

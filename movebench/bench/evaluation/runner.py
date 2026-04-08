@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from tqdm import tqdm
 
 import torch
 from pyproj import Transformer
@@ -390,7 +391,7 @@ def _score_split(
 
     by_step_rows: list[dict[str, object]] = []
     excluded = 0
-    for point_id, contract, meta in zip(actual_point_ids, contracts, aligned_rows):
+    for point_id, contract, meta in tqdm(zip(actual_point_ids, contracts, aligned_rows), desc="Computing energy scores..."):
         if int(meta["point_id_start"]) != int(point_id):
             raise ValueError(
                 f"prediction row point_id_start={int(point_id)} does not align with reconstructed step point_id_start={int(meta['point_id_start'])}"
