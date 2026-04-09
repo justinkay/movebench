@@ -42,6 +42,7 @@ def _crs_transformers():
 class _StepRecord:
     split_key: str
     point_id_start: int
+    point_id_end: int
     timestamp_ns: int
     timestamp_end_ns: int
     start_lon: float
@@ -129,6 +130,88 @@ def _prediction_mask(
     )
 
 
+def _horizon_linked_chains(
+    records: list[_StepRecord],
+    *,
+    step_time_ns: int,
+) -> list[list[_StepRecord]]:
+    if not records:
+        return []
+
+    ordered = sorted(
+        records,
+        key=lambda record: (record.timestamp_ns, record.point_id_start),
+    )
+    seen_start_ids: set[int] = set()
+    preds_by_end_id: dict[int, list[int]] = {}
+    for idx, record in enumerate(ordered):
+        if record.point_id_start in seen_start_ids:
+            raise ValueError(
+                "Duplicate point_id_start "
+                f"{record.point_id_start} encountered in MoveFormer context "
+                "chain construction"
+            )
+        seen_start_ids.add(record.point_id_start)
+        preds_by_end_id.setdefault(record.point_id_end, []).append(idx)
+
+    predecessor_idx = [-1] * len(ordered)
+    successor_idx = [-1] * len(ordered)
+    for idx, record in enumerate(ordered):
+        desired_prev_ts = int(record.timestamp_ns) - int(step_time_ns)
+        candidates = [
+            cand_idx
+            for cand_idx in preds_by_end_id.get(record.point_id_start, [])
+            if ordered[cand_idx].timestamp_ns < record.timestamp_ns
+        ]
+        if not candidates:
+            continue
+        best_pred_idx = min(
+            candidates,
+            key=lambda cand_idx: (
+                abs(int(ordered[cand_idx].timestamp_ns) - desired_prev_ts),
+                -int(ordered[cand_idx].timestamp_ns),
+                int(ordered[cand_idx].point_id_start),
+            ),
+        )
+        predecessor_idx[idx] = int(best_pred_idx)
+        if successor_idx[best_pred_idx] != -1:
+            raise ValueError(
+                "MoveFormer context chain construction produced multiple "
+                "successors for one horizon step"
+            )
+        successor_idx[best_pred_idx] = int(idx)
+
+    chains: list[list[_StepRecord]] = []
+    visited: set[int] = set()
+    for root_idx, pred_idx in enumerate(predecessor_idx):
+        if pred_idx != -1:
+            continue
+        chain: list[_StepRecord] = []
+        current_idx = int(root_idx)
+        while current_idx != -1 and current_idx not in visited:
+            visited.add(current_idx)
+            chain.append(ordered[current_idx])
+            current_idx = successor_idx[current_idx]
+        if chain:
+            chains.append(chain)
+
+    for start_idx in range(len(ordered)):
+        if start_idx in visited:
+            continue
+        chain = []
+        current_idx = int(start_idx)
+        local_seen: set[int] = set()
+        while current_idx != -1 and current_idx not in local_seen:
+            local_seen.add(current_idx)
+            visited.add(current_idx)
+            chain.append(ordered[current_idx])
+            current_idx = successor_idx[current_idx]
+        if chain:
+            chains.append(chain)
+
+    return chains
+
+
 class MoveFormerPointStoreDataset(Dataset):
     """Sequence dataset for MoveFormer selection model, built from point stores."""
 
@@ -146,6 +229,7 @@ class MoveFormerPointStoreDataset(Dataset):
         normalize_env: bool = True,
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
+        candidate_subset_size: int | None = None,
     ) -> None:
         del trajectories_path
         super().__init__()
@@ -169,6 +253,9 @@ class MoveFormerPointStoreDataset(Dataset):
         self.min_len = int(min_len)
         self.normalize_env = bool(normalize_env)
         self.require_normalization_stats = bool(require_normalization_stats)
+        self.candidate_subset_size = (
+            None if candidate_subset_size is None else int(candidate_subset_size)
+        )
 
         _indices, self.plan = _subset_plan_env_channels(
             plan,
@@ -177,6 +264,7 @@ class MoveFormerPointStoreDataset(Dataset):
         )
         self.cov_dim = int(self.plan.num_channels())
         self._band_ids = self.plan.band_ids_in_order()
+        self._step_time_ns = int(self.plan.step_spec.step_time_s) * 1_000_000_000
         sampler_hash = resolve_sampler_hash(sampler_config)
 
         target_store_dir, target_manifest = load_point_store_manifest(
@@ -263,6 +351,7 @@ class MoveFormerPointStoreDataset(Dataset):
                     "individual_id",
                     "burst_id",
                     "point_id_start",
+                    "point_id_end",
                     "timestamp_ns",
                     "timestamp_end_ns",
                 ],
@@ -301,6 +390,7 @@ class MoveFormerPointStoreDataset(Dataset):
                         _StepRecord(
                             split_key=str(split_key),
                             point_id_start=int(block["point_id_start"][idx].item()),
+                            point_id_end=int(block["point_id_end"][idx].item()),
                             timestamp_ns=int(block["timestamp_ns"][idx].item()),
                             timestamp_end_ns=int(block["timestamp_end_ns"][idx].item()),
                             start_lon=float(block["start_lon"][idx].item()),
@@ -316,26 +406,41 @@ class MoveFormerPointStoreDataset(Dataset):
             raise ValueError(
                 f"Expected P>=2 candidates; got P={self.num_candidates_total}"
             )
+        if self.candidate_subset_size is not None:
+            if self.candidate_subset_size < 2:
+                raise ValueError(
+                    "candidate_subset_size must be >= 2 to include the true endpoint "
+                    f"plus at least one negative, got {self.candidate_subset_size}."
+                )
+            if self.candidate_subset_size > self.num_candidates_total:
+                raise ValueError(
+                    "candidate_subset_size cannot exceed stored candidate count, got "
+                    f"{self.candidate_subset_size} > {self.num_candidates_total}."
+                )
+            self.num_candidates_total = int(self.candidate_subset_size)
 
         self._chains: list[list[_StepRecord]] = []
         self._segments: list[tuple[int, int, int]] = []
         stride = max(1, self.max_len - 1)
-        for chain in chains_by_key.values():
-            chain.sort(key=lambda record: (record.timestamp_ns, record.point_id_start))
-            if len(chain) < self.min_len:
-                continue
-            if not any(record.split_key == self.split for record in chain):
-                continue
-            chain_idx = len(self._chains)
-            self._chains.append(chain)
-            start = 0
-            while start + self.min_len <= len(chain):
-                end = min(len(chain), start + self.max_len)
-                if bool(_loss_mask(chain, start, end, self.split).any()):
-                    self._segments.append((chain_idx, start, end))
-                if end == len(chain):
-                    break
-                start += stride
+        for burst_records in chains_by_key.values():
+            for chain in _horizon_linked_chains(
+                burst_records,
+                step_time_ns=self._step_time_ns,
+            ):
+                if len(chain) < self.min_len:
+                    continue
+                if not any(record.split_key == self.split for record in chain):
+                    continue
+                chain_idx = len(self._chains)
+                self._chains.append(chain)
+                start = 0
+                while start + self.min_len <= len(chain):
+                    end = min(len(chain), start + self.max_len)
+                    if bool(_loss_mask(chain, start, end, self.split).any()):
+                        self._segments.append((chain_idx, start, end))
+                    if end == len(chain):
+                        break
+                    start += stride
 
         if not self._segments:
             raise ValueError(
@@ -351,6 +456,19 @@ class MoveFormerPointStoreDataset(Dataset):
         window = chain[start:end]
         seq_env = torch.stack([record.env for record in window], dim=0)
         seq_valid = torch.stack([record.valid for record in window], dim=0)
+        candidate_lon = torch.stack([record.candidate_lon for record in window], dim=0)
+        candidate_lat = torch.stack([record.candidate_lat for record in window], dim=0)
+        if self.candidate_subset_size is not None:
+            num_negatives = int(self.candidate_subset_size) - 1
+            negative_idx = torch.randperm(int(seq_env.shape[2]) - 1)[:num_negatives] + 1
+            keep_idx = torch.cat(
+                [torch.zeros(1, dtype=torch.long), negative_idx.to(dtype=torch.long)],
+                dim=0,
+            )
+            seq_env = seq_env.index_select(2, keep_idx)
+            seq_valid = seq_valid.index_select(2, keep_idx)
+            candidate_lon = candidate_lon.index_select(1, keep_idx)
+            candidate_lat = candidate_lat.index_select(1, keep_idx)
         cov_cand = seq_env.permute(0, 2, 1).numpy().astype(np.float32, copy=False)
         cov_cand_valid = seq_valid.permute(0, 2, 1).numpy()
         cov_cand = np.where(cov_cand_valid, cov_cand, np.float32(np.nan)).astype(
@@ -377,8 +495,6 @@ class MoveFormerPointStoreDataset(Dataset):
 
         start_lon = np.asarray([record.start_lon for record in window], dtype=np.float64)
         start_lat = np.asarray([record.start_lat for record in window], dtype=np.float64)
-        candidate_lon = torch.stack([record.candidate_lon for record in window], dim=0)
-        candidate_lat = torch.stack([record.candidate_lat for record in window], dim=0)
         traj: dict[str, Any] = {
             "timestamp": _to_datetime64([record.timestamp_ns for record in window]),
             "timestamp_tgt": _to_datetime64(

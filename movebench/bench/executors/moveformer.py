@@ -273,7 +273,7 @@ def _loader(dataset: Dataset, *, batch_size: int, shuffle: bool, seed: int):
         "dataset": dataset,
         "batch_size": int(batch_size),
         "shuffle": bool(shuffle),
-        "num_workers": 0,
+        "num_workers": 4, #0,
         "collate_fn": _collate_moveformer,
     }
     if shuffle:
@@ -307,6 +307,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     train_dataset = MoveFormerPointStoreDataset(
         split="train",
         context_splits=None,
+        candidate_subset_size=16,
         **dataset_kwargs,
     )
     eval_datasets = {
@@ -317,6 +318,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         )
         for split_key in run_payload["evaluation_split_keys"]
     }
+    print("Moveformer train dataset length", len(train_dataset))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_moveformer_selection_model(cov_dim=int(train_dataset.cov_dim))

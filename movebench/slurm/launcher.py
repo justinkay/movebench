@@ -57,6 +57,26 @@ class ArrayRequest:
     name: str | None = None
 
 
+@dataclass
+class _ActiveArray:
+    request_name: str
+    process: subprocess.Popen[str]
+    job_id: str = ""
+    last_status_counts: tuple[int, int, int] | None = None
+
+
+_ACTIVE_STATE_PREFIXES = (
+    "PENDING",
+    "RUNNING",
+    "CONFIGURING",
+    "COMPLETING",
+    "SUSPENDED",
+    "RESIZING",
+    "SIGNALING",
+    "STAGE_OUT",
+)
+
+
 def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--slurm-config",
@@ -261,6 +281,50 @@ def _request_name(request: ArrayRequest, index: int) -> str:
     return f"array={index}"
 
 
+def _slurm_array_status_counts(job_id: str) -> tuple[int, int, int] | None:
+    job_id = str(job_id).strip()
+    if not job_id:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "sacct",
+                "-j",
+                job_id,
+                "-n",
+                "-P",
+                "-X",
+                "--format=State",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return None
+    if int(result.returncode) != 0:
+        return None
+
+    running = 0
+    finished = 0
+    failed = 0
+    saw_state = False
+    for raw_line in str(result.stdout).splitlines():
+        state = raw_line.split("|", 1)[0].strip()
+        if not state:
+            continue
+        saw_state = True
+        if state.startswith("COMPLETED"):
+            finished += 1
+        elif state.startswith(_ACTIVE_STATE_PREFIXES):
+            running += 1
+        else:
+            failed += 1
+    if not saw_state:
+        return None
+    return running, finished, failed
+
+
 def run_sbatch_queue(
     *,
     label: str,
@@ -297,7 +361,7 @@ def run_sbatch_queue(
     if not request_list:
         return 0
 
-    running: list[tuple[str, subprocess.Popen[str]]] = []
+    running: list[_ActiveArray] = []
     failures: list[tuple[str, int]] = []
     completed = 0
     try:
@@ -323,21 +387,41 @@ def run_sbatch_queue(
                 job_id = process.stdout.readline().strip()
             if job_id:
                 print(f"[{label}] Submitted {request_name} job_id={job_id}")
-            running.append((request_name, process))
+            running.append(
+                _ActiveArray(
+                    request_name=request_name,
+                    process=process,
+                    job_id=job_id,
+                )
+            )
 
         while running:
             time.sleep(float(polling_interval))
-            next_running: list[tuple[str, subprocess.Popen[str]]] = []
+            next_running: list[_ActiveArray] = []
             progress_changed = False
-            for request_name, process in running:
-                return_code = process.poll()
+            for active in running:
+                status_counts = _slurm_array_status_counts(active.job_id)
+                if (
+                    status_counts is not None
+                    and status_counts != active.last_status_counts
+                ):
+                    running_count, finished_count, failed_count = status_counts
+                    print(
+                        f"[{label}] Status {active.request_name}: "
+                        f"running={running_count} "
+                        f"finished={finished_count} "
+                        f"failed={failed_count}"
+                    )
+                    active.last_status_counts = status_counts
+
+                return_code = active.process.poll()
                 if return_code is None:
-                    next_running.append((request_name, process))
+                    next_running.append(active)
                     continue
                 completed += 1
                 progress_changed = True
                 if int(return_code) != 0:
-                    failures.append((request_name, int(return_code)))
+                    failures.append((active.request_name, int(return_code)))
             if progress_changed:
                 print(
                     f"[{label}] Progress: completed={completed} "
