@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import json
 import math
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from pyproj import Transformer
 
+import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
+import movebench.bench.executors.ssf_grid as ssf_grid
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+from movebench.lib.moveformer.geo_transformers.geo_utils import (
+    gcs_to_bearing,
+    gcs_to_distance,
+    gcs_to_n_vector,
+    to_rad,
+)
 from movebench.lib.moveformer.geo_transformers.training_utils import (
     collate_sequence_dicts,
 )
@@ -38,6 +49,43 @@ def _eval_metrics(
         "nce": float(metrics["nce"]),
         "num_tokens": float(metrics["num_tokens"]),
     }
+
+
+@lru_cache(maxsize=1)
+def _grid_transformers() -> tuple[Transformer, Transformer]:
+    return (
+        Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True),
+        Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True),
+    )
+
+
+@lru_cache(maxsize=32)
+def _grid_offsets_np(
+    *,
+    height: int,
+    width: int,
+    pixel_size_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_coords_m, y_coords_m = evaluation_runner._grid_coordinates(
+        width=int(width),
+        height=int(height),
+        pixel_size_m=float(pixel_size_m),
+    )
+    x_hw = (
+        x_coords_m.unsqueeze(0)
+        .expand(int(height), int(width))
+        .cpu()
+        .numpy()
+        .astype(np.float64, copy=False)
+    )
+    y_hw = (
+        y_coords_m.unsqueeze(1)
+        .expand(int(height), int(width))
+        .cpu()
+        .numpy()
+        .astype(np.float64, copy=False)
+    )
+    return x_hw, y_hw
 
 
 def _collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
@@ -93,34 +141,262 @@ def _eval_moveformer(
     }
 
 
-def _prediction_payload(
+def _grid_step_rows_by_point_id(
+    grid_dataset,
+) -> dict[int, tuple[int, Any]]:
+    rows = {}
+    for idx, row in enumerate(grid_dataset.chips.step_starts_df.itertuples(index=False)):
+        point_id = int(row.point_id_start)
+        if point_id in rows:
+            raise ValueError(f"Duplicate grid step point_id_start {point_id}")
+        rows[point_id] = (idx, row)
+    return rows
+
+
+@torch.no_grad()
+def _prediction_queries(
     model: torch.nn.Module,
     loader,
     *,
     device: torch.device,
-) -> dict[str, object]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     model.eval()
     point_ids: list[torch.Tensor] = []
-    coords: list[torch.Tensor] = []
-    probs: list[torch.Tensor] = []
+    queries: list[torch.Tensor] = []
+    seen_point_ids: set[int] = set()
     with torch.no_grad():
         for batch in loader:
             features = _batch_to_device(batch, device)
-            logits, _loss, _metrics = model(features)
-            prediction_mask = batch.get("prediction_mask", batch["loss_mask"]).to(
-                torch.bool
-            )
+            _embeddings, dec_out = model(features, run_prediction=False)
+            prediction_mask = (
+                batch["prediction_mask"]
+                if "prediction_mask" in batch
+                else batch["loss_mask"]
+            ).to(torch.bool)
             if not bool(prediction_mask.any().item()):
                 continue
-            pseudo_probs = F.softmax(logits[..., 1:], dim=-1).detach().cpu()
-            point_ids.append(batch["point_id_start"][prediction_mask].to(torch.int64))
-            coords.append(batch["coords_m"][prediction_mask].to(torch.float32))
-            probs.append(pseudo_probs[prediction_mask].to(torch.float32))
+            batch_point_ids = batch["point_id_start"][prediction_mask].to(torch.int64)
+            batch_queries = dec_out[prediction_mask].detach().cpu().to(torch.float32)
+            for idx, point_id in enumerate(batch_point_ids.tolist()):
+                point_id_i = int(point_id)
+                if point_id_i in seen_point_ids:
+                    continue
+                seen_point_ids.add(point_id_i)
+                point_ids.append(torch.tensor([point_id_i], dtype=torch.int64))
+                queries.append(batch_queries[idx : idx + 1])
+    if not point_ids:
+        return (
+            torch.zeros((0,), dtype=torch.int64),
+            torch.zeros((0, 0), dtype=torch.float32),
+        )
+    point_id_tensor = torch.cat(point_ids, dim=0)
+    return point_id_tensor, torch.cat(queries, dim=0)
+
+
+def _candidate_feature_embedding(
+    model: torch.nn.Module,
+    *,
+    key: str,
+    value: torch.Tensor,
+) -> torch.Tensor:
+    if bool(getattr(model, "learnable_nan", False)):
+        nan_fill = getattr(model, "nan_fill", None)
+        if nan_fill is not None and key in nan_fill:
+            value = torch.where(
+                torch.isfinite(value),
+                value,
+                nan_fill[key].to(dtype=value.dtype),
+            )
+    return model.cont_proj[key](value)
+
+
+def _selection_scores(
+    model: torch.nn.Module,
+    *,
+    query_rows: torch.Tensor,
+    candidate_features: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    head = model.prediction_head
+    embeddings = [
+        _candidate_feature_embedding(model, key=key, value=candidate_features[key])
+        for key in head.embedding_in_keys
+    ]
+    cand_emb = head.combine_emb(torch.stack(embeddings, dim=-1)).squeeze(-1)
+    cand_emb = torch.cat(
+        [
+            cand_emb,
+            query_rows.unsqueeze(-2).expand(
+                int(query_rows.shape[0]),
+                int(cand_emb.shape[1]),
+                -1,
+            ),
+        ],
+        dim=-1,
+    )
+    cand_emb = head.candidate_encoder(cand_emb)
+    query = head.query_proj(query_rows)
+    scale = float(query.shape[-1]) ** -0.5
+    return torch.einsum("ncd,nd->nc", cand_emb, query) * scale
+
+
+def _grid_candidate_features(
+    *,
+    grid_dataset,
+    point_ids: torch.Tensor,
+    env: torch.Tensor | None,
+    valid: torch.Tensor | None,
+    mov_vec_scale: float,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if env is None or valid is None:
+        raise ValueError("MoveFormer grid prediction requires environment chips")
+    rows_by_point_id = _grid_step_rows_by_point_id(grid_dataset)
+    ordered_point_ids = [int(point_id) for point_id in point_ids.tolist()]
+    start_lon = np.asarray(
+        [float(rows_by_point_id[point_id][1].start_lon) for point_id in ordered_point_ids],
+        dtype=np.float64,
+    )
+    start_lat = np.asarray(
+        [float(rows_by_point_id[point_id][1].start_lat) for point_id in ordered_point_ids],
+        dtype=np.float64,
+    )
+
+    height, width = (int(grid_dataset.output_hw[0]), int(grid_dataset.output_hw[1]))
+    pixel_size_m = float(grid_dataset.pixel_size_m)
+    x_hw, y_hw = _grid_offsets_np(
+        height=height,
+        width=width,
+        pixel_size_m=pixel_size_m,
+    )
+    to_3857, from_3857 = _grid_transformers()
+    start_x_m, start_y_m = to_3857.transform(start_lon, start_lat)
+    cand_x_m = np.asarray(start_x_m, dtype=np.float64).reshape(-1, 1, 1) + x_hw[None]
+    cand_y_m = np.asarray(start_y_m, dtype=np.float64).reshape(-1, 1, 1) + y_hw[None]
+    cand_lon, cand_lat = from_3857.transform(
+        cand_x_m.reshape(-1),
+        cand_y_m.reshape(-1),
+    )
+    cand_lon = np.asarray(cand_lon, dtype=np.float64).reshape(
+        len(ordered_point_ids),
+        height * width,
+    )
+    cand_lat = np.asarray(cand_lat, dtype=np.float64).reshape(
+        len(ordered_point_ids),
+        height * width,
+    )
+
+    loc_x, loc_y, loc_z = gcs_to_n_vector(cand_lat, cand_lon)
+    location_cand = torch.from_numpy(
+        np.stack([loc_x, loc_y, loc_z], axis=-1).astype(np.float32, copy=False)
+    ).to(device=device)
+
+    bearing_rad = to_rad(
+        gcs_to_bearing(
+            start_lat[:, None],
+            start_lon[:, None],
+            cand_lat,
+            cand_lon,
+        )
+    )
+    distance_m = gcs_to_distance(
+        start_lat[:, None],
+        start_lon[:, None],
+        cand_lat,
+        cand_lon,
+    )[..., None]
+    location_cand_mov = torch.from_numpy(
+        (
+            np.stack([np.sin(bearing_rad), np.cos(bearing_rad)], axis=-1)
+            * distance_m
+            * float(mov_vec_scale)
+        ).astype(np.float32, copy=False)
+    ).to(device=device)
+
+    env = env.to(device=device, dtype=torch.float32, non_blocking=device.type == "cuda")
+    valid = valid.to(device=device, dtype=torch.bool, non_blocking=device.type == "cuda")
+    cov_cand = env.permute(0, 2, 3, 1).reshape(
+        int(env.shape[0]),
+        height * width,
+        int(env.shape[1]),
+    )
+    cov_valid = valid.permute(0, 2, 3, 1).reshape_as(cov_cand)
+    cov_cand = torch.where(cov_valid, cov_cand, torch.full_like(cov_cand, torch.nan))
+
     return {
-        "prediction_kind": "discrete",
-        "point_id_start": torch.cat(point_ids, dim=0),
-        "coords_m": torch.cat(coords, dim=0),
-        "probs": torch.cat(probs, dim=0),
+        "location_cand": location_cand,
+        "location_cand_mov": location_cand_mov,
+        "cov_cand": cov_cand,
+    }
+
+
+def _grid_prediction_payload(
+    model: torch.nn.Module,
+    loader,
+    *,
+    split_key: str,
+    grid_dataset,
+    mov_vec_scale: float,
+    step_batch_size: int,
+    device: torch.device,
+) -> dict[str, object]:
+    del split_key
+    point_ids, query_rows = _prediction_queries(model, loader, device=device)
+    height, width = (int(grid_dataset.output_hw[0]), int(grid_dataset.output_hw[1]))
+    pixel_size_m = float(grid_dataset.pixel_size_m)
+    if int(point_ids.shape[0]) == 0:
+        return {
+            "prediction_kind": "grid",
+            "point_id_start": point_ids,
+            "scores": torch.zeros((0, height, width), dtype=torch.float32),
+            "pixel_size_m": pixel_size_m,
+        }
+
+    rows_by_point_id = _grid_step_rows_by_point_id(grid_dataset)
+    ordered_point_ids = [int(point_id) for point_id in point_ids.tolist()]
+    missing = [point_id for point_id in ordered_point_ids if point_id not in rows_by_point_id]
+    if missing:
+        raise ValueError(
+            f"MoveFormer grid prediction is missing benchmark grid rows for point_id_start values {missing[:5]}"
+        )
+    if set(rows_by_point_id.keys()) != set(ordered_point_ids):
+        raise ValueError("MoveFormer query point_id_start values do not match held-out grid steps")
+    ordered_indices = [int(rows_by_point_id[point_id][0]) for point_id in ordered_point_ids]
+
+    model.eval()
+    score_chunks: list[torch.Tensor] = []
+    point_id_chunks: list[torch.Tensor] = []
+    for start in range(0, len(ordered_indices), int(step_batch_size)):
+        stop = min(len(ordered_indices), start + int(step_batch_size))
+        grid_batch = grid_dataset.collate(ordered_indices[start:stop])
+        point_id_batch = grid_batch["point_id_start"].to(dtype=torch.int64)
+        expected = point_ids[start:stop]
+        if not torch.equal(point_id_batch.cpu(), expected.cpu()):
+            raise ValueError("MoveFormer grid batch point_id_start order does not match query order")
+        candidate_features = _grid_candidate_features(
+            grid_dataset=grid_dataset,
+            point_ids=point_id_batch.cpu(),
+            env=grid_batch["env"],
+            valid=grid_batch["valid"],
+            mov_vec_scale=float(mov_vec_scale),
+            device=device,
+        )
+        scores_flat = _selection_scores(
+            model,
+            query_rows=query_rows[start:stop].to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=device.type == "cuda",
+            ),
+            candidate_features=candidate_features,
+        )
+        score_chunks.append(scores_flat.detach().cpu().reshape(-1, height, width))
+        point_id_chunks.append(point_id_batch.cpu())
+
+    return {
+        "prediction_kind": "grid",
+        "point_id_start": torch.cat(point_id_chunks, dim=0),
+        "scores": torch.cat(score_chunks, dim=0),
+        "pixel_size_m": pixel_size_m,
     }
 
 
@@ -292,6 +568,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
     normalize_env = resolved_artifacts.get("normalization_stats_path") is not None
+    point_stores = dict(resolved_artifacts["point_stores"])
 
     dataset_kwargs = {
         "study_dir": resolved_artifacts["study_dir"],
@@ -396,22 +673,62 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    for split_key, dataset in eval_datasets.items():
+    timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
+    output_hw = tuple(int(v) for v in timescale["output_hw"])
+    prediction_dataset_kwargs = dict(dataset_kwargs)
+    prediction_dataset_kwargs["min_len"] = 1
+    prediction_dataset_kwargs["allow_prediction_only_segments"] = True
+    for split_key in run_payload["evaluation_split_keys"]:
+        split_key = str(split_key)
+        prediction_dataset = MoveFormerPointStoreDataset(
+            split=split_key,
+            context_splits=["train", split_key],
+            **prediction_dataset_kwargs,
+        )
         pred_path = pred_dir / f"{split_key}.pt"
         if pred_path.exists():
             try:
-                evaluation_runner._score_split(
-                    split_key=str(split_key),
-                    pred_artifact=dict(torch.load(pred_path, map_location="cpu")),
-                    run_payload=run_payload,
-                )
-                continue
+                pred_artifact = dict(torch.load(pred_path, map_location="cpu"))
+                if str(pred_artifact.get("prediction_kind")) == "grid":
+                    evaluation_runner._score_split(
+                        split_key=str(split_key),
+                        pred_artifact=pred_artifact,
+                        run_payload=run_payload,
+                    )
+                    continue
             except Exception:
                 pass
+        selected_splits = ssf_grid.selected_splits_from_manifest(
+            point_stores[str(split_key)]["manifest"]
+        )
+        grid_dataset = ssf_grid.make_grid_step_dataset(
+            study_dir=resolved_artifacts["study_dir"],
+            trajectories_path=resolved_artifacts["trajectories_path"],
+            split_key=str(split_key),
+            plan=prediction_dataset.plan,
+            sampler_config=resolved_artifacts["sampler"],
+            output_hw=output_hw,
+            selected_splits=selected_splits,
+            include_env=True,
+        )
+        step_batch_size = ssf_grid.scaled_step_batch_size(
+            batch_size=batch_size,
+            train_points_per_step=max(1, int(prediction_dataset.num_candidates_total)),
+            output_hw=output_hw,
+        )
         torch.save(
-            _prediction_payload(
+            _grid_prediction_payload(
                 runtime.model,
-                _loader(dataset, batch_size=batch_size, shuffle=False, seed=seed),
+                _loader(
+                    prediction_dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    seed=seed,
+                ),
+                split_key=str(split_key),
+                grid_dataset=grid_dataset,
+                mov_vec_scale=float(train_dataset._mov_vec_scale),
+                step_batch_size=step_batch_size,
                 device=device,
             ),
             pred_path,

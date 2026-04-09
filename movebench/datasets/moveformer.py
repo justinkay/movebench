@@ -230,6 +230,7 @@ class MoveFormerPointStoreDataset(Dataset):
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
         candidate_subset_size: int | None = None,
+        allow_prediction_only_segments: bool = False,
     ) -> None:
         del trajectories_path
         super().__init__()
@@ -256,6 +257,7 @@ class MoveFormerPointStoreDataset(Dataset):
         self.candidate_subset_size = (
             None if candidate_subset_size is None else int(candidate_subset_size)
         )
+        self.allow_prediction_only_segments = bool(allow_prediction_only_segments)
 
         _indices, self.plan = _subset_plan_env_channels(
             plan,
@@ -436,7 +438,13 @@ class MoveFormerPointStoreDataset(Dataset):
                 start = 0
                 while start + self.min_len <= len(chain):
                     end = min(len(chain), start + self.max_len)
-                    if bool(_loss_mask(chain, start, end, self.split).any()):
+                    has_loss = bool(_loss_mask(chain, start, end, self.split).any())
+                    has_prediction = bool(
+                        _prediction_mask(chain, start, end, self.split).any()
+                    )
+                    if has_loss or (
+                        self.allow_prediction_only_segments and has_prediction
+                    ):
                         self._segments.append((chain_idx, start, end))
                     if end == len(chain):
                         break

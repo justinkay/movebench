@@ -200,7 +200,7 @@ METHODS: dict[str, dict[str, object]] = {
             "batch_size": 32,
             "max_len": 500,
             "min_len": 2,
-            "max_steps": 2000,
+            "max_steps": 10, # for testing 2000,
             "eval_every_steps": 10, # effectively batch size is ~ batch_size*max_len
             "patience_evals": 10,
         },
