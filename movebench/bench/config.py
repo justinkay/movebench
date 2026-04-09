@@ -195,12 +195,12 @@ METHODS: dict[str, dict[str, object]] = {
         "hparams": {
             "lr": 0.00005,
             "weight_decay": 0.0,
-            "warmup_steps": 1000,
+            "warmup_steps": 50,
             "lr_gamma": 0.98,
             "batch_size": 32,
             "max_len": 500,
             "min_len": 2,
-            "max_steps": 10, # for testing 2000,
+            "max_steps": 2000,
             "eval_every_steps": 10, # effectively batch size is ~ batch_size*max_len
             "patience_evals": 10,
         },

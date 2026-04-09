@@ -6,11 +6,12 @@ from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from tqdm import tqdm
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from pyproj import Transformer
 
 import movebench.bench.config as bench_config
@@ -337,6 +338,7 @@ def _grid_prediction_payload(
     grid_dataset,
     mov_vec_scale: float,
     step_batch_size: int,
+    num_workers: int = 0,
     device: torch.device,
 ) -> dict[str, object]:
     del split_key
@@ -363,12 +365,22 @@ def _grid_prediction_payload(
     ordered_indices = [int(rows_by_point_id[point_id][0]) for point_id in ordered_point_ids]
 
     model.eval()
+    grid_loader = DataLoader(
+        Subset(grid_dataset, ordered_indices),
+        batch_size=int(step_batch_size),
+        shuffle=False,
+        num_workers=int(num_workers),
+        collate_fn=grid_dataset.collate,
+        drop_last=False,
+        pin_memory=device.type == "cuda",
+        persistent_workers=bool(int(num_workers) > 0),
+    )
     score_chunks: list[torch.Tensor] = []
     point_id_chunks: list[torch.Tensor] = []
-    for start in range(0, len(ordered_indices), int(step_batch_size)):
-        stop = min(len(ordered_indices), start + int(step_batch_size))
-        grid_batch = grid_dataset.collate(ordered_indices[start:stop])
+    start = 0
+    for grid_batch in tqdm(grid_loader):
         point_id_batch = grid_batch["point_id_start"].to(dtype=torch.int64)
+        stop = start + int(point_id_batch.shape[0])
         expected = point_ids[start:stop]
         if not torch.equal(point_id_batch.cpu(), expected.cpu()):
             raise ValueError("MoveFormer grid batch point_id_start order does not match query order")
@@ -391,6 +403,7 @@ def _grid_prediction_payload(
         )
         score_chunks.append(scores_flat.detach().cpu().reshape(-1, height, width))
         point_id_chunks.append(point_id_batch.cpu())
+        start = stop
 
     return {
         "prediction_kind": "grid",
@@ -563,6 +576,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     run_dir = Path(run_dir)
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams["batch_size"])
+    prediction_num_workers = int(method_hparams.get("prediction_num_workers", 4))
     max_len = int(method_hparams["max_len"])
     min_len = int(method_hparams["min_len"])
     seed = int(run_payload["seed"])
@@ -729,6 +743,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
                 grid_dataset=grid_dataset,
                 mov_vec_scale=float(train_dataset._mov_vec_scale),
                 step_batch_size=step_batch_size,
+                num_workers=prediction_num_workers,
                 device=device,
             ),
             pred_path,
