@@ -9,8 +9,8 @@ EXPERIMENT = {
         "baseline_randomwalk",
         "issf_linear",
         "issf_mlp",
-        # "deepssf",
-        # "moveformer",
+        "deepssf",
+        "moveformer",
     ],
     "seed": 0,
 }

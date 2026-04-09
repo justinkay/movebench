@@ -162,7 +162,7 @@ def _make_loader(
     return make_deepssf_wds_loader(
         cache_dir,
         batch_size=int(batch_size),
-        num_workers=0,
+        num_workers=8,
         shardshuffle=100 if shuffle else 0,
         shuffle_buffer=int(batch_size) * 8 if shuffle else 0,
         seed=int(seed),

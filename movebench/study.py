@@ -383,6 +383,7 @@ class Study:
         mode: str = "points",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
+        selected_splits: list[str] | None = None,
     ):
         from movebench.datasets.chips import ChipDataset
 
@@ -397,6 +398,7 @@ class Study:
             mode=mode,
             output_hw=output_hw,
             normalize=normalize,
+            selected_splits=selected_splits,
         )
 
     def deepssf_dataset(
@@ -407,6 +409,7 @@ class Study:
         sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
         output_hw: tuple[int, int] = (101, 101),
         normalize: bool = True,
+        selected_splits: list[str] | None = None,
     ):
         from movebench.datasets.deepssf import DeepSSFDataset
 
@@ -417,6 +420,7 @@ class Study:
             mode="steps",
             output_hw=output_hw,
             normalize=normalize,
+            selected_splits=selected_splits,
         )
         return DeepSSFDataset(chips)
 

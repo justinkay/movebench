@@ -13,7 +13,7 @@ from movebench.datasets.deepssf_wds_cache import (
     ensure_deepssf_wds_cache_split,
     read_deepssf_wds_manifest_if_complete,
 )
-from movebench.features.points import point_store_train_stats_path
+from movebench.features.points import load_point_store_manifest, point_store_train_stats_path
 from movebench.study import normalize_split_keys, resolve_study_selection
 
 
@@ -261,6 +261,21 @@ def execute_pack_job(job: PackJob) -> list[tuple[Path, dict[str, Any]]]:
             "output_hw": tuple(job.timescale["output_hw"]),
             "normalize": normalize,
         }
+        try:
+            _, point_store_manifest = load_point_store_manifest(
+                study_dir=Path(job.study.study_dir),
+                split=str(split),
+                rasters_hash=str(job.timescale["rasters_hash"]),
+                sampler_hash=str(job.timescale["sampler_hash"]),
+            )
+        except FileNotFoundError:
+            point_store_manifest = None
+        if point_store_manifest is not None:
+            selected_splits = point_store_manifest.extraction.get("selected_splits")
+            if isinstance(selected_splits, list) and selected_splits:
+                ds_kwargs["selected_splits"] = [
+                    str(split_key) for split_key in selected_splits
+                ]
         result = ensure_deepssf_wds_cache_split(
             study=job.study,
             split=str(split),
