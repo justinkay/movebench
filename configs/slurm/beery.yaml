@@ -1,0 +1,29 @@
+# Shared defaults for package-backed Slurm launchers.
+# Pass with: --slurm-config configs/slurm/beery.yaml
+
+defaults:
+  partition: vision-beery
+  qos: vision-beery-main
+  account: vision-beery
+  mem: 64GB
+  max_concurrent_jobs: 32
+  polling_interval: 30
+
+commands:
+  extract:
+    time: 2-00:00:00
+    cpus_per_task: 16
+    gpus_per_node: 0
+    log_dir: results/slurm/extract_points
+
+  bench:
+    time: 2-00:00:00
+    cpus_per_task: 16
+    # gpus_per_node set by methods
+    log_dir: results/slurm/bench
+
+  pack:
+    time: 2-00:00:00
+    cpus_per_task: 16
+    gpus_per_node: 0
+    log_dir: results/slurm/pack

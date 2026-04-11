@@ -393,10 +393,45 @@ def _latest_from_past_days(
     return _collection_image_or_masked(col, bands, reducer="first")
 
 
+def _trailing_mean_image(
+    *,
+    collection_id: str,
+    timestamp: str,
+    input_band: str,
+    output_bands: list[str],
+    days: int,
+    include_std: bool = False,
+):
+    ensure_ee_initialized()
+    ts = ee.Date(timestamp)
+    col = (
+        ee.ImageCollection(collection_id)
+        .filterDate(ts.advance(-int(days), "day"), ts.advance(1, "second"))
+        .select([input_band])
+    )
+    img = col.mean().rename(output_bands[0])
+    if include_std:
+        img = img.addBands(col.reduce(ee.Reducer.stdDev()).rename(output_bands[1]))
+    return ee.Image(
+        ee.Algorithms.If(col.size().gt(0), img, _fully_masked_image(output_bands))
+    ).select(output_bands)
+
+
 def _apply_chip_output_conventions(layer: str, spec, img) -> Any:
     if getattr(spec, "scale_factor", 1.0) not in (None, 1.0):
         img = img.multiply(float(spec.scale_factor))
     return img.rename([f"{layer}__{b}" for b in spec.bands]).toFloat()
+
+
+def _distance_to_source_image(source, *, max_dist: float, band: str):
+    return (
+        ee.Image(1)
+        .cumulativeCost(source=source, maxDistance=max_dist, geodeticDistance=True)
+        .clamp(0, max_dist)
+        .unmask(max_dist)
+        .rename(band)
+        .toFloat()
+    )
 
 
 def _nearest_temporal_chip_image(*, spec, timestamp: str):
@@ -467,6 +502,44 @@ def _chip_layer_image(layer: str, *, spec, timestamp: str, region) -> Any:
             col = ee.ImageCollection(ee.Algorithms.If(col30.size().gt(0), col30, col60))
         return _apply_chip_output_conventions(
             layer, spec, _collection_image_or_masked(col, spec.bands, reducer="median")
+        )
+
+    trailing_mean_input_bands = {
+        "sst_30d": "sst",
+        "chlorophyll_30d": "chlor_a",
+    }
+    trailing_mean_input_band = trailing_mean_input_bands.get(layer)
+    if trailing_mean_input_band is not None:
+        return _apply_chip_output_conventions(
+            layer,
+            spec,
+            _trailing_mean_image(
+                collection_id=spec.gee_collection,
+                timestamp=timestamp,
+                input_band=trailing_mean_input_band,
+                include_std=(layer == "sst_30d"),
+                output_bands=spec.bands,
+                days=30,
+            ),
+        )
+
+    if layer == "hycom_surface_current":
+        img = _latest_from_past_days(
+            spec.gee_collection,
+            timestamp,
+            bands=["velocity_u_0", "velocity_v_0"],
+            days=1,
+            region=region,
+        )
+        speed = (
+            img.select("velocity_u_0")
+            .pow(2)
+            .add(img.select("velocity_v_0").pow(2))
+            .sqrt()
+            .rename("speed")
+        )
+        return _apply_chip_output_conventions(
+            layer, spec, img.addBands(speed).select(spec.bands)
         )
 
     img = _nearest_temporal_chip_image(spec=spec, timestamp=timestamp)
@@ -673,6 +746,14 @@ def _tile_image(layer: str, *, registry: LayerRegistry, year: int | None = None)
         # COPERNICUS/DEM/GLO30 uses band "DEM"; we export one band.
         return ee.ImageCollection(spec.gee_collection).mosaic().select("DEM").toFloat()
 
+    if layer == "bathymetry":
+        return (
+            ee.ImageCollection(spec.gee_collection)
+            .first()
+            .select("deptho")
+            .toFloat()
+        )
+
     annual_reducers = {
         "alphaearth_embeddings": "mosaic",
         "modis_lc": "first",
@@ -697,14 +778,25 @@ def _tile_image(layer: str, *, registry: LayerRegistry, year: int | None = None)
         max_dist = float(spec.clip_max)
         gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
         water = gsw.select("max_extent").unmask(0).gt(0).selfMask()
-        dist = (
-            ee.Image(1)
-            .cumulativeCost(source=water, maxDistance=max_dist, geodeticDistance=True)
-            .clamp(0, max_dist)
-            .unmask(max_dist)
-            .rename("dist_water")
+        return _distance_to_source_image(
+            water, max_dist=max_dist, band="dist_water"
         )
-        return dist.toFloat()
+
+    if layer == "dist_shore":
+        if spec.clip_max is None:
+            raise ValueError("dist_shore requires LayerSpec.clip_max (meters)")
+        max_dist = float(spec.clip_max)
+        water_mask = (
+            ee.ImageCollection(spec.gee_collection)
+            .sort("system:time_start", False)
+            .first()
+            .select("water_mask")
+            .unmask(1)
+        )
+        land = water_mask.bitwiseAnd(1).eq(0).selfMask()
+        return _distance_to_source_image(
+            land, max_dist=max_dist, band="dist_shore"
+        )
 
     raise ValueError(f"Unsupported gee_tile layer {layer!r}")
 

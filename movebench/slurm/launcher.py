@@ -75,6 +75,7 @@ _ACTIVE_STATE_PREFIXES = (
     "SIGNALING",
     "STAGE_OUT",
 )
+_ARRAY_TASK_STAGGER_SECONDS = 0.1
 
 
 def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
@@ -459,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
+    time.sleep(_ARRAY_TASK_STAGGER_SECONDS * float(task_id))
     worker_args_list = _load_array_manifest(Path(args.array_manifest))
     try:
         worker_args = worker_args_list[task_id]

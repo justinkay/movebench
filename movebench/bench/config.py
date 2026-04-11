@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import movebench.paths as paths
 from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
 from movebench.features.config import load_sampler_config
 from movebench.features.points import resolve_sampler_hash
@@ -321,9 +322,9 @@ def resolve_timescale(timescale_key: str) -> dict[str, object]:
         raise KeyError(f"Unknown timescale: {timescale_key!r}") from e
 
     resolved = copy.deepcopy(base)
-    layers_config = load_layers_config(str(resolved["layers_config"]))
+    layers_config = load_layers_config(_repo_relative_path(resolved["layers_config"]))
     plan = REGISTRY.resolve(layers_config)
-    sampler_config = load_sampler_config(str(resolved["sampler_config"]))
+    sampler_config = load_sampler_config(_repo_relative_path(resolved["sampler_config"]))
     sampler_hash = resolve_sampler_hash(sampler_config)
     resolved["plan"] = plan
     resolved["sampler"] = sampler_config
@@ -331,6 +332,13 @@ def resolve_timescale(timescale_key: str) -> dict[str, object]:
     resolved["rasters_hash"] = str(plan.rasters_hash)
     resolved["all_band_ids"] = plan.band_ids_in_order()
     return resolved
+
+
+def _repo_relative_path(path: object) -> str:
+    p = Path(str(path))
+    if p.is_absolute():
+        return str(p)
+    return str(paths.repo_root() / p)
 
 
 def deepssf_cache_hash_for_split(timescale_key: str, split: str) -> str:

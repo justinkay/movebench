@@ -53,6 +53,16 @@ class _StepRecord:
     candidate_lat: torch.Tensor
 
 
+@dataclass(frozen=True)
+class MoveFormerForecastSeed:
+    records: list[_StepRecord]
+    processor: SimpleTrajectoryProcessor
+    cov_dim: int
+    mov_vec_scale: float
+    num_candidates_total: int
+    point_id_start: int
+
+
 def _manifest_selected_splits(manifest) -> list[str]:
     selected_splits = manifest.extraction.get("selected_splits")
     if not isinstance(selected_splits, list) or not selected_splits:
@@ -210,6 +220,50 @@ def _horizon_linked_chains(
             chains.append(chain)
 
     return chains
+
+
+def build_moveformer_forecast_seed(
+    *,
+    study_dir: Path,
+    plan: LayerPlan,
+    sampler_config: SamplerConfig,
+    split_key: str,
+    point_id_start: int,
+    subset_band_ids: list[str],
+    normalize_env: bool,
+) -> MoveFormerForecastSeed:
+    dataset = MoveFormerPointStoreDataset(
+        study_dir=study_dir,
+        trajectories_path=Path(study_dir) / "trajectories.csv",
+        plan=plan,
+        sampler_config=sampler_config,
+        split=str(split_key),
+        context_splits=["train", str(split_key)],
+        max_len=500,
+        min_len=1,
+        normalize_env=bool(normalize_env),
+        require_normalization_stats=False,
+        subset_band_ids=list(subset_band_ids),
+        allow_prediction_only_segments=True,
+    )
+    for chain in dataset._chains:
+        for idx, record in enumerate(chain):
+            if (
+                str(record.split_key) == str(split_key)
+                and int(record.point_id_start) == int(point_id_start)
+            ):
+                return MoveFormerForecastSeed(
+                    records=list(chain[: idx + 1]),
+                    processor=dataset._processor,
+                    cov_dim=int(dataset.cov_dim),
+                    mov_vec_scale=float(dataset._mov_vec_scale),
+                    num_candidates_total=int(dataset.num_candidates_total),
+                    point_id_start=int(point_id_start),
+                )
+    raise ValueError(
+        f"MoveFormer context did not contain point_id_start={int(point_id_start)} "
+        f"for split={split_key!r}"
+    )
 
 
 class MoveFormerPointStoreDataset(Dataset):

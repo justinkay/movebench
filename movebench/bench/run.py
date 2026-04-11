@@ -746,6 +746,16 @@ def _resolve_artifacts_for_run(run_payload: dict[str, object]) -> dict[str, obje
     raise ValueError(f"Unsupported artifact requirement: {requirement!r}")
 
 
+def load_saved_run_bundle(
+    run_dir: str | Path,
+) -> tuple[dict[str, object], dict[str, object]]:
+    run_dir = Path(run_dir)
+    run_payload = json.loads((run_dir / "resolved_run.json").read_text(encoding="utf-8"))
+    if not isinstance(run_payload, dict):
+        raise ValueError(f"resolved_run.json must contain an object: {run_dir}")
+    return dict(run_payload), _resolve_artifacts_for_run(run_payload)
+
+
 def _load_executor(executor_ref: str):
     module_name, func_name = str(executor_ref).split(":", 1)
     module = importlib.import_module(module_name)

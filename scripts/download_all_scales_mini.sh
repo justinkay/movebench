@@ -13,17 +13,17 @@ layers_configs=(
     "${repo_root}/configs/layers/all_ae_7d_7d.yaml"
 )
 
+# "costa2024_elephant_seals"
 study_ids=(
     "forrest2024_buffalo"
     "Bellan_48c93576_raw_merged"
     "Garthe_ae7b0b8c_raw_merged"
     "aikens2024_pronghorn"
-    "costa2024_elephant_seals"
     "Accio_967b7813_raw_merged"
     "BartlamBrooks_c9b4f9b5_raw_merged"
     "Lago_8b91498b_raw_merged"
     "BastilleRousseau_9eaf99f2_raw_merged_Chelonoidis_porteri"
-    "Bildstein_3e431f5b_raw_merged_Cathartes_aura"
+    "Bildstein_b6a0d056_raw_merged"
 )
 
 for layers_config in "${layers_configs[@]}"; do

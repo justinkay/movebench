@@ -11,6 +11,7 @@ from movebench.download_reports import (
     summarize_failed_chip_report,
 )
 from movebench.features.config import SamplerConfig, load_sampler_config
+from movebench.features.manifest import read_manifest
 from movebench.features.points import (
     point_store_manifest_path,
     point_store_train_stats_path,
@@ -114,6 +115,11 @@ def is_extract_complete(
     splits: list[str],
 ) -> tuple[bool, str]:
     sampler_hash = resolve_sampler_hash(run.sampler)
+    expected_band_ids = (
+        set(run.plan.band_ids_in_order())
+        if hasattr(run.plan, "band_ids_in_order")
+        else None
+    )
     for split in splits:
         manifest_path = point_store_manifest_path(
             study_dir=Path(study_dir),
@@ -122,6 +128,19 @@ def is_extract_complete(
             sampler_hash=sampler_hash,
         )
         if not manifest_path.exists():
+            return False, sampler_hash
+        try:
+            manifest = read_manifest(manifest_path)
+        except Exception:
+            return False, sampler_hash
+        if manifest.rasters_hash != str(run.plan.rasters_hash):
+            return False, sampler_hash
+        if manifest.sampler_hash != str(sampler_hash):
+            return False, sampler_hash
+        if (
+            expected_band_ids is not None
+            and set(manifest.bands.keys()) != expected_band_ids
+        ):
             return False, sampler_hash
     stats_path = point_store_train_stats_path(
         study_dir=Path(study_dir),

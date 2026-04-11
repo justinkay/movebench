@@ -1,0 +1,29 @@
+# Shared defaults for package-backed Slurm launchers.
+# Pass with: --slurm-config configs/slurm/beery.yaml
+
+defaults:
+  partition: vision-shared-a6000,vision-shared-rtx6000ada,vision-shared-a100,vision-shared-l40s,vision-shared-h100,vision-shared-h200,vision-shared-v100,vision-shared-rtx3090,vision-shared-rtx3080,vision-shared-rtx4090
+  qos: shared-if-available
+  account: vision-beery
+  mem: 64GB
+  max_concurrent_jobs: 1000
+  polling_interval: 30
+
+commands:
+  extract:
+    time: 1-00:00:00
+    cpus_per_task: 16
+    gpus_per_node: 0
+    log_dir: results/slurm/extract_points
+
+  bench:
+    time: 1-00:00:00
+    cpus_per_task: 16
+    # gpus_per_node set by methods
+    log_dir: results/slurm/bench
+
+  pack:
+    time: 1-00:00:00
+    cpus_per_task: 16
+    gpus_per_node: 0
+    log_dir: results/slurm/pack
