@@ -42,10 +42,10 @@ study_ids=(
     "vanToor_86f824b7_raw_merged"
     "Ilyashenko_e82ecc51_raw_merged"
     "Friedemann_c92d9814_raw_merged_Circaetus_gallicus"
-    "Piironen_cd62a27e_raw_merged"
     "Griffin_644e46c6_raw_merged"
     "Byholm_10bb3544_raw_merged"
 )
+# removed piironen - was taking forever
 
 for layers_config in "${layers_configs[@]}"; do
     for study_id in "${study_ids[@]}"; do

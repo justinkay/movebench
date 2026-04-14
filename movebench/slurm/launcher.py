@@ -61,6 +61,7 @@ class ArrayRequest:
 class _ActiveArray:
     request_name: str
     process: subprocess.Popen[str]
+    task_count: int
     job_id: str = ""
     last_status_counts: tuple[int, int, int] | None = None
 
@@ -392,6 +393,7 @@ def run_sbatch_queue(
                 _ActiveArray(
                     request_name=request_name,
                     process=process,
+                    task_count=len(request.worker_args_list),
                     job_id=job_id,
                 )
             )
@@ -407,11 +409,13 @@ def run_sbatch_queue(
                     and status_counts != active.last_status_counts
                 ):
                     running_count, finished_count, failed_count = status_counts
+                    reported_count = running_count + finished_count + failed_count
                     print(
                         f"[{label}] Status {active.request_name}: "
-                        f"running={running_count} "
-                        f"finished={finished_count} "
-                        f"failed={failed_count}"
+                        f"tasks_reported={reported_count}/{active.task_count} "
+                        f"tasks_active={running_count} "
+                        f"tasks_finished={finished_count} "
+                        f"tasks_failed={failed_count}"
                     )
                     active.last_status_counts = status_counts
 
@@ -425,8 +429,9 @@ def run_sbatch_queue(
                     failures.append((active.request_name, int(return_code)))
             if progress_changed:
                 print(
-                    f"[{label}] Progress: completed={completed} "
-                    f"running={len(next_running)} failed={len(failures)}"
+                    f"[{label}] Progress: arrays_completed={completed} "
+                    f"arrays_running={len(next_running)} "
+                    f"arrays_failed={len(failures)}"
                 )
             running = next_running
     except KeyboardInterrupt:

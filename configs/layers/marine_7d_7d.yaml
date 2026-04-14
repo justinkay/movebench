@@ -1,0 +1,27 @@
+raster_params:
+  buffer:
+    step_time: 7d
+    step_multiplier: 2.0
+    step_q: 0.95
+    max_step_q: 0.99
+    gap_q: 0.999
+  scale_clamp:
+    min_pixels: 3
+    max_pixels: 100
+  tiles:
+    px_per_side: 350
+
+layers:
+  - bathymetry
+  - dist_shore
+  - sst_30d
+  - chlorophyll_30d
+  - hycom_surface_current
+
+chip_groups:
+  ocean:
+    layers:
+      - sst_30d
+      - chlorophyll_30d
+      - hycom_surface_current
+    target_scale_m: 4000.0
