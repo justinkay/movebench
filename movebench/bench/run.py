@@ -81,6 +81,12 @@ def _bench_report_module():
     return bench_report
 
 
+def _bench_summary_module():
+    import movebench.bench.summary as bench_summary
+
+    return bench_summary
+
+
 def _evaluation_runner_module():
     import movebench.bench.evaluation.runner as evaluation_runner
 
@@ -442,11 +448,16 @@ def expand_experiment(
 def expanded_checked_in_experiments(
     *,
     readiness_map: dict[str, dict[str, object]] | None = None,
+    studies_override: list[str] | None = None,
 ) -> list[dict[str, object]]:
     expanded: list[dict[str, object]] = []
     for module_path in checked_in_experiment_module_paths():
         experiment = load_experiment(module_path)
-        runs = expand_experiment(experiment, readiness_map=readiness_map)
+        runs = expand_experiment(
+            experiment,
+            studies_override=studies_override,
+            readiness_map=readiness_map,
+        )
         expanded.append(
             {
                 "module_path": str(module_path),
@@ -1327,8 +1338,14 @@ def run_experiment(
     }
 
 
-def status_snapshot() -> dict[str, object]:
-    studies = _list_available_studies()
+def _status_context(
+    studies_override: list[str] | None = None,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    studies = (
+        resolve_study_selection(studies_override)
+        if studies_override is not None
+        else _list_available_studies()
+    )
     study_entries: list[dict[str, object]] = []
     readiness_index: dict[str, dict[str, object]] = {}
 
@@ -1358,7 +1375,10 @@ def status_snapshot() -> dict[str, object]:
             blocked_studies += 1
         study_entries.append({"study_id": study_id, "timescales": timescale_entries})
 
-    expanded_experiments = expanded_checked_in_experiments(readiness_map=readiness_index)
+    expanded_experiments = expanded_checked_in_experiments(
+        readiness_map=readiness_index,
+        studies_override=studies_override,
+    )
     planned_keys: list[str] = []
     seen_planned_keys: set[str] = set()
     for expanded in expanded_experiments:
@@ -1375,7 +1395,7 @@ def status_snapshot() -> dict[str, object]:
         if str(getattr(run.data, "tags", {}).get("status", "")) == "completed"
     ]
 
-    return {
+    snapshot = {
         "counts": {
             "studies": len(studies),
             "study_timescale_pairs": len(studies) * len(bench_config.TIMESCALES),
@@ -1392,6 +1412,12 @@ def status_snapshot() -> dict[str, object]:
         "completed_run_keys": completed_runs,
         "checked_in_experiment_count": len(expanded_experiments),
     }
+    return snapshot, expanded_experiments
+
+
+def status_snapshot(studies_override: list[str] | None = None) -> dict[str, object]:
+    snapshot, _expanded_experiments = _status_context(studies_override=studies_override)
+    return snapshot
 
 
 def _render_status_text(snapshot: dict[str, object]) -> str:
@@ -1425,6 +1451,12 @@ def _render_status_text(snapshot: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _status_selection_label(studies_override: list[str] | None) -> str:
+    if not studies_override:
+        return "all"
+    return " ".join(str(value) for value in studies_override)
+
+
 def _command_plan(args: argparse.Namespace) -> int:
     experiment = load_experiment(args.experiment_module)
     runs = expand_experiment(experiment, studies_override=args.studies)
@@ -1440,14 +1472,25 @@ def _command_plan(args: argparse.Namespace) -> int:
 
 
 def _command_status(args: argparse.Namespace) -> int:
-    snapshot = status_snapshot()
     if args.format == "text":
-        print(_render_status_text(snapshot))
+        selections = [list(args.studies)] if args.studies else [["all"], ["mini"]]
+        sections = []
+        for studies_override in selections:
+            snapshot = status_snapshot(studies_override=studies_override)
+            sections.append(
+                "\n".join(
+                    [
+                        f"Study selection: {_status_selection_label(studies_override)}",
+                        _render_status_text(snapshot),
+                    ]
+                )
+            )
+        print("\n\n".join(sections))
         return 0
     if args.format == "html":
         bench_report = _bench_report_module()
         result = bench_report.write_report(
-            status_snapshot=snapshot,
+            status_snapshot=status_snapshot(studies_override=args.studies),
             refresh_metrics=False,
             allow_metric_repair=False,
         )
@@ -1464,6 +1507,28 @@ def _command_report(args: argparse.Namespace) -> int:
         allow_metric_repair=True,
     )
     print(result["index_path"])
+    return 0
+
+
+def _command_summary(args: argparse.Namespace) -> int:
+    bench_summary = _bench_summary_module()
+    experiments_override = bench_summary.normalize_experiment_selection(args.experiments)
+    selections = [list(args.studies)] if args.studies else [["all"], ["mini"]]
+    sections = []
+    for studies_override in selections:
+        lines = [f"Study selection: {_status_selection_label(studies_override)}"]
+        if experiments_override:
+            lines.append(
+                "Experiment selection: " + ", ".join(experiments_override)
+            )
+        lines.append(
+            bench_summary.render_current_summary(
+                studies_override=studies_override,
+                experiments_override=experiments_override,
+            )
+        )
+        sections.append("\n".join(lines))
+    print("\n\n".join(sections))
     return 0
 
 
@@ -1499,11 +1564,38 @@ def register(subparsers) -> None:
 
     status_parser = bench_subparsers.add_parser("status", help="Inspect artifact and run readiness")
     status_parser.add_argument("--format", choices=["text", "html"], default="text")
+    status_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Optional study ids or named sets like 'mini'. Default text output prints both 'all' and 'mini'.",
+    )
     status_parser.set_defaults(func=_command_status)
 
     report_parser = bench_subparsers.add_parser("report", help="Generate the benchmark report")
     report_parser.add_argument("--refresh-metrics", action="store_true")
     report_parser.set_defaults(func=_command_report)
+
+    summary_parser = bench_subparsers.add_parser(
+        "summary",
+        help="Print high-level benchmark progress and blocker summaries",
+    )
+    summary_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Optional study ids or named sets like 'mini'. Default text output prints both 'all' and 'mini'.",
+    )
+    summary_parser.add_argument(
+        "--experiments",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional experiment names like 'main_results', 'covariate_comparison', "
+            "'baselines', or 'smoke_one_study'. Aliases: 'main', 'covariates', 'smoke'."
+        ),
+    )
+    summary_parser.set_defaults(func=_command_summary)
 
     run_parser = bench_subparsers.add_parser("run", help="Execute runnable benchmark runs")
     run_parser.add_argument("experiment_module")

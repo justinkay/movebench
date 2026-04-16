@@ -50,6 +50,7 @@ def _resources_for_run(
         requested_gpus = _default_gpus_for_method(str(run_payload["method"]))
     return SlurmResources(
         partition=args.partition,
+        exclude=args.exclude,
         qos=args.qos,
         account=args.account,
         time=args.time,

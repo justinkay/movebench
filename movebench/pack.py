@@ -85,7 +85,11 @@ def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--compression", type=str, default=None, choices=("none", "gz"))
     parser.add_argument("--build-workers", type=int, default=16)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--seed", type=int, default=0)
 
 
@@ -178,7 +182,7 @@ def resolve_pack_jobs(
     compression: str | None = None,
     build_workers: int = 16,
     overwrite: bool = False,
-    resume: bool = False,
+    resume: bool = True,
     seed: int = 0,
 ) -> list[PackJob]:
     normalized_splits = _normalize_split_values(splits)
@@ -297,7 +301,7 @@ def execute_pack_job(job: PackJob) -> list[tuple[Path, dict[str, Any]]]:
             build_workers=int(_job_option(job, "build_workers", 16)),
             build_if_missing=True,
             overwrite=bool(_job_option(job, "overwrite", False)),
-            resume=bool(_job_option(job, "resume", False)),
+            resume=bool(_job_option(job, "resume", True)),
         )
         results.append(result)
     return results
@@ -314,7 +318,7 @@ def run_local_pack(
     compression: str | None = None,
     build_workers: int = 16,
     overwrite: bool = False,
-    resume: bool = False,
+    resume: bool = True,
     seed: int = 0,
 ) -> int:
     normalized_splits = _normalize_split_values(splits)
@@ -335,8 +339,7 @@ def run_local_pack(
         resolve_kwargs["build_workers"] = build_workers
     if overwrite:
         resolve_kwargs["overwrite"] = overwrite
-    if resume:
-        resolve_kwargs["resume"] = resume
+    resolve_kwargs["resume"] = resume
     if seed:
         resolve_kwargs["seed"] = seed
 

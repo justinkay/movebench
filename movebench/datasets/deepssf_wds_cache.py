@@ -132,6 +132,22 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
     return dict(d)
 
 
+def _sanitize_inf_pixels(
+    spatial: torch.Tensor,
+) -> tuple[torch.Tensor, dict[int, int]]:
+    inf_mask = torch.isinf(spatial)
+    if not bool(inf_mask.any().item()):
+        return spatial, {}
+    spatial = spatial.clone()
+    spatial[inf_mask] = 0
+    counts = inf_mask.reshape(int(inf_mask.shape[0]), -1).sum(dim=1)
+    return spatial, {
+        int(channel_idx): int(count)
+        for channel_idx, count in enumerate(counts.tolist())
+        if int(count) > 0
+    }
+
+
 def list_deepssf_wds_shards(cache_dir: str | Path) -> list[Path]:
     cache_dir = Path(cache_dir)
     shards_dir = cache_dir / "shards"
@@ -224,6 +240,7 @@ def build_deepssf_wds_cache(
         raise RuntimeError(
             "Internal error: DeepSSF cache point_id_start length does not match dataset length"
         )
+    band_ids = list(plan.band_ids_in_order())
 
     if int(samples_per_shard) <= 0:
         raise ValueError(f"samples_per_shard must be > 0; got {samples_per_shard}")
@@ -303,6 +320,8 @@ def build_deepssf_wds_cache(
                 "pixel_size_m": float(pixel_size_m),
                 "env_channels": int(env_channels),
                 "num_samples": int(n),
+                "sanitized_inf_pixels": 0,
+                "sanitized_inf_pixels_by_band": {},
                 "sample_identity": "point_id_start",
             }
             write_deepssf_wds_manifest(manifest_path, manifest)
@@ -340,6 +359,8 @@ def build_deepssf_wds_cache(
     else:
         pattern = str(shards_dir / f"shard-%06d{ext}")
     sink = wds.ShardWriter(pattern, maxcount=int(samples_per_shard))
+    sanitized_inf_pixels = 0
+    sanitized_inf_pixels_by_band: dict[str, int] = {}
 
     it: Iterable[Any] = loader
     if progress:
@@ -360,8 +381,16 @@ def build_deepssf_wds_cache(
             spatial_t = (
                 spatial.detach()
                 .to(device="cpu", dtype=spatial_torch_dtype)
-                .contiguous()
             )
+            spatial_t, sanitized_channels = _sanitize_inf_pixels(spatial_t)
+            if sanitized_channels:
+                for channel_idx, count in sanitized_channels.items():
+                    sanitized_inf_pixels += int(count)
+                    band_id = str(band_ids[int(channel_idx)])
+                    sanitized_inf_pixels_by_band[band_id] = (
+                        int(sanitized_inf_pixels_by_band.get(band_id, 0)) + int(count)
+                    )
+            spatial_t = spatial_t.contiguous()
             scalars_t = (
                 scalars.detach().to(device="cpu", dtype=torch.float32).contiguous()
             )
@@ -402,6 +431,8 @@ def build_deepssf_wds_cache(
         "pixel_size_m": float(pixel_size_m),
         "env_channels": int(env_channels),
         "num_samples": int(n),
+        "sanitized_inf_pixels": int(sanitized_inf_pixels),
+        "sanitized_inf_pixels_by_band": dict(sorted(sanitized_inf_pixels_by_band.items())),
         "sample_identity": "point_id_start",
     }
     write_deepssf_wds_manifest(manifest_path, manifest)
@@ -414,9 +445,11 @@ def _load_pth_sample(
     spatial, scalars, bearing, target, point_id_start = wds.torch_loads(
         bytes(sample["pth"])
     )
+    spatial = spatial.to(dtype=torch.float32)
+    spatial, _ = _sanitize_inf_pixels(spatial)
     point_id = torch.tensor(int(point_id_start), dtype=torch.int64)
     return (
-        spatial.to(dtype=torch.float32),
+        spatial,
         scalars.to(dtype=torch.float32),
         bearing.to(dtype=torch.float32),
         target.to(dtype=torch.float32),

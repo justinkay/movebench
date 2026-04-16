@@ -16,6 +16,8 @@ from movebench.datasets.ssf import iSSFDataset
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
 from movebench.trajectories import load_trajectories_csv
 
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 
 def _log_progress(message: str) -> None:
     print(str(message), flush=True)

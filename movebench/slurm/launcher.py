@@ -18,6 +18,7 @@ import yaml
 @dataclass(frozen=True)
 class SlurmResources:
     partition: str | None = None
+    exclude: str | None = None
     qos: str | None = None
     account: str | None = None
     time: str | None = None
@@ -29,6 +30,7 @@ class SlurmResources:
     def from_args(cls, args: argparse.Namespace) -> "SlurmResources":
         return cls(
             partition=args.partition,
+            exclude=args.exclude,
             qos=args.qos,
             account=args.account,
             time=args.time,
@@ -87,6 +89,7 @@ def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Optional YAML file with shared Slurm argument defaults.",
     )
     parser.add_argument("--partition", type=str, default=None)
+    parser.add_argument("--exclude", type=str, default=None)
     parser.add_argument("--qos", type=str, default=None)
     parser.add_argument("--account", type=str, default=None)
     parser.add_argument("--time", type=str, default=None)
@@ -101,6 +104,7 @@ def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
 
 _SLURM_CONFIG_FIELDS = {
     "partition": str,
+    "exclude": str,
     "qos": str,
     "account": str,
     "time": str,
@@ -198,6 +202,8 @@ def _slurm_resource_flags(resources: SlurmResources) -> list[str]:
     command: list[str] = []
     if resources.partition:
         command.extend(["--partition", str(resources.partition)])
+    if resources.exclude:
+        command.extend(["--exclude", str(resources.exclude)])
     if resources.qos:
         command.extend(["--qos", str(resources.qos)])
     if resources.account:

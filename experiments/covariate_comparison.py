@@ -1,6 +1,6 @@
 EXPERIMENT = {
     "name": "covariate_comparison",
-    "studies": "all",
+    "studies": "mini",
     "timescales": ["1h", "12h", "1d", "7d"],
     "covariate_sets": [
         "all",

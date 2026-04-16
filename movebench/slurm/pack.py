@@ -45,8 +45,7 @@ def _make_pack_kwargs(
         kwargs["build_workers"] = int(args.build_workers)
     if bool(args.overwrite):
         kwargs["overwrite"] = True
-    if bool(args.resume):
-        kwargs["resume"] = True
+    kwargs["resume"] = bool(args.resume)
     if int(args.seed):
         kwargs["seed"] = int(args.seed)
     return kwargs
@@ -75,8 +74,7 @@ def _worker_args_for_job(args: argparse.Namespace, study_id: str, timescale_key:
         worker_args.extend(["--build-workers", str(int(args.build_workers))])
     if bool(args.overwrite):
         worker_args.append("--overwrite")
-    if bool(args.resume):
-        worker_args.append("--resume")
+    worker_args.append("--resume" if bool(args.resume) else "--no-resume")
     if int(args.seed):
         worker_args.extend(["--seed", str(int(args.seed))])
     return worker_args
