@@ -5,7 +5,7 @@ import sys
 
 from movebench.cli import download, extract, ingest, pack, slurm
 
-_BENCH_OPTIONAL_DEPENDENCIES = {"mlflow", "matplotlib"}
+_BENCH_OPTIONAL_DEPENDENCIES = {"matplotlib"}
 
 
 def _missing_bench_dependency_root(exc: ModuleNotFoundError) -> str:

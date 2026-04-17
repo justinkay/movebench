@@ -4,6 +4,8 @@ from collections import Counter, defaultdict
 import json
 import re
 
+import movebench.bench.run_state as bench_run_state
+
 STATUS_KEYS = (
     "completed",
     "not_started",
@@ -92,7 +94,7 @@ def _classify_latest_status(
     latest_record: dict[str, object] | None,
 ) -> tuple[str, str | None]:
     if latest_record is None:
-        return "not_started", "no latest MLflow run record"
+        return "not_started", "no latest run record"
     status = str(dict(latest_record).get("status", "")).strip().lower()
     if status in KNOWN_RUN_STATUSES:
         return status, None
@@ -767,7 +769,6 @@ def build_current_summary_payload(
     studies_override: list[str] | None = None,
     experiments_override: list[str] | None = None,
 ) -> dict[str, object]:
-    import movebench.bench.mlflow as bench_mlflow
     import movebench.bench.config as bench_config
     import movebench.bench.run as bench_run
     from movebench.download_reports import load_chip_request_status_for_extract
@@ -797,7 +798,7 @@ def build_current_summary_payload(
         )
     planned_runs = _planned_run_index(expanded_experiments)
     blocked_runs = _blocked_run_entries(expanded_experiments)
-    latest_run_records = bench_mlflow.search_latest_run_records_by_key(
+    latest_run_records = bench_run_state.search_latest_run_records_by_key(
         list(planned_runs.keys())
     )
     download_entries: list[dict[str, object]] = []

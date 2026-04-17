@@ -6,12 +6,9 @@ import importlib
 import importlib.util
 import json
 import math
-import os
 from pathlib import Path
 import signal
 import shutil
-import socket
-import subprocess
 
 from movebench.datasets.deepssf_wds_cache import (
     list_deepssf_wds_shards,
@@ -29,9 +26,8 @@ import movebench.paths as paths
 from movebench.study import resolve_study_selection, _list_available_studies
 from movebench.trajectories import canonicalize_split_key
 
-import movebench.bench.mlflow as bench_mlflow
 import movebench.bench.config as bench_config
-from movebench.bench.mlflow import search_latest_runs_by_key
+import movebench.bench.run_state as bench_run_state
 
 PREFERRED_EARLY_STOP_SPLITS = ["test_temporal", "test_individual"]
 _SUPPORTED_METHODS = {
@@ -43,8 +39,6 @@ _SUPPORTED_METHODS = {
     "deepssf",
     "moveformer",
 }
-_ACTIVE_RUN_FILENAME = "active_run.json"
-_INTERRUPTED_MLFLOW_STATUS = "KILLED"
 
 
 class _RunInterrupted(BaseException):
@@ -800,11 +794,9 @@ class _RunTracker:
         self.run_dir = run_dir
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
-        log_fn = getattr(bench_mlflow.mlflow, "log_metrics", None)
-        if callable(log_fn):
-            log_fn(dict(metrics), step=int(step))
+        del metrics, step
 
-    def write_history(self, history: list[dict[str, float]]) -> None:
+    def write_history(self, history: list[dict[str, object]]) -> None:
         history_path = self.run_dir / "history.json"
         history_path.write_text(
             json.dumps(history, indent=2, sort_keys=True),
@@ -812,30 +804,8 @@ class _RunTracker:
         )
 
 
-def _set_mlflow_tag(key: str, value: object) -> None:
-    set_tag = getattr(bench_mlflow.mlflow, "set_tag", None)
-    if callable(set_tag):
-        set_tag(str(key), value)
-
-
-def _end_mlflow_run(status: str | None) -> None:
-    end_run = getattr(bench_mlflow.mlflow, "end_run", None)
-    if callable(end_run):
-        end_run(status=status)
-
-
-def _latest_run_status(latest_run: object | None) -> str:
-    if latest_run is None:
-        return ""
-    return str(getattr(getattr(latest_run, "data", None), "tags", {}).get("status", ""))
-
-
 def _run_dir(run_key: str) -> Path:
     return paths.repo_root() / "results" / "bench" / "runs" / str(run_key)
-
-
-def _active_run_path(run_dir: str | Path) -> Path:
-    return Path(run_dir) / _ACTIVE_RUN_FILENAME
 
 
 def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]) -> None:
@@ -848,82 +818,6 @@ def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]
 
 def _load_json(path: str | Path) -> dict[str, object]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def _load_active_run_state(run_dir: str | Path) -> dict[str, object] | None:
-    path = _active_run_path(run_dir)
-    if not path.exists():
-        return None
-    try:
-        payload = _load_json(path)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _write_active_run(run_dir: Path, *, mlflow_run_id: str | None) -> None:
-    _write_json(
-        _active_run_path(run_dir),
-        {
-            "pid": int(os.getpid()),
-            "hostname": socket.gethostname(),
-            "slurm_job_id": str(os.environ.get("SLURM_JOB_ID", "")).strip(),
-            "mlflow_run_id": str(mlflow_run_id or "").strip(),
-        },
-    )
-
-
-def _remove_active_run(run_dir: str | Path) -> None:
-    path = _active_run_path(run_dir)
-    if path.exists():
-        path.unlink()
-
-
-def _pid_is_live(pid: int) -> bool:
-    if int(pid) <= 0:
-        return False
-    try:
-        os.kill(int(pid), 0)
-    except OSError:
-        return False
-    return True
-
-
-def _slurm_job_is_live(job_id: str) -> bool | None:
-    job_id = str(job_id).strip()
-    if not job_id:
-        return None
-    if shutil.which("squeue") is None:
-        return None
-    try:
-        result = subprocess.run(
-            ["squeue", "-h", "-j", job_id, "-o", "%i"],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except OSError:
-        return None
-    if int(result.returncode) not in {0, 1}:
-        return None
-    return bool(str(result.stdout).strip())
-
-
-def _active_run_is_live(run_dir: str | Path) -> bool:
-    state = _load_active_run_state(run_dir)
-    if not state:
-        return False
-    job_live = _slurm_job_is_live(str(state.get("slurm_job_id", "")))
-    if job_live is not None:
-        return bool(job_live)
-    hostname = str(state.get("hostname", "")).strip()
-    if hostname and hostname != socket.gethostname():
-        return False
-    try:
-        pid = int(state.get("pid", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    return _pid_is_live(pid)
 
 
 def _history_steps_completed(run_dir: Path) -> int:
@@ -1030,8 +924,8 @@ def _resolved_manifest_path(
 
 
 def _clear_runtime_outputs(run_dir: Path) -> None:
+    bench_run_state.remove_active_run(run_dir)
     for path in (
-        _active_run_path(run_dir),
         run_dir / "training_summary.json",
         run_dir / "history.json",
         run_dir / "checkpoint_best.pt",
@@ -1053,9 +947,6 @@ def _write_blocked_run(
     reason: str,
 ) -> dict[str, object]:
     _log_progress(f"{run_payload['run_key']}: blocked: {reason}")
-    bench_mlflow.start_benchmark_run({**run_payload, "status": "blocked"})
-    _set_mlflow_tag("status", "blocked")
-    _set_mlflow_tag("blocked_reason", reason)
     summary = {
         "status": "blocked",
         "reason": reason,
@@ -1063,13 +954,7 @@ def _write_blocked_run(
         "early_stop_split_key": str(run_payload["early_stop_split_key"]),
     }
     _write_json(run_dir / "training_summary.json", summary)
-    _end_mlflow_run("FAILED")
     return summary
-
-
-def _mlflow_run_id(mlflow_run: object | None) -> str | None:
-    run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "")).strip()
-    return run_id or None
 
 
 def _execute_run(
@@ -1122,10 +1007,8 @@ def _execute_run(
         )
 
     _log_progress(f"{run_payload['run_key']}: starting executor {run_payload['method']}")
-    mlflow_run = bench_mlflow.start_benchmark_run({**run_payload, "status": "running"})
     tracker = _RunTracker(run_dir)
-    mlflow_run_id = _mlflow_run_id(mlflow_run)
-    _write_active_run(run_dir, mlflow_run_id=mlflow_run_id)
+    bench_run_state.write_active_run(run_dir)
     previous_handlers = _install_interrupt_handlers()
     try:
         try:
@@ -1142,34 +1025,15 @@ def _execute_run(
             if str(summary["status"]) == "completed":
                 _write_json(run_dir / "training_summary.json", summary)
                 _log_progress(f"{run_payload['run_key']}: starting evaluation")
-                _evaluation_runner_module().evaluate_run_dir(
-                    run_dir,
-                    mlflow_run_id=mlflow_run_id,
-                )
+                _evaluation_runner_module().evaluate_run_dir(run_dir)
                 _log_progress(f"{run_payload['run_key']}: finished evaluation")
             _write_json(run_dir / "training_summary.json", summary)
-            _set_mlflow_tag("status", summary["status"])
-            _end_mlflow_run("FINISHED")
             return summary
         except (KeyboardInterrupt, _RunInterrupted) as exc:
             reason = _interrupt_reason(exc)
             _log_progress(f"{run_payload['run_key']}: interrupted: {reason}")
             summary = _interrupted_summary(run_payload, run_dir=run_dir, reason=reason)
             _write_json(run_dir / "training_summary.json", summary)
-            if mlflow_run_id:
-                bench_mlflow.terminate_run(
-                    mlflow_run_id,
-                    status=_INTERRUPTED_MLFLOW_STATUS,
-                    tags={
-                        "status": "failed",
-                        "failure_reason": reason,
-                        "interrupted": "true",
-                    },
-                )
-            _set_mlflow_tag("status", "failed")
-            _set_mlflow_tag("failure_reason", reason)
-            _set_mlflow_tag("interrupted", "true")
-            _end_mlflow_run(_INTERRUPTED_MLFLOW_STATUS)
             raise
         except Exception as exc:
             _log_progress(f"{run_payload['run_key']}: failed: {exc}")
@@ -1180,13 +1044,10 @@ def _execute_run(
                 "early_stop_split_key": str(run_payload["early_stop_split_key"]),
             }
             _write_json(run_dir / "training_summary.json", summary)
-            _set_mlflow_tag("status", "failed")
-            _set_mlflow_tag("failure_reason", str(exc))
-            _end_mlflow_run("FAILED")
             return summary
     finally:
         _restore_interrupt_handlers(previous_handlers)
-        _remove_active_run(run_dir)
+        bench_run_state.remove_active_run(run_dir)
 
 
 def execute_run_payload(
@@ -1215,7 +1076,7 @@ def resolve_pending_runs(
     planner_blocked_runs = [dict(run) for run in experiment.get("blocked", [])]
 
     print("Loading latest runs")
-    latest_runs = bench_mlflow.search_latest_runs_by_key(
+    latest_runs = bench_run_state.search_latest_run_records_by_key(
         [str(run["run_key"]) for run in planned_runs]
     )
 
@@ -1223,29 +1084,19 @@ def resolve_pending_runs(
     pending_runs: list[dict[str, object]] = []
     skipped_runs = 0
     for run_payload in planned_runs:
-        latest_run = latest_runs.get(str(run_payload["run_key"]))
-        latest_status = _latest_run_status(latest_run)
+        run_key = str(run_payload["run_key"])
+        latest_run = dict(latest_runs.get(run_key, {}))
+        latest_status = str(latest_run.get("status", ""))
         if not bool(rerun):
             if latest_status == "completed":
                 skipped_runs += 1
                 continue
             if latest_status == "running":
-                run_dir = _run_dir(str(run_payload["run_key"]))
-                if _active_run_is_live(run_dir):
-                    skipped_runs += 1
-                    continue
-                _remove_active_run(run_dir)
-                run_id = _mlflow_run_id(latest_run)
-                if run_id:
-                    bench_mlflow.terminate_run(
-                        run_id,
-                        status=_INTERRUPTED_MLFLOW_STATUS,
-                        tags={
-                            "status": "failed",
-                            "failure_reason": "stale interrupted run",
-                            "interrupted": "true",
-                        },
-                    )
+                skipped_runs += 1
+                continue
+            failure_reason = str(dict(latest_run.get("tags", {})).get("failure_reason", ""))
+            if failure_reason == "stale interrupted run":
+                bench_run_state.remove_active_run(_run_dir(run_key))
         pending_runs.append(dict(run_payload))
 
     if max_runs is not None:
@@ -1388,11 +1239,11 @@ def _status_context(
                 continue
             seen_planned_keys.add(run_key)
             planned_keys.append(run_key)
-    latest_runs = search_latest_runs_by_key(planned_keys)
+    latest_runs = bench_run_state.search_latest_run_records_by_key(planned_keys)
     completed_runs = [
         run_key
         for run_key, run in latest_runs.items()
-        if str(getattr(run.data, "tags", {}).get("status", "")) == "completed"
+        if str(dict(run).get("status", "")) == "completed"
     ]
 
     snapshot = {
@@ -1462,7 +1313,9 @@ def _command_plan(args: argparse.Namespace) -> int:
     runs = expand_experiment(experiment, studies_override=args.studies)
     planned_runs = int(len(runs) + len(experiment["blocked"]))
     existing_runs = len(
-        search_latest_runs_by_key([str(run["run_key"]) for run in runs])
+        bench_run_state.search_latest_run_records_by_key(
+            [str(run["run_key"]) for run in runs]
+        )
     )
     print(f"Planned runs: {planned_runs}")
     print(f"Existing runs: {existing_runs}")

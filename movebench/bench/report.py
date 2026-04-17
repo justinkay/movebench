@@ -12,8 +12,8 @@ import pandas as pd
 import movebench.paths as paths
 
 import movebench.bench.config as bench_config
-import movebench.bench.mlflow as bench_mlflow
 import movebench.bench.run as bench_run
+import movebench.bench.run_state as bench_run_state
 
 EXPECTED_HELD_OUT_SPLITS = ["test_temporal", "test_individual"]
 TIMESCALE_ORDER = ["1h", "12h", "1d", "7d"]
@@ -165,7 +165,7 @@ def _result_rows_for_experiment(
     if not planned_runs:
         return _empty_results_df()
     if latest_run_records is None:
-        latest_run_records = bench_mlflow.search_latest_run_records_by_key(
+        latest_run_records = bench_run_state.search_latest_run_records_by_key(
             list(planned_runs.keys())
         )
 
@@ -492,19 +492,6 @@ def _final_summaries(
     return summaries, missing
 
 
-def _missing_mlflow_metric_splits(
-    latest_run_record: dict[str, object],
-    split_keys: list[str],
-) -> list[str]:
-    metrics = dict(latest_run_record.get("metrics", {}))
-    missing: list[str] = []
-    for split_key in split_keys:
-        metric_key = f"energy_score.{_metric_split_key(str(split_key))}"
-        if metric_key not in metrics:
-            missing.append(str(split_key))
-    return missing
-
-
 def _planner_blocked_runs(
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
@@ -555,12 +542,8 @@ def _refresh_final_metrics(
         split_keys = [
             str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])
         ]
-        _summaries, missing_splits = _final_summaries(
-            run_key,
-            split_keys,
-        )
-        missing_mlflow_splits = _missing_mlflow_metric_splits(latest, split_keys)
-        if (not refresh_metrics) and not missing_splits and not missing_mlflow_splits:
+        _summaries, missing_splits = _final_summaries(run_key, split_keys)
+        if (not refresh_metrics) and not missing_splits:
             continue
         try:
             if evaluate_run_fn is None:
@@ -578,7 +561,7 @@ def _refresh_final_metrics(
                 }
             )
     if refreshed:
-        latest_run_records = bench_mlflow.search_latest_run_records_by_key(
+        latest_run_records = bench_run_state.search_latest_run_records_by_key(
             list(planned_runs.keys())
         )
     return latest_run_records, refreshed, errors
@@ -599,14 +582,9 @@ def _planned_run_entries(
         status = str(latest.get("status", "") or "pending")
         split_keys = [str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])]
         final_metrics, missing_summary_splits = _final_summaries(run_key, split_keys)
-        missing_metric_splits = _missing_mlflow_metric_splits(latest, split_keys)
         if status != "completed":
             missing_summary_splits = []
-            missing_metric_splits = []
-        missing_splits = _ordered(
-            list(dict.fromkeys([*missing_summary_splits, *missing_metric_splits])),
-            preferred=EXPECTED_HELD_OUT_SPLITS,
-        )
+        missing_splits = _ordered(missing_summary_splits, preferred=EXPECTED_HELD_OUT_SPLITS)
         entry = {
             "run_key": run_key,
             "study_id": str(planned_run["study_id"]),
@@ -630,15 +608,6 @@ def _planned_run_entries(
                         "run_key": run_key,
                         "split_key": split_key,
                         "reason": "missing final metric summary",
-                    }
-                )
-            for split_key in missing_metric_splits:
-                missing_artifacts.append(
-                    {
-                        "kind": "mlflow_metric",
-                        "run_key": run_key,
-                        "split_key": split_key,
-                        "reason": "missing MLflow final metric",
                     }
                 )
 
@@ -881,7 +850,7 @@ def write_report(
     expanded_experiments = _expanded_checked_in_experiments()
     planned_runs = _planned_run_index(expanded_experiments)
     planner_blocked_runs = _planner_blocked_runs(expanded_experiments)
-    latest_run_records = bench_mlflow.search_latest_run_records_by_key(
+    latest_run_records = bench_run_state.search_latest_run_records_by_key(
         list(planned_runs.keys())
     )
     latest_run_records, refreshed, refresh_errors = _refresh_final_metrics(

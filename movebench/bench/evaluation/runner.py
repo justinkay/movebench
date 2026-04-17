@@ -14,7 +14,6 @@ from pyproj import Transformer
 import movebench.paths as paths
 
 import movebench.bench.config as bench_config
-import movebench.bench.mlflow as bench_mlflow
 from movebench.bench.evaluation import energy
 from movebench.trajectories import (
     SET_COL,
@@ -36,10 +35,6 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-
-
-def _metric_split_key(split_key: str) -> str:
-    return str(split_key).replace("-", "_")
 
 
 def _prediction_path(run_dir: Path, split_key: str) -> Path:
@@ -457,33 +452,6 @@ def _write_energy_rows(path: Path, rows: list[dict[str, object]]) -> None:
             writer.writerow(row)
 
 
-def _resolve_mlflow_run_id(*, run_key: str, mlflow_run_id: str | None = None) -> str:
-    run_id = str(mlflow_run_id or "").strip()
-    if not run_id:
-        latest_runs = bench_mlflow.search_latest_runs_by_key([str(run_key)])
-        latest_run = latest_runs.get(str(run_key))
-        if latest_run is None:
-            raise ValueError(f"No MLflow run found for run_key {run_key!r}")
-        run_id = str(getattr(getattr(latest_run, "info", None), "run_id", "")).strip()
-    if not run_id:
-        raise ValueError(f"Latest MLflow run for {run_key!r} is missing run_id")
-    return run_id
-
-
-def _log_metrics_to_mlflow(
-    *,
-    run_key: str,
-    metrics: dict[str, float],
-    mlflow_run_id: str | None = None,
-) -> None:
-    client = bench_mlflow._client(create=True)
-    if client is None:
-        raise ValueError("MLflow tracking client is unavailable")
-    run_id = _resolve_mlflow_run_id(run_key=str(run_key), mlflow_run_id=mlflow_run_id)
-    for key, value in metrics.items():
-        client.log_metric(run_id, str(key), float(value))
-
-
 def evaluate_run_dir(
     run_dir: str | Path,
     *,
@@ -513,6 +481,7 @@ def evaluate_run_dir(
     run_dir = Path(run_dir)
     run_payload = _load_json(run_dir / "resolved_run.json")
     run_key = str(run_payload.get("run_key") or run_dir.name)
+    del mlflow_run_id
     training_summary = _load_json(run_dir / "training_summary.json")
     if str(training_summary.get("status", "")) != "completed":
         raise ValueError(
@@ -520,7 +489,6 @@ def evaluate_run_dir(
         )
 
     split_summaries: dict[str, dict[str, object]] = {}
-    mlflow_metrics: dict[str, float] = {}
     for split_key in list(run_payload.get("evaluation_split_keys", [])):
         pred_path = _prediction_path(run_dir, str(split_key))
         if not pred_path.exists():
@@ -536,24 +504,8 @@ def evaluate_run_dir(
         _write_json(out_dir / "summary.json", summary)
         split_summaries[str(split_key)] = summary
 
-        metric_split = _metric_split_key(str(split_key))
-        if summary["energy_score"] is not None:
-            mlflow_metrics[f"energy_score.{metric_split}"] = float(summary["energy_score"])
-            mlflow_metrics[f"energy_score.accuracy.{metric_split}"] = float(summary["accuracy"])
-            mlflow_metrics[f"energy_score.calibration.{metric_split}"] = float(summary["calibration"])
-        mlflow_metrics[f"n_steps_scored.{metric_split}"] = float(summary["n_steps_scored"])
-        mlflow_metrics[f"n_steps_excluded_out_of_support.{metric_split}"] = float(
-            summary["n_steps_excluded_out_of_support"]
-        )
-
     if not split_summaries:
         raise ValueError(f"No held-out prediction artifacts found under {run_dir / 'predictions'}")
-
-    _log_metrics_to_mlflow(
-        run_key=run_key,
-        metrics=mlflow_metrics,
-        mlflow_run_id=mlflow_run_id,
-    )
     return {
         "run_key": run_key,
         "run_dir": str(run_dir),
