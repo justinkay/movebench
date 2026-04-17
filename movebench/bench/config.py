@@ -197,7 +197,7 @@ METHODS: dict[str, dict[str, object]] = {
             "lr": 0.00005,
             "weight_decay": 0.0,
             "warmup_steps": 50,
-            "lr_gamma": 0.98,
+            "lr_gamma": 1.0, # don't decay LR - causes issues with small studies
             "batch_size": 32,
             "max_len": 500,
             "min_len": 2,

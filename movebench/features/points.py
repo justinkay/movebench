@@ -976,7 +976,7 @@ def _extract_env_block(
     return env, valid, shared
 
 
-def _manifest_matches_request(
+def _manifest_matches_store_recipe(
     manifest: PointFeatureManifest,
     *,
     plan: LayerPlan,
@@ -997,7 +997,6 @@ def _manifest_matches_request(
         and int(manifest.extraction.get("points_per_step", -1)) == int(points_per_step)
         and list(manifest.extraction.get("selected_splits", [])) == list(selected_splits)
         and manifest.shared.get("path") == "shared/shared.npy"
-        and set(manifest.bands.keys()) == set(plan.band_ids_in_order())
     )
 
 
@@ -1129,6 +1128,7 @@ def extract_split_feature_store(
     n_steps = int(len(reqs))
     points_per_step = int(sampler["num_candidates"]) + 1
 
+    requested_band_ids = list(plan.band_ids_in_order())
     if manifest_path.exists():
         try:
             existing_manifest = read_manifest(manifest_path)
@@ -1137,7 +1137,7 @@ def extract_split_feature_store(
         else:
             if (
                 skip_existing
-                and _manifest_matches_request(
+                and _manifest_matches_store_recipe(
                     existing_manifest,
                     plan=plan,
                     sampler_hash_value=sampler_hash,
@@ -1145,12 +1145,65 @@ def extract_split_feature_store(
                     selected_splits=selected_splits,
                 )
             ):
-                return {
-                    "split": split,
-                    "status": "existing",
-                    "out_dir": str(out_dir),
-                    "n_steps": int(existing_manifest.n_rows),
-                }
+                existing_band_ids = set(existing_manifest.bands.keys())
+                missing_band_ids = [
+                    band_id
+                    for band_id in requested_band_ids
+                    if band_id not in existing_band_ids
+                ]
+                if not missing_band_ids:
+                    return {
+                        "split": split,
+                        "status": "existing",
+                        "out_dir": str(out_dir),
+                        "n_steps": int(existing_manifest.n_rows),
+                    }
+                missing_plan = _subset_plan_for_band_ids(plan, missing_band_ids)
+                if set(missing_plan.layers_in_order).isdisjoint(
+                    set(existing_manifest.layers.keys())
+                ):
+                    env, valid, _shared_data = _extract_env_block(
+                        study_id=study_id,
+                        study_dir=study_dir,
+                        plan=missing_plan,
+                        reqs=reqs,
+                        sampler_state=sampler_state,
+                        n_workers=n_workers,
+                    )
+                    layers_meta, bands_meta = _layer_store_meta(
+                        plan=missing_plan,
+                        env=env,
+                        valid=valid,
+                        out_dir=out_dir,
+                        n_rows=n_steps,
+                        points_per_step=points_per_step,
+                    )
+                    merged_layers = dict(existing_manifest.layers)
+                    merged_layers.update(layers_meta)
+                    merged_bands = dict(existing_manifest.bands)
+                    merged_bands.update(bands_meta)
+                    write_manifest(
+                        manifest_path,
+                        PointFeatureManifest(
+                            schema_version=str(existing_manifest.schema_version),
+                            study_id=str(existing_manifest.study_id),
+                            split=str(existing_manifest.split),
+                            created_at=utc_now_iso(),
+                            rasters_hash=str(existing_manifest.rasters_hash),
+                            sampler_hash=str(existing_manifest.sampler_hash),
+                            sampler=dict(existing_manifest.sampler),
+                            extraction=dict(existing_manifest.extraction),
+                            shared=dict(existing_manifest.shared),
+                            layers=merged_layers,
+                            bands=merged_bands,
+                        ),
+                    )
+                    return {
+                        "split": split,
+                        "status": "appended",
+                        "out_dir": str(out_dir),
+                        "n_steps": int(existing_manifest.n_rows),
+                    }
 
     if out_dir.exists():
         shutil.rmtree(out_dir)

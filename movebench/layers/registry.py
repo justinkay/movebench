@@ -367,7 +367,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=250.0,
         gee_collection="MODIS/006/MOD44W",
         temporal="static",
-        clip_max=1000000.0,
+        clip_max=100000.0,
     ),
     "sst_30d": LayerSpec(
         name="sst_30d",

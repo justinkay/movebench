@@ -139,7 +139,7 @@ def is_extract_complete(
             return False, sampler_hash
         if (
             expected_band_ids is not None
-            and set(manifest.bands.keys()) != expected_band_ids
+            and not expected_band_ids.issubset(set(manifest.bands.keys()))
         ):
             return False, sampler_hash
     stats_path = point_store_train_stats_path(
