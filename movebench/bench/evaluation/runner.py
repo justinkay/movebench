@@ -104,7 +104,7 @@ def _support_rows_for_split(
     study_dir = paths.study_dir(str(study_id))
     trajectories_path = study_dir / "trajectories.csv"
     df = load_trajectories_csv(trajectories_path)
-    timescale = bench_config.resolve_timescale(str(timescale_key))
+    timescale = bench_config.resolve_timescale(str(timescale_key), study_id=str(study_id))
     plan = timescale["plan"]
 
     train_df = df[df[SET_COL] == "train"].copy()
@@ -351,7 +351,10 @@ def _score_split(
     truth_by_point = _point_rows_by_id(ordered_rows)
     expected_point_ids = [int(row["point_id_start"]) for row in ordered_rows]
     pred_kind = str(pred_artifact.get("prediction_kind", "")).strip()
-    timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
+    timescale = bench_config.resolve_timescale(
+        str(run_payload["timescale"]),
+        study_id=str(run_payload["study_id"]),
+    )
     output_hw = tuple(int(v) for v in timescale["output_hw"])
     expected_pixel_size_m = _support_pixel_size_m(
         output_hw=output_hw,

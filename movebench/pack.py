@@ -135,6 +135,7 @@ def _job_option(job: PackJob, key: str, fallback: object) -> object:
 
 def _expected_cache_hash(
     *,
+    study_id: str,
     timescale_key: str,
     timescale: dict[str, object],
     split: str,
@@ -150,7 +151,7 @@ def _expected_cache_hash(
         and target_dtype is None
         and compression is None
     ):
-        return deepssf_cache_hash_for_split(timescale_key, split)
+        return deepssf_cache_hash_for_split(timescale_key, split, study_id=study_id)
     return deepssf_wds_cache_hash(
         rasters_hash=str(timescale["rasters_hash"]),
         band_ids=list(timescale["all_band_ids"]),
@@ -206,10 +207,11 @@ def resolve_pack_jobs(
                 [str(split) for split in study.split_inventory()["split_keys"]]
             ) or []
         for timescale_key in _split_arg_values(timescales) or []:
-            timescale = resolve_timescale(str(timescale_key))
+            timescale = resolve_timescale(str(timescale_key), study_id=str(study_id))
             pending_splits: list[str] = []
             for split in study_splits:
                 cache_hash = _expected_cache_hash(
+                    study_id=str(study_id),
                     timescale_key=str(timescale_key),
                     timescale=timescale,
                     split=str(split),

@@ -407,6 +407,76 @@ class RunnerSharedHelpersTest(unittest.TestCase):
         self.assertEqual(runs[0]["method"], "moveformer")
         self.assertNotIn("moveformer_context_version", runs[0])
 
+    def test_expand_experiment_resolves_layers_per_study(self):
+        run_module = _load_run_module()
+        experiment = {
+            "name": "demo",
+            "studies": ["study-a", "costa2024_elephant_seals"],
+            "timescales": ["1d"],
+            "covariate_sets": ["all"],
+            "methods": ["issf_linear"],
+            "seed": 0,
+        }
+        readiness = {
+            "available_point_splits": ["test_temporal"],
+            "early_stop_point_split": "test_temporal",
+            "point_ready": True,
+        }
+
+        def fake_resolve_covariate_band_ids(timescale_key, covariate_set_key, study_id):
+            self.assertEqual(timescale_key, "1d")
+            self.assertEqual(covariate_set_key, "all")
+            return [f"{study_id}.band"]
+
+        def fake_resolve_timescale(timescale_key, study_id):
+            self.assertEqual(timescale_key, "1d")
+            return {
+                "step_time_s": 86400,
+                "layers_config": f"configs/layers/{study_id}.yaml",
+                "rasters_hash": f"{study_id}-rasters",
+                "sampler_config": "configs/samplers/issf_defaults.yaml",
+                "sampler_hash": f"{study_id}-sampler",
+            }
+
+        with (
+            mock.patch.object(
+                run_module,
+                "_study_timescale_readiness",
+                return_value=readiness,
+            ),
+            mock.patch.object(
+                run_module,
+                "_resolve_artifacts_for_run",
+                return_value={"status": "resolved"},
+            ),
+            mock.patch.object(
+                run_module.bench_config,
+                "resolve_covariate_band_ids",
+                side_effect=fake_resolve_covariate_band_ids,
+            ),
+            mock.patch.object(
+                run_module.bench_config,
+                "resolve_timescale",
+                side_effect=fake_resolve_timescale,
+            ),
+        ):
+            runs = run_module.expand_experiment(experiment)
+
+        self.assertEqual(
+            {run["study_id"]: run["layers_config"] for run in runs},
+            {
+                "study-a": "configs/layers/study-a.yaml",
+                "costa2024_elephant_seals": "configs/layers/costa2024_elephant_seals.yaml",
+            },
+        )
+        self.assertEqual(
+            {run["study_id"]: run["band_ids"] for run in runs},
+            {
+                "study-a": ["study-a.band"],
+                "costa2024_elephant_seals": ["costa2024_elephant_seals.band"],
+            },
+        )
+
     def test_resolve_pending_runs_filters_latest_runs_and_builds_manifest_payload(self):
         run_module = _load_run_module()
         experiment = {"name": "demo", "methods": ["issf_linear"], "blocked": []}

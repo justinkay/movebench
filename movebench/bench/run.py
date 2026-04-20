@@ -117,7 +117,7 @@ def _study_split_keys(study_id: str) -> dict[str, list[str] | bool]:
 
 def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
     split = canonicalize_split_key(split)
-    timescale = bench_config.resolve_timescale(timescale_key)
+    timescale = bench_config.resolve_timescale(timescale_key, study_id=study_id)
     manifest_path = point_store_manifest_path(
         study_dir=paths.study_dir(study_id),
         split=str(split),
@@ -148,7 +148,11 @@ def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[st
 
 def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[str, object]:
     split = canonicalize_split_key(split)
-    cache_hash = bench_config.deepssf_cache_hash_for_split(timescale_key, split)
+    cache_hash = bench_config.deepssf_cache_hash_for_split(
+        timescale_key,
+        split,
+        study_id=study_id,
+    )
     cache_dir = paths.study_dir(study_id) / "cache" / "deepssf_wds" / str(split) / str(cache_hash)
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.exists():
@@ -363,8 +367,12 @@ def expand_experiment(
                 band_ids = bench_config.resolve_covariate_band_ids(
                     str(timescale_key),
                     str(covariate_set_key),
+                    study_id=study_id,
                 )
-                timescale = bench_config.resolve_timescale(str(timescale_key))
+                timescale = bench_config.resolve_timescale(
+                    str(timescale_key),
+                    study_id=study_id,
+                )
                 for method_key in experiment["methods"]:
                     method = bench_config.METHODS[str(method_key)]
                     requirement = str(method["artifact_requirement"])
@@ -609,6 +617,7 @@ def _resolve_deepssf_cache_artifacts(
         cache_hash = bench_config.deepssf_cache_hash_for_split(
             str(run_payload["timescale"]),
             str(split),
+            study_id=str(run_payload["study_id"]),
         )
         cache_dir = (
             paths.study_dir(str(run_payload["study_id"]))
@@ -742,7 +751,10 @@ def _resolve_deepssf_cache_artifacts(
 
 def _resolve_artifacts_for_run(run_payload: dict[str, object]) -> dict[str, object]:
     method = bench_config.METHODS[str(run_payload["method"])]
-    timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
+    timescale = bench_config.resolve_timescale(
+        str(run_payload["timescale"]),
+        study_id=str(run_payload["study_id"]),
+    )
     requirement = str(method["artifact_requirement"])
     if requirement == "points":
         return _resolve_point_artifacts(run_payload, method=method, timescale=timescale)

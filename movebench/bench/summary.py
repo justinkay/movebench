@@ -823,7 +823,10 @@ def build_current_summary_payload(
                 entry["classification"] = "not_applicable"
                 download_entries.append(entry)
                 continue
-            timescale = bench_config.resolve_timescale(str(readiness["timescale"]))
+            timescale = bench_config.resolve_timescale(
+                str(readiness["timescale"]),
+                study_id=str(study_entry["study_id"]),
+            )
             rasters_root = study.study_dir / "rasters" / str(timescale["rasters_hash"])
             if not rasters_root.exists():
                 entry["classification"] = "missing_rasters_root"

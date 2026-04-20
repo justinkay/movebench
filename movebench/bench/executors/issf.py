@@ -272,7 +272,10 @@ def _run(
     )
     output_hw = tuple(
         int(v)
-        for v in bench_config.resolve_timescale(str(run_payload["timescale"]))[
+        for v in bench_config.resolve_timescale(
+            str(run_payload["timescale"]),
+            study_id=str(run_payload["study_id"]),
+        )[
             "output_hw"
         ]
     )

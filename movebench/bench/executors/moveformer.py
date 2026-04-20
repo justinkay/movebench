@@ -687,7 +687,10 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
+    timescale = bench_config.resolve_timescale(
+        str(run_payload["timescale"]),
+        study_id=str(run_payload["study_id"]),
+    )
     output_hw = tuple(int(v) for v in timescale["output_hw"])
     prediction_dataset_kwargs = dict(dataset_kwargs)
     prediction_dataset_kwargs["min_len"] = 1

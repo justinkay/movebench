@@ -12,7 +12,7 @@ from movebench.features.config import load_sampler_config
 from movebench.features.points import resolve_sampler_hash
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
-from movebench.study import is_named_study_set
+from movebench.study import MARINE_STUDIES, is_named_study_set
 
 EXPERIMENT_DEFAULTS: dict[str, object] = {
     "version": 1,
@@ -28,6 +28,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "1h",
         "step_time_s": 3600,
         "layers_config": "configs/layers/all_ae_1h_1h.yaml",
+        "marine_layers_config": "configs/layers/all_ae_plus_marine_1h_1h.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
         "normalize": True,
@@ -40,6 +41,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "12h",
         "step_time_s": 43200,
         "layers_config": "configs/layers/all_ae_12h_12h.yaml",
+        "marine_layers_config": "configs/layers/all_ae_plus_marine_12h_12h.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
         "normalize": True,
@@ -52,6 +54,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "1d",
         "step_time_s": 86400,
         "layers_config": "configs/layers/all_ae_1d_1d.yaml",
+        "marine_layers_config": "configs/layers/all_ae_plus_marine_1d_1d.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
         "normalize": True,
@@ -64,6 +67,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "7d",
         "step_time_s": 604800,
         "layers_config": "configs/layers/all_ae_7d_7d.yaml",
+        "marine_layers_config": "configs/layers/all_ae_plus_marine_7d_7d.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
         "normalize": True,
@@ -315,13 +319,18 @@ def normalize_experiment(
 
 
 @lru_cache(maxsize=None)
-def resolve_timescale(timescale_key: str) -> dict[str, object]:
+def resolve_timescale(
+    timescale_key: str,
+    study_id: str | None = None,
+) -> dict[str, object]:
     try:
         base = TIMESCALES[str(timescale_key)]
     except KeyError as e:
         raise KeyError(f"Unknown timescale: {timescale_key!r}") from e
 
     resolved = copy.deepcopy(base)
+    if study_id is not None and str(study_id) in MARINE_STUDIES:
+        resolved["layers_config"] = str(resolved["marine_layers_config"])
     layers_config = load_layers_config(_repo_relative_path(resolved["layers_config"]))
     plan = REGISTRY.resolve(layers_config)
     sampler_config = load_sampler_config(_repo_relative_path(resolved["sampler_config"]))
@@ -341,8 +350,12 @@ def _repo_relative_path(path: object) -> str:
     return str(paths.repo_root() / p)
 
 
-def deepssf_cache_hash_for_split(timescale_key: str, split: str) -> str:
-    timescale = resolve_timescale(timescale_key)
+def deepssf_cache_hash_for_split(
+    timescale_key: str,
+    split: str,
+    study_id: str | None = None,
+) -> str:
+    timescale = resolve_timescale(timescale_key, study_id=study_id)
     return deepssf_wds_cache_hash(
         rasters_hash=str(timescale["rasters_hash"]),
         band_ids=list(timescale["all_band_ids"]),
@@ -360,13 +373,14 @@ def deepssf_cache_hash_for_split(timescale_key: str, split: str) -> str:
 def resolve_covariate_band_ids(
     timescale_key: str,
     covariate_set_key: str,
+    study_id: str | None = None,
 ) -> list[str]:
     try:
         covariate_set = COVARIATE_SETS[str(covariate_set_key)]
     except KeyError as e:
         raise KeyError(f"Unknown covariate set: {covariate_set_key!r}") from e
 
-    timescale = resolve_timescale(timescale_key)
+    timescale = resolve_timescale(timescale_key, study_id=study_id)
     all_band_ids = list(timescale["all_band_ids"])
     band_to_layer = {
         channel.band_id: channel.layer for channel in timescale["plan"].channels

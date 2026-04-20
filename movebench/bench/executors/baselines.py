@@ -181,7 +181,10 @@ def run_randomwalk(*, run_payload, resolved_artifacts, run_dir, tracker):
     num_workers = int(method_hparams.get("num_workers", 0) or 0)
     output_hw = tuple(
         int(v)
-        for v in bench_config.resolve_timescale(str(run_payload["timescale"]))[
+        for v in bench_config.resolve_timescale(
+            str(run_payload["timescale"]),
+            study_id=str(run_payload["study_id"]),
+        )[
             "output_hw"
         ]
     )
