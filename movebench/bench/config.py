@@ -95,9 +95,9 @@ COVARIATE_SETS: dict[str, dict[str, object]] = {
     },
     "lite": {
         "key": "lite",
-        "selection": "mixed",
-        "include_layers": ["dynamic_world"],
-        "include_band_ids": ["dem.elevation", "landsat_ndvi.NDVI"],
+        "selection": "study_specific_band_ids",
+        "default_band_ids": ["landsat_ndvi.NDVI", "dem.elevation"],
+        "marine_band_ids": ["bathymetry.deptho", "chlorophyll_30d.chlor_a_mean"],
     },
 }
 
@@ -415,6 +415,14 @@ def resolve_covariate_band_ids(
             for band_id in all_band_ids
             if band_id in included_band_ids or band_to_layer[band_id] in included_layers
         ]
+    elif selection == "study_specific_band_ids":
+        requested_band_ids = (
+            covariate_set.get("marine_band_ids", [])
+            if study_id is not None and str(study_id) in MARINE_STUDIES
+            else covariate_set.get("default_band_ids", [])
+        )
+        included_band_ids = {str(band_id) for band_id in requested_band_ids}
+        selected = [band_id for band_id in all_band_ids if band_id in included_band_ids]
     else:
         raise ValueError(
             f"Unsupported covariate selection mode={selection!r} for {covariate_set_key!r}"
