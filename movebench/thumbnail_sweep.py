@@ -485,6 +485,7 @@ def run_thumbnail_sweep(
         embeddings, embedding_info = compute_thumbnail_embeddings(
             build.images,
             embedding_config=embedding_config,
+            metadata=meta,
         )
         _emit_progress(
             f"{run_prefix}: projecting embeddings and computing neighbors",

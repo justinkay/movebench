@@ -13,19 +13,18 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
-import torch
-import torch.nn.functional as F
 
 from movebench.datasets.thumbnails import (
     build_track_thumbnails,
     detect_color_columns,
-    load_thumbnail_source_df,
+    load_thumbnail_source_df_with_anomaly,
 )
 from movebench.paths import repo_root
+from movebench.thumbnail_config import normalize_anomaly_config, normalize_embedding_config
 
 SOURCE_CSV_ROOT = Path(
     "/data/vision/beery/scratch/shir/codes/vibecleaning/data/movement_example/cleaned_hightemporalres"
@@ -34,6 +33,15 @@ CACHE_ROOT = (repo_root() / ".cache" / "thumbnail_embedding").resolve()
 DEFAULT_REPORT_ROOT = (CACHE_ROOT / "reports").resolve()
 _RGB_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _RGB_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_EMBEDDING_FEATURE_SOURCES = (
+    "cls_token",
+    "patch_mean",
+    "intermediate_patch_mean",
+)
+_EXTRA_EMBEDDING_FEATURES = (
+    "extent_x_m",
+    "extent_y_m",
+)
 _SUMMARY_LABELS = (
     "clean",
     "has_any_outlier",
@@ -81,7 +89,13 @@ def list_embedding_sources(source_root: Path | str = SOURCE_CSV_ROOT) -> list[di
             splits = sorted({str(v) for v in split_df["set"].dropna().tolist()})
         else:
             splits = []
-        inspect_df = load_thumbnail_source_df(path, split=None, include_movement_features=True)
+        anomaly = normalize_anomaly_config(None)
+        inspect_df = load_thumbnail_source_df_with_anomaly(
+            path,
+            split=None,
+            include_movement_features=True,
+            anomaly_config=anomaly,
+        )
         rows.append(
             {
                 "label": path.name,
@@ -89,7 +103,10 @@ def list_embedding_sources(source_root: Path | str = SOURCE_CSV_ROOT) -> list[di
                 "splits": ["all"] + splits,
                 "default_split": "train" if "train" in splits else "all",
                 "n_rows": int(len(inspect_df)),
-                "color_columns": detect_color_columns(inspect_df),
+                "color_columns": detect_color_columns(
+                    inspect_df,
+                    extra_columns=[anomaly["score_column"]],
+                ),
             }
         )
     return rows
@@ -107,6 +124,7 @@ def default_run_config(csv_path: str | None = None) -> dict[str, Any]:
         "data": {
             "csv_path": first_source,
             "split": default_split,
+            "individual_id": None,
         },
         "thumbnail": {
             "img_size": 64,
@@ -120,11 +138,15 @@ def default_run_config(csv_path: str | None = None) -> dict[str, Any]:
             "scale_quantile": 0.5,
             "color_by": None,
         },
+        "anomaly": normalize_anomaly_config(None),
         "embedding": {
             "model_name": "dinov2_vits14",
             "device_preference": "auto",
             "batch_size": 32,
             "image_size": 224,
+            "feature_source": "cls_token",
+            "intermediate_layer_offset": 2,
+            "extra_features": [],
         },
         "projection": {
             "method": "umap",
@@ -146,18 +168,26 @@ def normalize_run_config(config: dict[str, Any]) -> dict[str, Any]:
     emb.update(config.get("embedding", {}))
     proj = dict(base["projection"])
     proj.update(config.get("projection", {}))
+    anomaly = normalize_anomaly_config(config.get("anomaly"))
 
     csv_path = str(Path(data["csv_path"]).resolve())
     stride = thumb.get("stride")
     split = str(data.get("split") or "all")
+    individual_id = data.get("individual_id")
+    if individual_id in (None, "", "all", "All individuals"):
+        individual_id = None
+    else:
+        individual_id = str(individual_id)
     color_by = thumb.get("color_by")
     if color_by in ("", "none", "None"):
         color_by = None
+    embedding = normalize_embedding_config(emb)
 
     return {
         "data": {
             "csv_path": csv_path,
             "split": split,
+            "individual_id": individual_id,
         },
         "thumbnail": {
             "img_size": int(thumb["img_size"]),
@@ -171,12 +201,8 @@ def normalize_run_config(config: dict[str, Any]) -> dict[str, Any]:
             "scale_quantile": float(thumb["scale_quantile"]),
             "color_by": color_by,
         },
-        "embedding": {
-            "model_name": str(emb["model_name"]),
-            "device_preference": str(emb["device_preference"]).lower(),
-            "batch_size": max(1, int(emb["batch_size"])),
-            "image_size": max(32, int(emb["image_size"])),
-        },
+        "anomaly": anomaly,
+        "embedding": embedding,
         "projection": {
             "method": str(proj["method"]).lower(),
             "random_state": int(proj["random_state"]),
@@ -210,6 +236,10 @@ def run_paths(run_id: str, cache_root: Path | str = CACHE_ROOT) -> RunPaths:
 
 def pick_device(device_preference: str = "auto") -> str:
     pref = str(device_preference).lower()
+    try:
+        import torch
+    except Exception:
+        return "cpu"
     if pref == "cuda" and torch.cuda.is_available():
         return "cuda"
     if pref == "cpu":
@@ -219,11 +249,11 @@ def pick_device(device_preference: str = "auto") -> str:
     return "cpu"
 
 
-def preprocess_thumbnail_image(
+def preprocess_thumbnail_image_array(
     image: np.ndarray,
     *,
     image_size: int = 224,
-) -> torch.Tensor:
+) -> np.ndarray:
     arr = np.asarray(image, dtype=np.uint8)
     if arr.ndim == 2:
         arr = np.repeat(arr[:, :, None], 3, axis=2)
@@ -231,23 +261,135 @@ def preprocess_thumbnail_image(
     pil = pil.resize((image_size, image_size), resample=Image.Resampling.BICUBIC)
     resized = np.asarray(pil, dtype=np.float32) / 255.0
     resized = (resized - _RGB_MEAN) / _RGB_STD
-    chw = np.transpose(resized, (2, 0, 1))
-    return torch.from_numpy(chw.copy())
+    return np.transpose(resized, (2, 0, 1)).astype(np.float32, copy=False)
+
+
+def preprocess_thumbnail_image(
+    image: np.ndarray,
+    *,
+    image_size: int = 224,
+):
+    import torch
+
+    return torch.from_numpy(preprocess_thumbnail_image_array(image, image_size=image_size).copy())
+
+
+def preprocess_thumbnail_batch_array(
+    images: np.ndarray,
+    *,
+    image_size: int = 224,
+) -> np.ndarray:
+    arrays = [preprocess_thumbnail_image_array(img, image_size=image_size) for img in images]
+    if not arrays:
+        return np.zeros((0, 3, image_size, image_size), dtype=np.float32)
+    return np.stack(arrays, axis=0).astype(np.float32, copy=False)
 
 
 def preprocess_thumbnail_batch(
     images: np.ndarray,
     *,
     image_size: int = 224,
-) -> torch.Tensor:
-    tensors = [preprocess_thumbnail_image(img, image_size=image_size) for img in images]
-    if not tensors:
-        return torch.empty((0, 3, image_size, image_size), dtype=torch.float32)
-    return torch.stack(tensors, dim=0)
+):
+    import torch
+
+    batch = preprocess_thumbnail_batch_array(images, image_size=image_size)
+    return torch.from_numpy(batch.copy())
+
+
+def denormalize_preprocessed_batch(
+    batch: Any,
+) -> np.ndarray:
+    if hasattr(batch, "detach") and hasattr(batch, "cpu") and hasattr(batch, "numpy"):
+        arr = batch.detach().cpu().numpy()
+    else:
+        arr = np.asarray(batch)
+    if arr.ndim != 4 or arr.shape[1] != 3:
+        raise ValueError(f"Expected batch with shape (N, 3, H, W), got {tuple(arr.shape)}")
+    nhwc = np.transpose(arr, (0, 2, 3, 1)).astype(np.float32, copy=False)
+    nhwc = nhwc * _RGB_STD[None, None, None, :] + _RGB_MEAN[None, None, None, :]
+    nhwc = np.clip(nhwc, 0.0, 1.0)
+    return np.rint(nhwc * 255.0).astype(np.uint8)
+
+
+def preprocessed_batch_preview_png_bytes(
+    images: np.ndarray,
+    *,
+    embedding_config: dict[str, Any],
+    overlay_texts: list[str] | None = None,
+    max_items: int = 16,
+    cols: int = 4,
+    pad: int = 4,
+) -> bytes:
+    image_size = int(embedding_config.get("image_size", 224))
+    sample = np.asarray(images[: max(0, int(max_items))])
+    if len(sample) == 0:
+        preview = np.full((image_size, image_size, 3), 255, dtype=np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(preview, mode="RGB").save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    batch = preprocess_thumbnail_batch_array(sample, image_size=image_size)
+    preview_items = denormalize_preprocessed_batch(batch)
+    n = len(preview_items)
+    n_cols = max(1, int(cols))
+    n_rows = int(math.ceil(float(n) / float(n_cols)))
+    tile_h, tile_w = int(preview_items.shape[1]), int(preview_items.shape[2])
+    grid = np.full(
+        (
+            n_rows * tile_h + pad * (n_rows + 1),
+            n_cols * tile_w + pad * (n_cols + 1),
+            3,
+        ),
+        255,
+        dtype=np.uint8,
+    )
+    for idx, item in enumerate(preview_items):
+        row = idx // n_cols
+        col = idx % n_cols
+        top = pad + row * (tile_h + pad)
+        left = pad + col * (tile_w + pad)
+        grid[top : top + tile_h, left : left + tile_w] = item
+
+    preview_image = Image.fromarray(grid, mode="RGB")
+    if overlay_texts:
+        draw = ImageDraw.Draw(preview_image, mode="RGBA")
+        font = ImageFont.load_default()
+        overlay_items = list(overlay_texts[:n])
+        for idx, text in enumerate(overlay_items):
+            if not text:
+                continue
+            row = idx // n_cols
+            col = idx % n_cols
+            top = pad + row * (tile_h + pad)
+            left = pad + col * (tile_w + pad)
+            text_box = draw.textbbox((0, 0), str(text), font=font)
+            text_w = int(text_box[2] - text_box[0])
+            text_h = int(text_box[3] - text_box[1])
+            rect_left = left + 4
+            rect_top = top + 4
+            rect_right = min(left + tile_w - 4, rect_left + text_w + 8)
+            rect_bottom = min(top + tile_h - 4, rect_top + text_h + 8)
+            draw.rounded_rectangle(
+                (rect_left, rect_top, rect_right, rect_bottom),
+                radius=4,
+                fill=(0, 0, 0, 170),
+            )
+            draw.text(
+                (rect_left + 4, rect_top + 4),
+                str(text),
+                font=font,
+                fill=(255, 255, 255, 255),
+            )
+
+    buf = io.BytesIO()
+    preview_image.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 @lru_cache(maxsize=4)
 def _load_dinov2_model(model_name: str, device: str):
+    import torch
+
     try:
         model = torch.hub.load(
             "facebookresearch/dinov2",
@@ -265,26 +407,300 @@ def _load_dinov2_model(model_name: str, device: str):
     return model
 
 
-def _extract_model_features(model, batch: torch.Tensor) -> torch.Tensor:
-    with torch.inference_mode():
-        out = model(batch)
-    if isinstance(out, torch.Tensor):
-        feats = out
-    elif isinstance(out, dict):
-        for key in ("x_norm_clstoken", "cls_token", "embedding", "last_hidden_state"):
-            value = out.get(key)
-            if isinstance(value, torch.Tensor):
-                feats = value
-                break
+def _embedding_error_info(
+    *,
+    device: str,
+    model_name: str,
+    image_size: int,
+    batch_size: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    info = {
+        "device": device,
+        "model_name": model_name,
+        "image_size": image_size,
+        "batch_size": batch_size,
+    }
+    info.update(extra)
+    return info
+
+
+def _empty_extra_feature_stats(extra_features: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": str(name),
+            "mean": 0.0,
+            "std": 0.0,
+            "n_finite": 0,
+            "status": "empty",
+        }
+        for name in extra_features
+    ]
+
+
+def _append_extra_embedding_features(
+    embeddings: np.ndarray,
+    *,
+    metadata: pd.DataFrame | None,
+    extra_features: list[str],
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    if not extra_features:
+        return embeddings.astype(np.float32, copy=False), []
+
+    if metadata is None:
+        raise ValueError(
+            "embedding.extra_features requires chunk metadata; pass metadata=... to "
+            "compute_thumbnail_embeddings()."
+        )
+    if len(metadata) != len(embeddings):
+        raise ValueError(
+            "Embedding metadata length must match the number of thumbnails, got "
+            f"{len(metadata)} rows for {len(embeddings)} embeddings."
+        )
+
+    extra_columns: list[np.ndarray] = []
+    stats: list[dict[str, Any]] = []
+    for feature_name in extra_features:
+        if feature_name not in _EXTRA_EMBEDDING_FEATURES:
+            raise ValueError(
+                f"Unsupported embedding extra feature {feature_name!r}; expected one of {_EXTRA_EMBEDDING_FEATURES}."
+            )
+        if feature_name not in metadata.columns:
+            raise KeyError(f"Requested embedding extra feature {feature_name!r} is missing from metadata.")
+
+        values = pd.to_numeric(metadata[feature_name], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        finite = np.isfinite(values)
+        mean = float(values[finite].mean()) if np.any(finite) else 0.0
+        std = float(values[finite].std(ddof=0)) if np.any(finite) else 0.0
+        normalized = np.zeros(len(values), dtype=np.float32)
+        if np.any(finite) and std > 0.0:
+            normalized[finite] = ((values[finite] - mean) / std).astype(np.float32, copy=False)
+            status = "zscore"
+        elif np.any(finite):
+            status = "zero_variance"
         else:
-            raise TypeError(f"Unsupported DINO output keys: {sorted(out.keys())}")
-    elif isinstance(out, (tuple, list)) and out:
-        first = out[0]
+            status = "all_missing"
+        extra_columns.append(normalized[:, None])
+        stats.append(
+            {
+                "name": str(feature_name),
+                "mean": mean,
+                "std": std,
+                "n_finite": int(np.count_nonzero(finite)),
+                "status": status,
+            }
+        )
+
+    extra_arr = np.concatenate(extra_columns, axis=1).astype(np.float32, copy=False)
+    augmented = np.concatenate([embeddings.astype(np.float32, copy=False), extra_arr], axis=1)
+    return augmented.astype(np.float32, copy=False), stats
+
+
+def _coerce_feature_tensor(raw: Any) -> Any:
+    import torch
+
+    if isinstance(raw, torch.Tensor):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("x_norm_clstoken", "cls_token", "embedding", "last_hidden_state"):
+            value = raw.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+        raise TypeError(f"Unsupported DINO output keys: {sorted(raw.keys())}")
+    if isinstance(raw, (tuple, list)) and raw:
+        first = raw[0]
         if not isinstance(first, torch.Tensor):
             raise TypeError("The DINO model returned a non-tensor tuple/list output.")
-        feats = first
+        return first
+    raise TypeError(f"Unsupported DINO output type: {type(raw)!r}")
+
+
+def _extract_from_forward_features(
+    model: Any,
+    batch: Any,
+    *,
+    feature_source: str,
+):
+    import torch
+
+    if not hasattr(model, "forward_features"):
+        return None
+    with torch.inference_mode():
+        features = model.forward_features(batch)
+    if not isinstance(features, dict):
+        return None
+    if feature_source == "cls_token":
+        tensor = features.get("x_norm_clstoken")
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+        return None
+    if feature_source == "patch_mean":
+        tensor = features.get("x_norm_patchtokens")
+        if isinstance(tensor, torch.Tensor):
+            return tensor.mean(dim=1)
+        return None
+    return None
+
+
+def _extract_intermediate_patch_features(
+    model: Any,
+    batch: Any,
+    *,
+    intermediate_layer_offset: int,
+):
+    import torch
+
+    if hasattr(model, "get_intermediate_layers"):
+        with torch.inference_mode():
+            outputs = model.get_intermediate_layers(
+                batch,
+                n=max(1, int(intermediate_layer_offset)),
+                reshape=False,
+                return_class_token=False,
+                norm=True,
+            )
+        if not outputs:
+            raise ValueError("DINO model returned no intermediate layers.")
+        tensor = outputs[0]
+        if isinstance(tensor, torch.Tensor):
+            return tensor.mean(dim=1)
+        raise TypeError(f"Unexpected intermediate-layer output type: {type(tensor)!r}")
+    fallback = _extract_from_forward_features(
+        model,
+        batch,
+        feature_source="patch_mean",
+    )
+    if fallback is not None:
+        return fallback
+    raise RuntimeError(
+        "Requested feature_source='intermediate_patch_mean', but the loaded model does not expose "
+        "get_intermediate_layers() or forward_features()."
+    )
+
+
+def _looks_like_cudnn_init_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "cudnn_status_not_initialized",
+            "cudnn error",
+            "cudnn_status_alloc_failed",
+            "cuda error: cudnn",
+        )
+    )
+
+
+def _clear_cuda_runtime_state() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _format_cuda_embedding_failure_message(
+    *,
+    initial_error: Exception,
+    retry_error: Exception,
+    model_name: str,
+    batch_size: int,
+    image_size: int,
+) -> str:
+    return (
+        "DINO embedding on CUDA failed after retrying once with cuDNN disabled. "
+        f"model={model_name!r}, batch_size={batch_size}, image_size={image_size}. "
+        f"Initial CUDA error: {initial_error}. "
+        f"Retry error: {retry_error}. "
+        "If you want CPU embeddings, request them explicitly with "
+        "device_preference='cpu'."
+    )
+
+
+def _compute_thumbnail_embeddings_once(
+    images: np.ndarray,
+    *,
+    model_name: str,
+    image_size: int,
+    batch_size: int,
+    device: str,
+    feature_source: str,
+    intermediate_layer_offset: int,
+    use_cudnn: bool = True,
+) -> np.ndarray:
+    import torch
+
+    previous_cudnn_enabled = None
+    if device == "cuda":
+        torch.cuda.init()
+        _ = torch.empty(1, device="cuda")
+        previous_cudnn_enabled = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = bool(use_cudnn)
+
+    try:
+        model = _load_dinov2_model(model_name, device)
+        chunks: list[np.ndarray] = []
+        for start in range(0, len(images), batch_size):
+            batch_arr = images[start : start + batch_size]
+            batch = preprocess_thumbnail_batch(batch_arr, image_size=image_size).to(device)
+            feats = _extract_model_features(
+                model,
+                batch,
+                feature_source=feature_source,
+                intermediate_layer_offset=intermediate_layer_offset,
+            ).detach().cpu().numpy().astype(
+                np.float32,
+                copy=False,
+            )
+            chunks.append(feats)
+            del batch
+        return (
+            np.concatenate(chunks, axis=0)
+            if chunks
+            else np.zeros((0, 384), dtype=np.float32)
+        )
+    finally:
+        if previous_cudnn_enabled is not None:
+            torch.backends.cudnn.enabled = previous_cudnn_enabled
+
+
+def _extract_model_features(
+    model,
+    batch: Any,
+    *,
+    feature_source: str,
+    intermediate_layer_offset: int,
+):
+    import torch
+    import torch.nn.functional as F
+
+    if feature_source == "intermediate_patch_mean":
+        feats = _extract_intermediate_patch_features(
+            model,
+            batch,
+            intermediate_layer_offset=intermediate_layer_offset,
+        )
     else:
-        raise TypeError(f"Unsupported DINO output type: {type(out)!r}")
+        feats = _extract_from_forward_features(
+            model,
+            batch,
+            feature_source=feature_source,
+        )
+        if feats is None:
+            with torch.inference_mode():
+                out = model(batch)
+            feats = _coerce_feature_tensor(out)
+            if feature_source == "patch_mean" and feats.ndim == 3:
+                feats = feats.mean(dim=1)
 
     if feats.ndim == 3:
         feats = feats[:, 0, :]
@@ -297,34 +713,106 @@ def compute_thumbnail_embeddings(
     images: np.ndarray,
     *,
     embedding_config: dict[str, Any],
+    metadata: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
+    normalized_embedding = normalize_embedding_config(embedding_config)
+    model_name = str(normalized_embedding.get("model_name", "dinov2_vits14"))
+    image_size = int(normalized_embedding.get("image_size", 224))
+    batch_size = int(normalized_embedding.get("batch_size", 32))
+    feature_source = str(normalized_embedding.get("feature_source", "cls_token")).lower()
+    intermediate_layer_offset = int(normalized_embedding.get("intermediate_layer_offset", 2))
+    extra_features = [str(name) for name in normalized_embedding.get("extra_features", [])]
+    requested_device = pick_device(normalized_embedding.get("device_preference", "auto"))
     if len(images) == 0:
-        return np.zeros((0, 384), dtype=np.float32), {
-            "device": pick_device(embedding_config.get("device_preference", "auto")),
-            "model_name": str(embedding_config.get("model_name", "dinov2_vits14")),
-            "image_size": int(embedding_config.get("image_size", 224)),
-            "batch_size": int(embedding_config.get("batch_size", 32)),
-        }
-    device = pick_device(embedding_config.get("device_preference", "auto"))
-    model_name = str(embedding_config.get("model_name", "dinov2_vits14"))
-    image_size = int(embedding_config.get("image_size", 224))
-    batch_size = int(embedding_config.get("batch_size", 32))
-    model = _load_dinov2_model(model_name, device)
+        output_dim = 384 + len(extra_features)
+        return np.zeros((0, output_dim), dtype=np.float32), _embedding_error_info(
+            device=requested_device,
+            model_name=model_name,
+            image_size=image_size,
+            batch_size=batch_size,
+            feature_source=feature_source,
+            intermediate_layer_offset=intermediate_layer_offset,
+            extra_features=extra_features,
+            extra_feature_stats=_empty_extra_feature_stats(extra_features),
+            base_embedding_dim=384,
+            output_dim=output_dim,
+        )
 
-    chunks: list[np.ndarray] = []
-    for start in range(0, len(images), batch_size):
-        batch_arr = images[start : start + batch_size]
-        batch = preprocess_thumbnail_batch(batch_arr, image_size=image_size).to(device)
-        feats = _extract_model_features(model, batch).detach().cpu().numpy().astype(np.float32, copy=False)
-        chunks.append(feats)
+    try:
+        base_embeddings = _compute_thumbnail_embeddings_once(
+            images,
+            model_name=model_name,
+            image_size=image_size,
+            batch_size=batch_size,
+            device=requested_device,
+            feature_source=feature_source,
+            intermediate_layer_offset=intermediate_layer_offset,
+            use_cudnn=True,
+        )
+        embeddings, extra_feature_stats = _append_extra_embedding_features(
+            base_embeddings,
+            metadata=metadata,
+            extra_features=extra_features,
+        )
+        return embeddings, _embedding_error_info(
+            device=requested_device,
+            model_name=model_name,
+            image_size=image_size,
+            batch_size=batch_size,
+            feature_source=feature_source,
+            intermediate_layer_offset=intermediate_layer_offset,
+            cudnn_enabled=bool(requested_device == "cuda"),
+            extra_features=extra_features,
+            extra_feature_stats=extra_feature_stats,
+            base_embedding_dim=int(base_embeddings.shape[1]) if base_embeddings.ndim == 2 else 0,
+            output_dim=int(embeddings.shape[1]) if embeddings.ndim == 2 else 0,
+        )
+    except RuntimeError as exc:
+        if requested_device != "cuda" or not _looks_like_cudnn_init_error(exc):
+            raise
 
-    embeddings = np.concatenate(chunks, axis=0) if chunks else np.zeros((0, 384), dtype=np.float32)
-    return embeddings, {
-        "device": device,
-        "model_name": model_name,
-        "image_size": image_size,
-        "batch_size": batch_size,
-    }
+        _clear_cuda_runtime_state()
+        try:
+            base_embeddings = _compute_thumbnail_embeddings_once(
+                images,
+                model_name=model_name,
+                image_size=image_size,
+                batch_size=batch_size,
+                device="cuda",
+                feature_source=feature_source,
+                intermediate_layer_offset=intermediate_layer_offset,
+                use_cudnn=False,
+            )
+            embeddings, extra_feature_stats = _append_extra_embedding_features(
+                base_embeddings,
+                metadata=metadata,
+                extra_features=extra_features,
+            )
+            return embeddings, _embedding_error_info(
+                device="cuda",
+                model_name=model_name,
+                image_size=image_size,
+                batch_size=batch_size,
+                feature_source=feature_source,
+                intermediate_layer_offset=intermediate_layer_offset,
+                cudnn_enabled=False,
+                cudnn_retry_reason=str(exc),
+                extra_features=extra_features,
+                extra_feature_stats=extra_feature_stats,
+                base_embedding_dim=int(base_embeddings.shape[1]) if base_embeddings.ndim == 2 else 0,
+                output_dim=int(embeddings.shape[1]) if embeddings.ndim == 2 else 0,
+            )
+        except RuntimeError as retry_exc:
+            _clear_cuda_runtime_state()
+            raise RuntimeError(
+                _format_cuda_embedding_failure_message(
+                    initial_error=exc,
+                    retry_error=retry_exc,
+                    model_name=model_name,
+                    batch_size=batch_size,
+                    image_size=image_size,
+                )
+            ) from retry_exc
 
 
 def project_embeddings(
@@ -493,6 +981,7 @@ def _thumbnail_params(config: dict[str, Any]) -> dict[str, Any]:
         "scale_mode": thumb["scale_mode"],
         "scale_quantile": thumb["scale_quantile"],
         "color_by": thumb["color_by"],
+        "anomaly_config": dict(config["anomaly"]),
     }
 
 
@@ -528,6 +1017,7 @@ def execute_run(
         build = build_track_thumbnails(
             normalized["data"]["csv_path"],
             split=split_arg,
+            individual_id=normalized["data"].get("individual_id"),
             img_size=int(normalized["thumbnail"]["img_size"]),
             chunk_size=int(normalized["thumbnail"]["chunk_size"]),
             stride=normalized["thumbnail"]["stride"],
@@ -538,6 +1028,7 @@ def execute_run(
             scale_mode=str(normalized["thumbnail"]["scale_mode"]),
             scale_quantile=float(normalized["thumbnail"]["scale_quantile"]),
             color_by=normalized["thumbnail"]["color_by"],
+            anomaly_config=normalized["anomaly"],
         )
         meta = build.metadata.copy()
         meta["start_time"] = pd.to_datetime(meta["start_time"])
@@ -548,6 +1039,7 @@ def execute_run(
         embeddings, embedding_info = compute_thumbnail_embeddings(
             build.images,
             embedding_config=normalized["embedding"],
+            metadata=meta,
         )
         projection, projection_info, warnings = project_embeddings(
             embeddings,
@@ -616,6 +1108,8 @@ def run_points_payload(run_id: str, *, cache_root: Path | str = CACHE_ROOT) -> d
                 "end_time": str(row.get("end_time", "")),
                 "n_fixes": int(row.get("n_fixes", 0)),
                 "outlier_frac": float(row.get("outlier_frac", 0.0)),
+                "extent_x_m": float(row.get("extent_x_m", 0.0)),
+                "extent_y_m": float(row.get("extent_y_m", 0.0)),
                 "clean": bool(row.get("clean", False)),
                 "has_any_outlier": bool(row.get("has_any_outlier", False)),
                 "has_algorithm_marked_outlier": bool(row.get("has_algorithm_marked_outlier", False)),
@@ -661,6 +1155,8 @@ def chunk_detail_payload(
                     "distance": float(dist),
                     "individual_id": str(n_row.get("individual_id", "")),
                     "start_time": str(n_row.get("start_time", "")),
+                    "extent_x_m": float(n_row.get("extent_x_m", 0.0)),
+                    "extent_y_m": float(n_row.get("extent_y_m", 0.0)),
                     "overlap_state": str(n_row.get("overlap_state", "clean")),
                     "thumbnail_url": f"/api/runs/{run_id}/thumbnail/{int(n_idx)}",
                 }
@@ -674,6 +1170,8 @@ def chunk_detail_payload(
         "end_time": str(row.get("end_time", "")),
         "n_fixes": int(row.get("n_fixes", 0)),
         "outlier_frac": float(row.get("outlier_frac", 0.0)),
+        "extent_x_m": float(row.get("extent_x_m", 0.0)),
+        "extent_y_m": float(row.get("extent_y_m", 0.0)),
         "overlap_state": str(row.get("overlap_state", "clean")),
         "thumbnail_url": f"/api/runs/{run_id}/thumbnail/{idx}",
         "neighbors": neighbor_rows,

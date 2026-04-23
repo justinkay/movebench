@@ -31,6 +31,7 @@ Alternative chunking modes (not implemented here, but straightforward to add)
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
@@ -105,6 +106,7 @@ def load_thumbnail_source_df(
     trajectories_path: Path | str,
     *,
     split: str | None = "train",
+    individual_id: str | None = None,
     include_movement_features: bool = True,
 ) -> pd.DataFrame:
     """Load and normalize a trajectories-like CSV for thumbnail workflows."""
@@ -112,6 +114,8 @@ def load_thumbnail_source_df(
     df = df.dropna(subset=[LON_COL, LAT_COL]).copy()
     if split is not None and SET_COL in df.columns:
         df = df[df[SET_COL] == split].copy()
+    if individual_id not in (None, ""):
+        df = df[df[INDIVIDUAL_COL].astype(str) == str(individual_id)].copy()
 
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL], kind="mergesort")
     if not include_movement_features or len(df) == 0:
@@ -225,6 +229,7 @@ def load_thumbnail_source_df_with_anomaly(
     trajectories_path: Path | str,
     *,
     split: str | None = "train",
+    individual_id: str | None = None,
     include_movement_features: bool = True,
     anomaly_config: dict[str, object] | None = None,
 ) -> pd.DataFrame:
@@ -232,6 +237,7 @@ def load_thumbnail_source_df_with_anomaly(
     full_df = load_thumbnail_source_df(
         trajectories_path,
         split=None,
+        individual_id=individual_id,
         include_movement_features=include_movement_features,
     )
     if include_movement_features:
@@ -734,10 +740,26 @@ def _iter_thumbnail_groups(
         yield str(individual_id), split_value, df_group.sort_values(TIME_COL)
 
 
+def _chunk_extent_metrics(
+    *,
+    center_lat: float,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+) -> tuple[float, float]:
+    lat_scale = 111320.0
+    lon_scale = 111320.0 * math.cos(math.radians(center_lat))
+    extent_x_m = max(0.0, float(lon_max - lon_min)) * max(0.0, lon_scale)
+    extent_y_m = max(0.0, float(lat_max - lat_min)) * lat_scale
+    return extent_x_m, extent_y_m
+
+
 def build_track_thumbnails(
     trajectories_path: Path | str,
     *,
     split: str | None = "train",
+    individual_id: str | None = None,
     img_size: int = 64,
     chunk_size: int = 50,
     stride: int | None = None,
@@ -761,11 +783,17 @@ def build_track_thumbnails(
         df = load_thumbnail_source_df_with_anomaly(
             trajectories_path,
             split=split,
+            individual_id=individual_id,
             include_movement_features=True,
             anomaly_config=normalized_anomaly,
         )
     else:
-        df = load_thumbnail_source_df(trajectories_path, split=split, include_movement_features=True)
+        df = load_thumbnail_source_df(
+            trajectories_path,
+            split=split,
+            individual_id=individual_id,
+            include_movement_features=True,
+        )
     outlier_cols = detect_outlier_cols(df, exclude=exclude_outlier_cols)
     color_range: tuple[float, float] | None = None
     if color_by is not None:
@@ -821,6 +849,19 @@ def build_track_thumbnails(
             chunk_paths.append(tuple((float(lon), float(lat)) for lon, lat in zip(lons.tolist(), lats.tolist())))
 
             label_dict = aggregate_labels(chunk, outlier_cols)
+            center_lat = float(chunk[LAT_COL].mean())
+            center_lon = float(chunk[LON_COL].mean())
+            lat_min = float(chunk[LAT_COL].min())
+            lat_max = float(chunk[LAT_COL].max())
+            lon_min = float(chunk[LON_COL].min())
+            lon_max = float(chunk[LON_COL].max())
+            extent_x_m, extent_y_m = _chunk_extent_metrics(
+                center_lat=center_lat,
+                lon_min=lon_min,
+                lon_max=lon_max,
+                lat_min=lat_min,
+                lat_max=lat_max,
+            )
             record = {
                 "global_chunk_idx": len(records),
                 "individual_id": individual_id,
@@ -833,12 +874,14 @@ def build_track_thumbnails(
                 "start_lat": float(chunk[LAT_COL].iloc[0]),
                 "end_lon": float(chunk[LON_COL].iloc[-1]),
                 "end_lat": float(chunk[LAT_COL].iloc[-1]),
-                "center_lat": float(chunk[LAT_COL].mean()),
-                "center_lon": float(chunk[LON_COL].mean()),
-                "lat_min": float(chunk[LAT_COL].min()),
-                "lat_max": float(chunk[LAT_COL].max()),
-                "lon_min": float(chunk[LON_COL].min()),
-                "lon_max": float(chunk[LON_COL].max()),
+                "center_lat": center_lat,
+                "center_lon": center_lon,
+                "lat_min": lat_min,
+                "lat_max": lat_max,
+                "lon_min": lon_min,
+                "lon_max": lon_max,
+                "extent_x_m": extent_x_m,
+                "extent_y_m": extent_y_m,
             }
             record.update(label_dict)
             records.append(record)

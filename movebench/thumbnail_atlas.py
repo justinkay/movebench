@@ -11,6 +11,7 @@ from PIL import Image
 
 from movebench.datasets.thumbnails import build_track_thumbnails
 from movebench.thumbnail_config import (
+    normalize_embedding_config,
     dumps_thumbnail_generation_config,
     load_thumbnail_generation_config,
     thumbnail_build_kwargs,
@@ -29,6 +30,7 @@ DEFAULT_EMBEDDING_CONFIG: dict[str, Any] = {
     "image_size": 224,
     "feature_source": "cls_token",
     "intermediate_layer_offset": 2,
+    "extra_features": [],
 }
 
 DEFAULT_PROJECTION_CONFIG: dict[str, Any] = {
@@ -105,6 +107,7 @@ def build_thumbnail_metadata(
     meta["source_name"] = source_name
     meta["csv_path"] = config["data"]["csv_path"]
     meta["selected_split"] = config["data"]["split"]
+    meta["selected_individual_id"] = config["data"].get("individual_id")
     meta["overlap_state"] = meta.apply(overlap_state_from_row, axis=1)
     meta["thumbnail_id"] = meta.apply(thumbnail_id_for_row, axis=1, source_name=source_name)
     meta["description"] = meta.apply(description_for_row, axis=1)
@@ -231,9 +234,14 @@ def build_atlas_artifacts_from_config(
     config, build, meta = build_thumbnail_metadata(config_or_path)
     run_dir = Path(out_root) / thumbnail_config_run_slug(config)
     thumb_paths = save_thumbnail_pngs(build.images, meta, out_dir=run_dir / "thumbnails")
+    effective_embedding_config = dict(DEFAULT_EMBEDDING_CONFIG)
+    effective_embedding_config.update(config.get("embedding", {}))
+    if embedding_config is not None:
+        effective_embedding_config.update(embedding_config)
     embeddings, _ = compute_thumbnail_embeddings(
         build.images,
-        embedding_config=dict(DEFAULT_EMBEDDING_CONFIG if embedding_config is None else embedding_config),
+        embedding_config=normalize_embedding_config(effective_embedding_config),
+        metadata=meta,
     )
     projection, _projection_info, _warnings = project_embeddings(
         embeddings,

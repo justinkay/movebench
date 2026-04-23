@@ -1,0 +1,30 @@
+# add r code chunk to start an r notebook
+# add notebook preamble
+
+
+
+
+```{r}
+# load libraries
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(janitor)
+```
+
+
+```{r}
+# load data
+data <- read.csv('/data/vision/beery/scratch/shir/codes/movebench/notebooks/Carter_Red_Fox_merged_df.csv')
+data=clean_names(data)
+colnames(data)
+ggplot(data)+geom_jitter(aes(x=gps_satellite_count, y=algorithm_marked_outlier), alpha=0.5)
+ggplot(data)+geom_jitter(aes(x=gps_hdop, y=algorithm_marked_outlier), alpha=0.5)+geom_vline(xintercept=9.9)
+
+# gps_hdop = 9.9 are outliers
+
+ggplot(data)+geom_jitter(aes(x=speed_m_s, y=algorithm_marked_outlier,color=gps_hdop==9.9), alpha=0.5)#+xlim(0,30)
+ggplot(data)+geom_jitter(aes(x=gps_satellite_count, y=algorithm_marked_outlier,color=gps_hdop==9.9), alpha=0.5)
+
+```

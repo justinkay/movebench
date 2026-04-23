@@ -21,6 +21,7 @@ DEFAULT_EMBEDDING_CONFIG = {
     "image_size": 224,
     "feature_source": "cls_token",
     "intermediate_layer_offset": 2,
+    "extra_features": [],
 }
 DEFAULT_PROJECTION_CONFIG = {
     "method": "umap",
@@ -33,6 +34,10 @@ _EMBEDDING_FEATURE_SOURCES = {
     "cls_token",
     "patch_mean",
     "intermediate_patch_mean",
+}
+_EXTRA_EMBEDDING_FEATURES = {
+    "extent_x_m",
+    "extent_y_m",
 }
 
 
@@ -72,6 +77,24 @@ def normalize_embedding_config(embedding: dict[str, Any] | None = None) -> dict[
         raise ValueError(
             f"embedding.feature_source must be one of {sorted(_EMBEDDING_FEATURE_SOURCES)}, got {feature_source!r}"
         )
+    extra_features = raw.get("extra_features", [])
+    if extra_features in (None, "", []):
+        normalized_extra_features: list[str] = []
+    else:
+        if isinstance(extra_features, (str, bytes)):
+            extra_features = [extra_features]
+        normalized_extra_features = []
+        for feature in extra_features:
+            name = str(feature).strip()
+            if not name:
+                continue
+            if name not in _EXTRA_EMBEDDING_FEATURES:
+                raise ValueError(
+                    "embedding.extra_features must contain only "
+                    f"{sorted(_EXTRA_EMBEDDING_FEATURES)}, got {name!r}"
+                )
+            if name not in normalized_extra_features:
+                normalized_extra_features.append(name)
     return {
         "model_name": str(raw.get("model_name", "dinov2_vits14")),
         "device_preference": str(raw.get("device_preference", "auto")).lower(),
@@ -79,6 +102,7 @@ def normalize_embedding_config(embedding: dict[str, Any] | None = None) -> dict[
         "image_size": max(32, int(raw.get("image_size", 224))),
         "feature_source": feature_source,
         "intermediate_layer_offset": max(1, int(raw.get("intermediate_layer_offset", 2))),
+        "extra_features": normalized_extra_features,
     }
 
 
@@ -101,6 +125,7 @@ def build_thumbnail_generation_config(
     split: str,
     params: dict[str, Any],
     color_by: str | None,
+    individual_id: str | None = None,
     anomaly: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stride = params.get("stride")
@@ -110,6 +135,7 @@ def build_thumbnail_generation_config(
             "data": {
                 "csv_path": str(Path(csv_path).resolve()),
                 "split": str(split),
+                "individual_id": individual_id,
             },
             "thumbnail": {
                 "img_size": params.get("img_size"),
@@ -151,6 +177,7 @@ def normalize_thumbnail_generation_config(config: dict[str, Any]) -> dict[str, A
         "data": {
             "csv_path": str(Path(data["csv_path"]).resolve()),
             "split": str(data.get("split") or "all"),
+            "individual_id": None if data.get("individual_id") in (None, "", "all", "All individuals") else str(data.get("individual_id")),
         },
         "thumbnail": {
             "img_size": int(thumb["img_size"]),
@@ -180,6 +207,7 @@ def thumbnail_build_kwargs(config_or_path: dict[str, Any] | str | Path) -> dict[
     return {
         "trajectories_path": config["data"]["csv_path"],
         "split": None if split == "all" else split,
+        "individual_id": config["data"].get("individual_id"),
         "img_size": thumb["img_size"],
         "chunk_size": thumb["chunk_size"],
         "stride": thumb["stride"],
