@@ -19,6 +19,7 @@ import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.bench.executors.ssf_grid as ssf_grid
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+from movebench.features.points import PointStoreReader
 from movebench.lib.moveformer.geo_transformers.geo_utils import (
     gcs_to_bearing,
     gcs_to_distance,
@@ -152,6 +153,76 @@ def _grid_step_rows_by_point_id(
             raise ValueError(f"Duplicate grid step point_id_start {point_id}")
         rows[point_id] = (idx, row)
     return rows
+
+
+def _train_sampler_state_from_point_store(
+    *,
+    train_store_dir: str | Path,
+    train_manifest,
+) -> dict[str, Any]:
+    reader = PointStoreReader(store_dir=Path(train_store_dir), manifest=train_manifest)
+    length_chunks: list[np.ndarray] = []
+    turn_chunks: list[np.ndarray] = []
+    for block in reader.iter_row_blocks(
+        band_ids=None,
+        shared_keys=["step_length_m", "turn_angle_rad"],
+        block_size=2048,
+    ):
+        length_chunks.append(
+            block["step_length_m"][:, -1].to(dtype=torch.float64).cpu().numpy()
+        )
+        turn_chunks.append(
+            block["turn_angle_rad"][:, -1].to(dtype=torch.float64).cpu().numpy()
+        )
+    if not length_chunks or not turn_chunks:
+        raise ValueError("MoveFormer grid prediction requires non-empty train point store")
+
+    valid_lengths = np.concatenate(length_chunks).astype(np.float64, copy=False)
+    valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
+    valid_turns = np.concatenate(turn_chunks).astype(np.float64, copy=False)
+    valid_turns = valid_turns[np.isfinite(valid_turns)]
+    if len(valid_lengths) == 0:
+        raise ValueError("No valid train step lengths available for MoveFormer grid prediction")
+    if len(valid_turns) == 0:
+        raise ValueError("No valid train turn angles available for MoveFormer grid prediction")
+
+    sampler = dict(getattr(train_manifest, "sampler", {}))
+    gamma = (
+        dict(sampler.get("gamma", {}))
+        if isinstance(sampler.get("gamma"), dict)
+        else {}
+    )
+    gamma_params = gamma.get("params")
+    if not (bool(gamma.get("used", False)) and isinstance(gamma_params, list) and gamma_params):
+        gamma_params = None
+    else:
+        gamma_params = tuple(float(x) for x in gamma_params)
+
+    vonmises = (
+        dict(sampler.get("vonmises", {}))
+        if isinstance(sampler.get("vonmises"), dict)
+        else {}
+    )
+    vonmises_params = vonmises.get("params")
+    if not (
+        bool(vonmises.get("used", False))
+        and isinstance(vonmises_params, list)
+        and vonmises_params
+    ):
+        vonmises_params = None
+    else:
+        vonmises_params = tuple(float(x) for x in vonmises_params)
+
+    return {
+        "valid_lengths": valid_lengths,
+        "valid_turns": valid_turns,
+        "num_candidates": int(sampler["num_candidates"]),
+        "random_seed": int(sampler["random_seed"]),
+        "gamma_used": gamma_params is not None,
+        "gamma_params": gamma_params,
+        "vonmises_used": vonmises_params is not None,
+        "vonmises_params": vonmises_params,
+    }
 
 
 @torch.no_grad()
@@ -338,6 +409,9 @@ def _grid_prediction_payload(
     grid_dataset,
     mov_vec_scale: float,
     step_batch_size: int,
+    train_sampler_state: dict[str, Any] | None = None,
+    train_store_dir: str | Path | None = None,
+    train_manifest=None,
     num_workers: int = 0,
     device: torch.device,
 ) -> dict[str, object]:
@@ -363,6 +437,15 @@ def _grid_prediction_payload(
     if set(rows_by_point_id.keys()) != set(ordered_point_ids):
         raise ValueError("MoveFormer query point_id_start values do not match held-out grid steps")
     ordered_indices = [int(rows_by_point_id[point_id][0]) for point_id in ordered_point_ids]
+    if train_sampler_state is None:
+        if train_store_dir is None or train_manifest is None:
+            raise ValueError(
+                "MoveFormer grid prediction requires train_sampler_state or train_store_dir/train_manifest"
+            )
+        train_sampler_state = _train_sampler_state_from_point_store(
+            train_store_dir=train_store_dir,
+            train_manifest=train_manifest,
+        )
 
     model.eval()
     grid_loader = DataLoader(
@@ -384,6 +467,12 @@ def _grid_prediction_payload(
         expected = point_ids[start:stop]
         if not torch.equal(point_id_batch.cpu(), expected.cpu()):
             raise ValueError("MoveFormer grid batch point_id_start order does not match query order")
+        log_q_hw, _off_grid_mass = ssf_grid.movement_log_prior_hw(
+            start_bearing_rad=grid_batch["start_bearing_rad"],
+            output_hw=grid_dataset.output_hw,
+            pixel_size_m=float(grid_dataset.pixel_size_m),
+            sampler_state=train_sampler_state,
+        )
         candidate_features = _grid_candidate_features(
             grid_dataset=grid_dataset,
             point_ids=point_id_batch.cpu(),
@@ -400,6 +489,11 @@ def _grid_prediction_payload(
                 non_blocking=device.type == "cuda",
             ),
             candidate_features=candidate_features,
+        )
+        scores_flat = scores_flat + log_q_hw.reshape(int(log_q_hw.shape[0]), -1).to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=device.type == "cuda",
         )
         score_chunks.append(scores_flat.detach().cpu().reshape(-1, height, width))
         point_id_chunks.append(point_id_batch.cpu())
@@ -746,6 +840,8 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
                 grid_dataset=grid_dataset,
                 mov_vec_scale=float(train_dataset._mov_vec_scale),
                 step_batch_size=step_batch_size,
+                train_store_dir=point_stores["train"]["store_dir"],
+                train_manifest=point_stores["train"]["manifest"],
                 num_workers=prediction_num_workers,
                 device=device,
             ),

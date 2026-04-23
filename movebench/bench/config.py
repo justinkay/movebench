@@ -93,6 +93,18 @@ COVARIATE_SETS: dict[str, dict[str, object]] = {
         "selection": "include_layers",
         "include_layers": ["alphaearth_embeddings"],
     },
+    "alphaearth_and_marine": {
+        "key": "alphaearth_and_marine",
+        "selection": "mixed",
+        "include_layers": [
+            "alphaearth_embeddings",
+            "bathymetry",
+            "dist_shore",
+            "sst_30d",
+            "chlorophyll_30d",
+            "hycom_surface_current",
+        ],
+    },
     "lite": {
         "key": "lite",
         "selection": "study_specific_band_ids",

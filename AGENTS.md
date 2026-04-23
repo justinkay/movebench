@@ -1,7 +1,3 @@
-# ExecPlans
-
-When writing complex features or significant refactors, use an ExecPlan (as described in .agent/PLANS.md) from design to implementation.
-
 # General coding guidelines
 
 Keep code simple. Keep lines of code to a minimum for any new implementation. Do not add features that were not explicitly asked for. Do not add code that was not explicitly asked for. Do not reimplement functionality that can be found elsewhere or in commonly-used dependencies. Follow DRY principles and avoid writing overly engineered spaghetti code. 
@@ -24,9 +20,3 @@ Keep imports at the top of the file. Do not lazy load imports. Do not include a 
 
 Use the movebench micromamba environment located in /data/vision/beery/scratch/justin/micromamba/envs.
 
-# Testing discipline
-
-- For multi-phase work, create/update tests and fixtures before implementing each milestone. Prefer having at least one test that fails on the pre-change behavior and passes after the fix.
-- Run tests after each milestone before moving on. At minimum run `python -m unittest -v`; also run any smaller, milestone-specific test command(s) when available.
-- Do not claim a task is completed (or mark an ExecPlan `Progress` checkbox complete) until the relevant tests have been run and the outputs reviewed.
-- If a test cannot be run or is skipped due to environment constraints (credentials, network, missing large datasets), record the exact reason and do not treat it as verified in the current environment.
