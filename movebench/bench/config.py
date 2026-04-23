@@ -216,7 +216,7 @@ METHODS: dict[str, dict[str, object]] = {
             "lr_gamma": 1.0, # don't decay LR - causes issues with small studies
             "batch_size": 32,
             "max_len": 500,
-            "min_len": 2,
+            "min_len": 1,
             "max_steps": 2000,
             "eval_every_steps": 10, # effectively batch size is ~ batch_size*max_len
             "patience_evals": 10,

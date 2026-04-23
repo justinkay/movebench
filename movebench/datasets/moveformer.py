@@ -116,18 +116,6 @@ def _split_mask(
     return mask
 
 
-def _loss_mask(
-    chain: list[_StepRecord], start: int, end: int, split_key: str
-) -> np.ndarray:
-    return _split_mask(
-        chain,
-        start,
-        end,
-        split_key,
-        require_previous_token=True,
-    )
-
-
 def _prediction_mask(
     chain: list[_StepRecord], start: int, end: int, split_key: str
 ) -> np.ndarray:
@@ -279,7 +267,7 @@ class MoveFormerPointStoreDataset(Dataset):
         split: str,
         context_splits: list[str] | None = None,
         max_len: int = 500,
-        min_len: int = 2,
+        min_len: int = 1,
         normalize_env: bool = True,
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
@@ -492,13 +480,13 @@ class MoveFormerPointStoreDataset(Dataset):
                 start = 0
                 while start + self.min_len <= len(chain):
                     end = min(len(chain), start + self.max_len)
-                    has_loss = bool(_loss_mask(chain, start, end, self.split).any())
-                    has_prediction = bool(
-                        _prediction_mask(chain, start, end, self.split).any()
+                    has_split_rows = bool(
+                        any(
+                            record.split_key == self.split
+                            for record in chain[start:end]
+                        )
                     )
-                    if has_loss or (
-                        self.allow_prediction_only_segments and has_prediction
-                    ):
+                    if has_split_rows:
                         self._segments.append((chain_idx, start, end))
                     if end == len(chain):
                         break
@@ -577,7 +565,6 @@ class MoveFormerPointStoreDataset(Dataset):
             "cov_cand": cov_cand,
         }
         encoded = self._processor.encode(traj)
-        encoded["loss_mask"] = _loss_mask(chain, start, end, self.split)
         encoded["prediction_mask"] = _prediction_mask(chain, start, end, self.split)
         encoded["point_id_start"] = np.asarray(
             [record.point_id_start for record in window],

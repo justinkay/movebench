@@ -243,7 +243,7 @@ def _prediction_queries(
             prediction_mask = (
                 batch["prediction_mask"]
                 if "prediction_mask" in batch
-                else batch["loss_mask"]
+                else batch.get("loss_mask", batch["mask"])
             ).to(torch.bool)
             if not bool(prediction_mask.any().item()):
                 continue
@@ -622,9 +622,10 @@ class _MoveFormerRuntime:
         self.optimizer.step()
         self._steps_done += 1
         self._set_lr()
+        token_mask = features.get("loss_mask", features["mask"])
         return {
             "loss/train_step": float(loss.item()),
-            "num_tokens/train_step": float(features["loss_mask"].sum().item()),
+            "num_tokens/train_step": float(token_mask.sum().item()),
         }
 
     def evaluate(self, split_key: str) -> dict[str, float]:
@@ -695,14 +696,11 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         candidate_subset_size=16,
         **dataset_kwargs,
     )
-    eval_datasets = {
-        str(split_key): MoveFormerPointStoreDataset(
-            split=str(split_key),
-            context_splits=["train", str(split_key)],
-            **dataset_kwargs,
-        )
-        for split_key in run_payload["evaluation_split_keys"]
-    }
+    early_stop_dataset = MoveFormerPointStoreDataset(
+        split=early_stop_split_key,
+        context_splits=["train", early_stop_split_key],
+        **dataset_kwargs,
+    )
     print("Moveformer train dataset length", len(train_dataset))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -717,7 +715,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     eval_loaders = {
         "train": train_eval_loader,
         early_stop_split_key: _loader(
-            eval_datasets[early_stop_split_key],
+            early_stop_dataset,
             batch_size=batch_size,
             shuffle=False,
             seed=seed,
@@ -857,7 +855,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         "eval_metrics": _eval_metrics(
             runtime.model,
             _loader(
-                eval_datasets[early_stop_split_key],
+                early_stop_dataset,
                 batch_size=batch_size,
                 shuffle=False,
                 seed=seed,
