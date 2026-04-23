@@ -21,11 +21,60 @@ pip install -e .
 earthengine authenticate --auth_mode=notebook
 ```
 
-## CLI functionality
+## Quickstart: Data setup
+
+Download all trajectories in MoveBench v1.0 here (165 MB): https://drive.google.com/file/d/1LAcoi-XzvmtXj4VYQ1pGNFXeZfiua4WP/view?usp=sharing
+
+As a quickstart, let's prepare data and train models for some white storks 𓅮 We will use a sample from MoveBench that includes data from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
+
+**1. Ingest:** Ingest MoveBank-formatted CSVs into the repository.
+
+```
+movebench ingest path/to/movebench-csvs-v1.0/
+```
+
+**2. Download:** Download a set of raster files for the study at some forecasting timescale. To get up and running quickly, lets use the `lite` set of covariates and a 12h forecast horizon.
+
+Make sure you have followed the instructions above to authenticate Google Earth Engine. Then,
+
+```
+movebench download --layers-config configs/layers/lite_12h_12h.yaml --studies Accio_967b7813_raw_merged
+```
+
+**3. Extract:** Extract point features for observed and candidate points from downloaded rasters, to be used by SSF-style methods.
+
+```
+```
+
+**4. Pack (Optional: only required for deepSSF):** Create WebDataset shards, which bundle full raster stacks for efficient training/inference of raster-based methods.
+```
+```
+
+**5. Bench:** Benchmark all forecasting methods.
+```
+```
+
+You can visualize predictions for your newly trained models with [TODO: Notebook links]
+
+## Full data download
+
+Download all covariates for all studies at at all timescales (warning: this will download roughly 7TB of data):
+
+TODO
+```bash
+movebench download --layers-config configs/layers/all_ae_1h_1h.yaml --studies all
+```
+
+## Full documentation
+
+Ingest: [Doc]
+Download: [Doc]
+Extract: [Doc]
+Pack: [Doc]
+Bench: [Doc]
+Slurm: [Doc]
 
 ### Download
-
-Download all GEE rasters for all studies at at a 1 hour timescale:
 
 ```bash
 movebench download --layers-config configs/layers/all_ae_1h_1h.yaml --studies all
@@ -45,24 +94,4 @@ To launch this on many slurm jobs,
 
 ```bash
 movebench slurm extract --layers-config configs/layers/all_ae_1h_1h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies all --slurm-config {path/to/slurm/config.yaml}
-```
-
-### Pack
-
-Create WebDataset shards for training raster-based methods like DeepSSF. 
-
-```bash
-
-```
-
-To launch on slurm,
-
-### Bench
-
-```bash
-```
-
-To launch on slurm,
-
-```bash
 ```
