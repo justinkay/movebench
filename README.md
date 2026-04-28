@@ -29,7 +29,7 @@ earthengine authenticate --auth_mode=notebook
 
 ## Quickstart: Data setup
 
-Download all trajectories in MoveBench v1.0 here (165 MB): https://drive.google.com/file/d/1LAcoi-XzvmtXj4VYQ1pGNFXeZfiua4WP/view?usp=sharing
+Download all trajectories in MoveBench v1.0 here (85 MB): https://drive.google.com/file/d/1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y/view?usp=sharing
 
 As a quickstart, let's prepare data and train models for some white storks 𓅮 We will use a sample from MoveBench that includes data from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
 
