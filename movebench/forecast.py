@@ -48,6 +48,7 @@ class RecursiveForecastConfig:
     test_point_index: int
     num_trajectories: int
     num_steps: int
+    burn_in_steps: int = 0
     seed: int = 0
 
 
@@ -1240,6 +1241,10 @@ def run_recursive_forecast(
         )
     if int(config.num_steps) < 0:
         raise ValueError(f"num_steps must be >= 0, got {config.num_steps}")
+    if int(config.burn_in_steps) < 0:
+        raise ValueError(
+            f"burn_in_steps must be >= 0, got {config.burn_in_steps}"
+        )
 
     run_dir = Path(config.run_dir)
     run_payload, resolved_artifacts = load_saved_run_bundle(run_dir)
@@ -1255,19 +1260,21 @@ def run_recursive_forecast(
     )
     row = seed.row
     n = int(config.num_trajectories)
+    burn_in_steps = int(config.burn_in_steps)
     steps = int(config.num_steps)
-    lon = torch.empty((n, steps + 1), dtype=torch.float32)
+    total_steps = burn_in_steps + steps
+    lon = torch.empty((n, total_steps + 1), dtype=torch.float32)
     lat = torch.empty_like(lon)
-    timestamp_ns = torch.empty((n, steps + 1), dtype=torch.int64)
-    sampled_row = torch.empty((n, steps), dtype=torch.int64)
-    sampled_col = torch.empty((n, steps), dtype=torch.int64)
+    timestamp_ns = torch.empty((n, total_steps + 1), dtype=torch.int64)
+    sampled_row = torch.empty((n, total_steps), dtype=torch.int64)
+    sampled_col = torch.empty((n, total_steps), dtype=torch.int64)
 
     lon[:, 0] = float(row.start_lon)
     lat[:, 0] = float(row.start_lat)
     timestamp_ns[:, 0] = _timestamp_ns(row.timestamp)
     result_pixel_size_m = float(seed.pixel_size_m)
 
-    if steps:
+    if total_steps:
         scorer = _load_forecast_scorer(
             run_payload=run_payload,
             resolved_artifacts=resolved_artifacts,
@@ -1304,7 +1311,7 @@ def run_recursive_forecast(
         registry = getattr(scorer, "registry", REGISTRY)
         with tempfile.TemporaryDirectory(prefix="movebench_forecast_") as tmpdir:
             temp_root = Path(tmpdir)
-            for step_index in tqdm(range(steps)):
+            for step_index in tqdm(range(total_steps)):
                 bounds_latlon = _step_union_bounds_latlon(
                     lon=state.lon,
                     lat=state.lat,
@@ -1345,9 +1352,12 @@ def run_recursive_forecast(
                     output_hw=output_hw,
                     pixel_size_m=float(result_pixel_size_m),
                 )
-                next_timestamp_ns = state.timestamp_ns + (
-                    int(seed.step_time_s) * 1_000_000_000
-                )
+                if step_index < burn_in_steps:
+                    next_timestamp_ns = state.timestamp_ns.clone()
+                else:
+                    next_timestamp_ns = state.timestamp_ns + (
+                        int(seed.step_time_s) * 1_000_000_000
+                    )
 
                 sampled_row[:, step_index] = rows.to(dtype=torch.int64)
                 sampled_col[:, step_index] = cols.to(dtype=torch.int64)

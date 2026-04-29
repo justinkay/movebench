@@ -31,13 +31,9 @@ import movebench.bench.run_state as bench_run_state
 
 PREFERRED_EARLY_STOP_SPLITS = ["test_temporal", "test_individual"]
 _SUPPORTED_METHODS = {
-    "baseline_nomove",
-    "baseline_constvel",
-    "baseline_randomwalk",
-    "issf_linear",
-    "issf_mlp",
-    "deepssf",
-    "moveformer",
+    str(method_key)
+    for method_key, method_cfg in bench_config.METHODS.items()
+    if bool(method_cfg.get("executor"))
 }
 
 

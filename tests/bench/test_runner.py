@@ -62,6 +62,20 @@ def _latest_record(
 
 
 class RunnerPointArtifactsTest(unittest.TestCase):
+    def test_supported_methods_tracks_method_registry(self):
+        run_module = _load_run_module()
+
+        self.assertEqual(
+            run_module._SUPPORTED_METHODS,
+            {
+                str(method_key)
+                for method_key, method_cfg in run_module.bench_config.METHODS.items()
+                if bool(method_cfg.get("executor"))
+            },
+        )
+        self.assertIn("issf_linear_time", run_module._SUPPORTED_METHODS)
+        self.assertIn("issf_mlp_time", run_module._SUPPORTED_METHODS)
+
     def test_resolve_point_artifacts_accepts_schema_4_store(self):
         run_module = _load_run_module()
         plan = make_plan()

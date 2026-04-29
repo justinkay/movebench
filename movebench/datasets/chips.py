@@ -353,6 +353,7 @@ class ChipDataset(Dataset):
         timestamp = row.timestamp
 
         fixed_dst_transform = None
+        fixed_bounds_target = None
         if self.mode == "steps":
             if not isinstance(row, _StepRow):
                 raise RuntimeError(
@@ -371,6 +372,7 @@ class ChipDataset(Dataset):
             right = float(x0) + buffer_m + 0.5 * px
             bottom = float(y0) - buffer_m - 0.5 * px
             top = float(y0) + buffer_m + 0.5 * px
+            fixed_bounds_target = (left, bottom, right, top)
             fixed_dst_transform = from_bounds(
                 left, bottom, right, top, int(W_out), int(H_out)
             )
@@ -388,10 +390,33 @@ class ChipDataset(Dataset):
             ref_raster = self.io.load_chip_group(ref_group, point_id=point_id)
             bounds_latlon = ref_raster.bounds
         else:
-            # No per-point chip groups: use the downloaded tile that contains the point.
-            bounds_latlon = self._tile_bounds_for_point(
-                self._ref_layer, lon=float(row.lon), lat=float(row.lat)
-            )
+            # In step mode, tile-only covariate subsets must still use the local
+            # prediction window so intersecting tiles can be merged correctly.
+            if fixed_bounds_target is not None:
+                to_wgs84 = Transformer.from_crs(
+                    TARGET_CRS, WGS84_CRS, always_xy=True
+                )
+                left, bottom, right, top = fixed_bounds_target
+                corners = [
+                    to_wgs84.transform(left, bottom),
+                    to_wgs84.transform(left, top),
+                    to_wgs84.transform(right, bottom),
+                    to_wgs84.transform(right, top),
+                ]
+                lons = [float(lon) for lon, _lat in corners]
+                lats = [float(lat) for _lon, lat in corners]
+                bounds_latlon = (
+                    min(lons),
+                    min(lats),
+                    max(lons),
+                    max(lats),
+                )
+            else:
+                # No per-point chip groups: use the downloaded tile that contains
+                # the point for point-mode tile lookups.
+                bounds_latlon = self._tile_bounds_for_point(
+                    self._ref_layer, lon=float(row.lon), lat=float(row.lat)
+                )
             ref_group = None
             ref_raster = self.io.load_layer(
                 self._ref_layer, bounds_latlon=bounds_latlon, timestamp=timestamp

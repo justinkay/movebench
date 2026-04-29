@@ -237,6 +237,23 @@ METHODS: dict[str, dict[str, object]] = {
     },
 }
 
+METHODS["issf_linear_time"] = {
+    **METHODS["issf_linear"],
+    "key": "issf_linear_time",
+    "model": {
+        **dict(METHODS["issf_linear"].get("model", {})),
+        "include_time": True,
+    },
+}
+METHODS["issf_mlp_time"] = {
+    **METHODS["issf_mlp"],
+    "key": "issf_mlp_time",
+    "model": {
+        **dict(METHODS["issf_mlp"].get("model", {})),
+        "include_time": True,
+    },
+}
+
 
 def _dedupe_strings(values: list[object], *, label: str) -> list[str]:
     out: list[str] = []
