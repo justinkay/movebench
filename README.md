@@ -66,7 +66,7 @@ movebench pack --studies Accio_967b7813_raw_merged --timescales 12h_lite
 
 **5. Bench:** Benchmark forecasting methods. If you skipped the previous step, the deepSSF runs will stay blocked.
 ```bash
-movebench bench run experiments/main_results.py --studies Accio_967b7813_raw_merged
+movebench bench run experiments/lite.py --studies Accio_967b7813_raw_merged
 ```
 
 You can visualize predictions for your newly trained models with [prediction_examples.ipynb](notebooks/prediction_examples.ipynb) or [recursive_forecasting.ipynb](notebooks/recursive_forecasting.ipynb).
