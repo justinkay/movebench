@@ -18,7 +18,7 @@ pip install -e .
 If you will run benchmark commands, also install the optional bench dependencies:
 
 ```bash
-pip install -e .[bench]
+pip install -e '.[bench]'
 ```
 
 3. If you will be downloading rasters, authenticate with your Google Earth Engine account
@@ -31,12 +31,18 @@ earthengine authenticate --auth_mode=notebook
 
 Download all trajectories in MoveBench v1.0 here (85 MB): https://drive.google.com/file/d/1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y/view?usp=sharing
 
+```bash
+mkdir -p data/raw
+curl "https://drive.usercontent.google.com/download?id=1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y&confirm=xxx" -o data/raw/movebench-csvs-v1.0.zip
+unzip data/raw/movebench-csvs-v1.0.zip -d data/raw
+```
+
 As a quickstart, let's prepare data and train models for some white storks 𓅮 We will use a sample from MoveBench that includes data from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
 
 **1. Ingest:** Ingest MoveBank-formatted CSVs into the repository.
 
 ```
-movebench ingest path/to/movebench-csvs-v1.0/
+movebench ingest data/raw/movebench-csvs-v1.0/
 ```
 
 **2. Download:** Download a set of raster files for the study at some forecasting timescale. To get up and running quickly, lets use the `lite` set of covariates and a 12h forecast horizon.
@@ -55,7 +61,7 @@ movebench extract --layers-config configs/layers/lite_12h_12h.yaml --sampler-con
 
 **4. Pack (Optional: only required for deepSSF):** Create WebDataset shards, which bundle full raster stacks for efficient training/inference of raster-based methods.
 ```bash
-movebench pack --studies Accio_967b7813_raw_merged --timescales 12h
+movebench pack --studies Accio_967b7813_raw_merged --timescales 12h_lite
 ```
 
 **5. Bench:** Benchmark forecasting methods. If you skipped the previous step, the deepSSF runs will stay blocked.
