@@ -23,5 +23,5 @@ layers_configs=(
 
 for layers_config in "${layers_configs[@]}"; do
     echo "Downloading marine (${layers_config##*/})"
-    movebench download --layers-config "${layers_config}" --studies marine "${extra_args[@]}"
+    movebench download gee --layers-config "${layers_config}" --studies marine "${extra_args[@]}"
 done

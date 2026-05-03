@@ -58,6 +58,6 @@ study_ids=(
 for layers_config in "${layers_configs[@]}"; do
     for study_id in "${study_ids[@]}"; do
         echo "Downloading ${study_id} (${layers_config##*/})"
-        movebench download --layers-config "${layers_config}" --studies "${study_id}" "${extra_args[@]}"
+        movebench download gee --layers-config "${layers_config}" --studies "${study_id}" "${extra_args[@]}"
     done
 done

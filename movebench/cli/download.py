@@ -9,6 +9,7 @@ from typing import Any
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
 from movebench.study import Study, resolve_study_selection
+from movebench.layers.download_zip import download_public_studies
 
 
 def _count_present_tiles(tile_stats: dict[str, Any] | None) -> int:
@@ -156,39 +157,27 @@ def _study_failure_details(result: dict[str, Any] | None) -> list[str]:
     return details
 
 
+def _apply_common_path_overrides(args: argparse.Namespace) -> None:
+    if getattr(args, "data_root", None):
+        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
+    if getattr(args, "paths_config", None):
+        os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "download",
-        help="Download rasters for all available studies.",
-        description="Download rasters for all available studies.",
-    )
-    parser.add_argument(
-        "--layers-config",
-        default="configs/layers/all.yaml",
-        help="Path to a layers YAML config (default: configs/layers/all.yaml).",
-    )
-    parser.add_argument(
-        "--splits",
-        nargs="*",
-        default=None,
-        help="Optional list of splits to download (e.g. --splits train test). Default: all splits.",
-    )
-    parser.add_argument(
-        "--n-workers",
-        type=int,
-        default=32,
-        help="Number of multiprocessing workers for chip downloads (default: 32).",
+        help="Download public MoveBench study snapshots or use the GEE downloader.",
+        description=(
+            "Download public MoveBench study snapshots from the published ZIP release. "
+            "Use `movebench download gee ...` for GEE raster downloads."
+        ),
     )
     parser.add_argument(
         "--studies",
         nargs="+",
         default=None,
-        help="Only download these studies or a named set like 'mini'. Default: all available studies.",
-    )
-    parser.add_argument(
-        "--no-skip-existing",
-        action="store_true",
-        help="Do not skip existing rasters on disk.",
+        help="Studies to download, or a named set like 'mini'. Default: all public studies.",
     )
     parser.add_argument(
         "--data-root",
@@ -202,12 +191,62 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     parser.set_defaults(func=run)
 
+    download_subparsers = parser.add_subparsers(dest="download_command", required=False)
+    gee_parser = download_subparsers.add_parser(
+        "gee",
+        help="Download rasters for existing local studies via Google Earth Engine.",
+        description="Download rasters for existing local studies via Google Earth Engine.",
+    )
+    gee_parser.add_argument(
+        "--layers-config",
+        default="configs/layers/all.yaml",
+        help="Path to a layers YAML config (default: configs/layers/all.yaml).",
+    )
+    gee_parser.add_argument(
+        "--splits",
+        nargs="*",
+        default=None,
+        help="Optional list of splits to download (e.g. --splits train test). Default: all splits.",
+    )
+    gee_parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=32,
+        help="Number of multiprocessing workers for chip downloads (default: 32).",
+    )
+    gee_parser.add_argument(
+        "--studies",
+        nargs="+",
+        default=None,
+        help="Only download these studies or a named set like 'mini'. Default: all available studies.",
+    )
+    gee_parser.add_argument(
+        "--no-skip-existing",
+        action="store_true",
+        help="Do not skip existing rasters on disk.",
+    )
+    gee_parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Override MOVEBENCH_DATA_ROOT for this run.",
+    )
+    gee_parser.add_argument(
+        "--paths-config",
+        default=None,
+        help="Override MOVEBENCH_PATHS_CONFIG for this run.",
+    )
+    gee_parser.set_defaults(func=run_gee)
+
 
 def run(args: argparse.Namespace) -> int:
-    if args.data_root:
-        os.environ["MOVEBENCH_DATA_ROOT"] = str(args.data_root)
-    if args.paths_config:
-        os.environ["MOVEBENCH_PATHS_CONFIG"] = str(args.paths_config)
+    if getattr(args, "download_command", None) == "gee":
+        return int(args.func(args))
+    _apply_common_path_overrides(args)
+    return int(download_public_studies(studies=args.studies))
+
+
+def run_gee(args: argparse.Namespace) -> int:
+    _apply_common_path_overrides(args)
 
     all_names = Study.list_available()
     names = resolve_study_selection(args.studies)
