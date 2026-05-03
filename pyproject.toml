@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "PyYAML",
-  "earthengine-api",
   "numpy",
   "pandas",
   "requests",
@@ -25,6 +24,10 @@ dependencies = [
 movebench = "movebench.cli.main:main"
 
 [project.optional-dependencies]
+gee = [
+  "earthengine-api",
+]
+
 bench = [
   "matplotlib",
 ]

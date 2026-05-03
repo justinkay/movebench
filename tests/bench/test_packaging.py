@@ -12,6 +12,8 @@ from unittest import mock
 def _blocking_import(name, globals=None, locals=None, fromlist=(), level=0):
     if name == "mlflow" or name.startswith("mlflow."):
         raise ModuleNotFoundError(name="mlflow")
+    if name == "ee" or name.startswith("ee."):
+        raise ModuleNotFoundError(name="ee")
     return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
 
 
@@ -23,6 +25,16 @@ class BenchPackagingTest(unittest.TestCase):
         pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         bench_extra = list(pyproject["project"]["optional-dependencies"]["bench"])
         self.assertNotIn("mlflow", bench_extra)
+
+    def test_base_dependencies_do_not_depend_on_earthengine_api(self) -> None:
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        dependencies = list(pyproject["project"]["dependencies"])
+        self.assertNotIn("earthengine-api", dependencies)
+
+    def test_gee_extra_depends_on_earthengine_api(self) -> None:
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        gee_extra = list(pyproject["project"]["optional-dependencies"]["gee"])
+        self.assertIn("earthengine-api", gee_extra)
 
     def test_bench_modules_import_without_mlflow(self) -> None:
         for module_name in [

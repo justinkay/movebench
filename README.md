@@ -21,7 +21,13 @@ If you will run benchmark commands, also install the optional bench dependencies
 pip install -e '.[bench]'
 ```
 
-3. If you will be downloading rasters, authenticate with your Google Earth Engine account
+If you will be downloading rasters with `movebench download gee`, also install the optional GEE dependencies:
+
+```bash
+pip install -e .[gee]
+```
+
+3. If you will be downloading rasters with `movebench download gee`, authenticate with your Google Earth Engine account
 
 ```bash
 earthengine authenticate --auth_mode=notebook
