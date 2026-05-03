@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from tqdm import tqdm
 
 from movebench import paths
 from movebench.download_reports import _write_json_atomic
@@ -289,41 +290,54 @@ def _extract_entries(
     try:
         with zipfile.ZipFile(reader) as zf:
             info_by_name = {str(info.filename): info for info in zf.infolist()}
-            for entry in pending:
-                info = info_by_name.get(str(entry["archive_path"]))
-                if info is None:
-                    failures.append(
-                        {
-                            "relative_path": str(entry["relative_path"]),
-                            "size": int(entry["size"]),
-                            "error": "missing_archive_entry",
-                        }
-                    )
-                    continue
-                out_path = Path(study_dir) / str(entry["relative_path"])
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                os.chmod(out_path.parent, 0o775)
-                tmp_path = out_path.with_name(f"{out_path.name}.part")
-                if tmp_path.exists():
-                    tmp_path.unlink()
-                try:
-                    with zf.open(info) as src, open(tmp_path, "wb") as dst:
-                        shutil.copyfileobj(src, dst, length=1024 * 1024)
-                    mode = int(entry["mode"]) if int(entry["mode"]) > 0 else 0o664
-                    os.chmod(tmp_path, mode | 0o660)
-                    tmp_path.replace(out_path)
-                    os.chmod(out_path, mode | 0o660)
-                    downloaded += 1
-                except Exception as e:
+            with tqdm(
+                total=sum(int(entry["size"]) for entry in pending),
+                desc=str(archive["study_id"]),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                dynamic_ncols=True,
+            ) as pbar:
+                for entry in pending:
+                    info = info_by_name.get(str(entry["archive_path"]))
+                    if info is None:
+                        failures.append(
+                            {
+                                "relative_path": str(entry["relative_path"]),
+                                "size": int(entry["size"]),
+                                "error": "missing_archive_entry",
+                            }
+                        )
+                        continue
+                    out_path = Path(study_dir) / str(entry["relative_path"])
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.chmod(out_path.parent, 0o775)
+                    tmp_path = out_path.with_name(f"{out_path.name}.part")
                     if tmp_path.exists():
                         tmp_path.unlink()
-                    failures.append(
-                        {
-                            "relative_path": str(entry["relative_path"]),
-                            "size": int(entry["size"]),
-                            "error": str(e),
-                        }
-                    )
+                    try:
+                        with zf.open(info) as src, open(tmp_path, "wb") as dst:
+                            while True:
+                                chunk = src.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                dst.write(chunk)
+                                pbar.update(len(chunk))
+                        mode = int(entry["mode"]) if int(entry["mode"]) > 0 else 0o664
+                        os.chmod(tmp_path, mode | 0o660)
+                        tmp_path.replace(out_path)
+                        os.chmod(out_path, mode | 0o660)
+                        downloaded += 1
+                    except Exception as e:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        failures.append(
+                            {
+                                "relative_path": str(entry["relative_path"]),
+                                "size": int(entry["size"]),
+                                "error": str(e),
+                            }
+                        )
     finally:
         reader.close()
     return downloaded, failures
