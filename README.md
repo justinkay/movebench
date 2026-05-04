@@ -140,33 +140,72 @@ movebench download gee \
   --layers-config configs/layers/my_layers.yaml
 ```
 
-Once the rasters are on disk, the downstream commands are the same:
+## Running experiments
+
+**Extract point features:** Run `movebench extract` with the layer config(s) you want to use for modeling, and a sampler config:
+
+```bash
+movebench extract \
+  --layers-config configs/layers/my_layers.yaml \
+  --sampler-config configs/samplers/issf_defaults.yaml \
+  --studies my_study
+```
+
+You can repeat `--layers-config` to prepare multiple layer sets.
+
+**Pack deepSSF shards (Optional):** This is only needed if you want to run deepSSF.
+
+```bash
+movebench pack --studies my_study --timescales 12h --layers-config configs/layers/my_layers.yaml
+```
+
+For the built-in benchmark timescales, you can omit `--layers-config` and pack directly from the defaults:
+
+```bash
+movebench pack --studies mini --timescales 1h 12h 1d 7d
+```
+
+**Run experiments:** Experiment definitions live in [experiments](experiments/). For example, to run the full benchmark on the `mini` set:
+
+```bash
+movebench bench run experiments/main_results.py --studies mini
+```
+
+Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer.py`.
+
+**Inspect benchmark state (Optional):**
+
+```bash
+movebench bench plan experiments/main_results.py --studies mini
+movebench bench summary --studies mini
+movebench bench status --studies mini
+movebench bench report
+```
+
 
 ## Slurm
 
 `movebench ingest` and the download commands run locally. The heavier downstream steps have Slurm launchers that accept shared defaults via `--slurm-config`.
 
+You will need to create your own slurm config that matches your configuration. You can find examples in [configs/slurm/](configs/slurm/).
+
 ```bash
 movebench slurm extract \
   --layers-config configs/layers/all_ae_1h_1h.yaml \
-  --layers-config configs/layers/all_ae_plus_marine_1h_1h.yaml \
   --layers-config configs/layers/all_ae_12h_12h.yaml \
-  --layers-config configs/layers/all_ae_plus_marine_12h_12h.yaml \
   --layers-config configs/layers/all_ae_1d_1d.yaml \
-  --layers-config configs/layers/all_ae_plus_marine_1d_1d.yaml \
   --layers-config configs/layers/all_ae_7d_7d.yaml \
-  --layers-config configs/layers/all_ae_plus_marine_7d_7d.yaml \
   --sampler-config configs/samplers/issf_defaults.yaml \
   --studies mini \
-  --slurm-config configs/slurm/beery.yaml
+  --slurm-config path/to/slurm.yaml
 
 movebench slurm pack \
   --studies mini \
   --timescales 1h 12h 1d 7d \
-  --slurm-config configs/slurm/beery.yaml
+  --slurm-config path/to/slurm.yaml
 
 movebench slurm bench run \
   experiments/main_results.py \
   --studies mini \
-  --slurm-config configs/slurm/beery.yaml
+  --slurm-config path/to/slurm.yaml
 ```
