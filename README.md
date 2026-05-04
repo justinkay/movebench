@@ -77,10 +77,49 @@ pip install -e '.[plotting]'
 There are known issues with OpenMP during deepSSF training in the notebook workflow on some platforms; if you run into issues, the easiest workaround is to use the CLI workflow for training.
 
 
+
+
+## Full downloads
+
+Use `movebench download` to download published MoveBench studies.
+
+**Download all covariates for all studies.** This is massive (7 TB) and will take a very long time to transfer. Consider downloading a smaller subset (detailed below):
+
+```bash
+movebench download --studies all
+```
+
+Alternatively, you can use `--studies mini` to download the MoveBench-Mini set (10 studies, ~500GB for all covariates), or a comma separated list of named studies (e.g., in the quickstart, we used `--studies Accio_967b7813_raw_merged`). You can find the full list of named studies and how large they are with the full covariate set [here](https://data.csail.mit.edu/movebench/index.html).
+
+
+**To download a subset of covaraites, use layer configs:** This is useful for smaller workflows. You can find some examples in [configs/layers](configs/layers/). Any subset of the full published set in MoveBench can be downloaded directly from the archive. For example, to fetch only the 12h `lite` covariates for the quickstart study:
+
+```bash
+movebench download \
+  --studies Accio_967b7813_raw_merged \
+  --layers-config configs/layers/lite_12h_12h.yaml \
+  --n-workers 4
+```
+
+## Starting from Movebank CSVs
+
+You can also start from the full MoveBench CSV bundle [here](https://drive.google.com/file/d/1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y/view?usp=sharing) or from your own Movebank-formatted CSVs.
+
+**Ingest one CSV:**
+
+```bash
+movebench ingest /path/to/study.csv --study-id my_study
+```
+
+**Ingest a directory of CSVs:**
+
+```bash
+movebench ingest /path/to/movebench_csvs
+```
+
 ## Downloading with GEE
 
-
-If you will be downloading rasters with `movebench download gee`, also install the optional GEE dependencies and authenticate with your Google Earth Engine account:
+If you want to download rasters for your own study, or download different rasters for the MoveBench studies, or for some other reason want to use Google Earth Engine to perform downloads, use `movebench download gee`. You will first need to the optional GEE dependencies and authenticate with your Google Earth Engine account:
 
 ```bash
 pip install -e '.[gee]'
@@ -90,11 +129,44 @@ pip install -e '.[gee]'
 earthengine authenticate --auth_mode=notebook
 ```
 
-## Slurm
+`movebench download gee` works on local studies that already exist under `data/rasters/studies`, whether they came from `movebench ingest` or from the public ZIP workflow.
 
-The Slurm launchers mirror the local `extract`, `pack`, and `bench run` commands and accept shared defaults via `--slurm-config`.
+
+To define a custom layer set, start from one of the YAMLs in `configs/layers/`, copy it, and edit the `raster_params`, `layers`, and `chip_groups` sections. `configs/layers/all.yaml` is a good general starting point, and `configs/layers/lite_12h_12h.yaml` is a minimal example. Then pass the new file to `movebench download gee`:
 
 ```bash
-movebench slurm pack --studies all --timescales 1h --slurm-config configs/slurm/beery.yaml
-movebench slurm bench run experiments/main_results.py --studies mini --slurm-config configs/slurm/beery.yaml
+movebench download gee \
+  --studies my_study \
+  --layers-config configs/layers/my_layers.yaml
+```
+
+Once the rasters are on disk, the downstream commands are the same:
+
+## Slurm
+
+`movebench ingest` and the download commands run locally. The heavier downstream steps have Slurm launchers that accept shared defaults via `--slurm-config`.
+
+```bash
+movebench slurm extract \
+  --layers-config configs/layers/all_ae_1h_1h.yaml \
+  --layers-config configs/layers/all_ae_plus_marine_1h_1h.yaml \
+  --layers-config configs/layers/all_ae_12h_12h.yaml \
+  --layers-config configs/layers/all_ae_plus_marine_12h_12h.yaml \
+  --layers-config configs/layers/all_ae_1d_1d.yaml \
+  --layers-config configs/layers/all_ae_plus_marine_1d_1d.yaml \
+  --layers-config configs/layers/all_ae_7d_7d.yaml \
+  --layers-config configs/layers/all_ae_plus_marine_7d_7d.yaml \
+  --sampler-config configs/samplers/issf_defaults.yaml \
+  --studies mini \
+  --slurm-config configs/slurm/beery.yaml
+
+movebench slurm pack \
+  --studies mini \
+  --timescales 1h 12h 1d 7d \
+  --slurm-config configs/slurm/beery.yaml
+
+movebench slurm bench run \
+  experiments/main_results.py \
+  --studies mini \
+  --slurm-config configs/slurm/beery.yaml
 ```
