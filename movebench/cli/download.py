@@ -189,6 +189,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Override MOVEBENCH_PATHS_CONFIG for this run.",
     )
+    parser.add_argument(
+        "--layers-config",
+        default=None,
+        help=(
+            "Optional layers config filter for public ZIP downloads. "
+            "Only rasters needed for this config will be extracted."
+        ),
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of parallel HTTP workers for public ZIP downloads "
+            "(default: 1; use >1 to enable parallel fetching)."
+        ),
+    )
     parser.set_defaults(func=run)
 
     download_subparsers = parser.add_subparsers(dest="download_command", required=False)
@@ -242,7 +259,14 @@ def run(args: argparse.Namespace) -> int:
     if getattr(args, "download_command", None) == "gee":
         return int(args.func(args))
     _apply_common_path_overrides(args)
-    return int(download_public_studies(studies=args.studies))
+    return int(
+        download_public_studies(
+            studies=args.studies,
+            range_workers=args.n_workers,
+            range_prefetch_chunks=args.n_workers,
+            layers_config=args.layers_config,
+        )
+    )
 
 
 def run_gee(args: argparse.Namespace) -> int:

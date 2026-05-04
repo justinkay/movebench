@@ -6,16 +6,21 @@ import io
 import json
 import os
 import shutil
+import threading
 import zipfile
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 
 from movebench import paths
 from movebench.download_reports import _write_json_atomic
+from movebench.layers import REGISTRY
+from movebench.layers.config import load_layers_config
 from movebench.study import NAMED_STUDY_SETS
 
 PUBLIC_MANIFEST_URL = "https://data.csail.mit.edu/movebench/movebench_zips_v1_manifest.csv"
@@ -31,14 +36,31 @@ class _RangeReader:
         size: int,
         chunk_size: int = 8 * 1024 * 1024,
         max_cached_chunks: int = 8,
+        n_workers: int = 1,
+        prefetch_chunks: int | None = None,
     ) -> None:
         self.session = session
         self.url = str(url)
         self.size = int(size)
         self.chunk_size = int(chunk_size)
         self.max_cached_chunks = int(max(max_cached_chunks, 1))
+        self.n_workers = int(max(n_workers, 1))
+        if prefetch_chunks is None:
+            prefetch_chunks = self.n_workers if self.n_workers > 1 else 0
+        self.prefetch_chunks = int(max(prefetch_chunks, 0))
         self.pos = 0
         self.cache: OrderedDict[int, bytes] = OrderedDict()
+        self.n_chunks = max((self.size + self.chunk_size - 1) // self.chunk_size, 0)
+        self.base_headers = dict(session.headers)
+        self._thread_local = threading.local()
+        self._sessions: list[requests.Session] = []
+        self._sessions_lock = threading.Lock()
+        self._executor = (
+            ThreadPoolExecutor(max_workers=self.n_workers)
+            if self.n_workers > 1 and self.prefetch_chunks > 0
+            else None
+        )
+        self._futures: dict[int, Future[bytes]] = {}
 
     def seekable(self) -> bool:
         return True
@@ -73,6 +95,7 @@ class _RangeReader:
         out = bytearray()
         while self.pos < end:
             chunk_index = self.pos // self.chunk_size
+            self._prefetch_from(chunk_index)
             chunk = self._get_chunk(chunk_index)
             chunk_start = chunk_index * self.chunk_size
             rel_start = self.pos - chunk_start
@@ -82,16 +105,47 @@ class _RangeReader:
         return bytes(out)
 
     def close(self) -> None:
+        for future in self._futures.values():
+            future.cancel()
+        self._futures.clear()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        for session in self._sessions:
+            session.close()
         self.cache.clear()
 
-    def _get_chunk(self, chunk_index: int) -> bytes:
-        cached = self.cache.get(int(chunk_index))
-        if cached is not None:
-            self.cache.move_to_end(int(chunk_index))
-            return cached
+    def _store_chunk(self, chunk_index: int, chunk: bytes) -> bytes:
+        self.cache[int(chunk_index)] = chunk
+        self.cache.move_to_end(int(chunk_index))
+        while len(self.cache) > self.max_cached_chunks:
+            self.cache.popitem(last=False)
+        return chunk
+
+    def _thread_session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is not None:
+            return session
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=self.n_workers,
+            pool_maxsize=self.n_workers,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers.update(self.base_headers)
+        self._thread_local.session = session
+        with self._sessions_lock:
+            self._sessions.append(session)
+        return session
+
+    def _fetch_chunk_with_session(
+        self,
+        session: requests.Session,
+        chunk_index: int,
+    ) -> bytes:
         start = int(chunk_index) * self.chunk_size
         end = min(start + self.chunk_size, self.size) - 1
-        response = self.session.get(
+        response = session.get(
             self.url,
             headers={"Range": f"bytes={start}-{end}"},
             timeout=120,
@@ -103,10 +157,45 @@ class _RangeReader:
                 f"Expected {end - start + 1} bytes from {self.url} range "
                 f"{start}-{end}, got {len(chunk)}"
             )
-        self.cache[int(chunk_index)] = chunk
-        while len(self.cache) > self.max_cached_chunks:
-            self.cache.popitem(last=False)
         return chunk
+
+    def _submit_chunk(self, chunk_index: int) -> None:
+        if self._executor is None:
+            return
+        if (
+            chunk_index < 0
+            or chunk_index >= self.n_chunks
+            or int(chunk_index) in self.cache
+            or int(chunk_index) in self._futures
+        ):
+            return
+        self._futures[int(chunk_index)] = self._executor.submit(
+            self._fetch_chunk_async,
+            int(chunk_index),
+        )
+
+    def _fetch_chunk_async(self, chunk_index: int) -> bytes:
+        return self._fetch_chunk_with_session(self._thread_session(), int(chunk_index))
+
+    def _prefetch_from(self, chunk_index: int) -> None:
+        if self._executor is None:
+            return
+        stop = min(int(chunk_index) + self.prefetch_chunks, self.n_chunks)
+        for index in range(int(chunk_index), stop):
+            self._submit_chunk(index)
+
+    def _get_chunk(self, chunk_index: int) -> bytes:
+        cached = self.cache.get(int(chunk_index))
+        if cached is not None:
+            self.cache.move_to_end(int(chunk_index))
+            return cached
+        future = self._futures.pop(int(chunk_index), None)
+        if future is not None:
+            return self._store_chunk(int(chunk_index), future.result())
+        return self._store_chunk(
+            int(chunk_index),
+            self._fetch_chunk_with_session(self.session, int(chunk_index)),
+        )
 
 
 def _utc_now_iso() -> str:
@@ -208,12 +297,20 @@ def _archive_signature(record: dict[str, object], response: requests.Response) -
     return payload
 
 
-def _load_entries(session: requests.Session, archive: dict[str, object]) -> list[dict[str, object]]:
+def _load_entries(
+    session: requests.Session,
+    archive: dict[str, object],
+    *,
+    range_workers: int = 1,
+    range_prefetch_chunks: int | None = None,
+) -> list[dict[str, object]]:
     prefix = f"{archive['study_id']}/"
     reader = _RangeReader(
         session=session,
         url=str(archive["content_url"]),
         size=int(archive["content_length"]),
+        n_workers=range_workers,
+        prefetch_chunks=range_prefetch_chunks,
     )
     try:
         with zipfile.ZipFile(reader) as zf:
@@ -255,6 +352,75 @@ def _entry_exists(study_dir: Path, entry: dict[str, object]) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size == int(entry["size"])
 
 
+def _subset_selection(
+    layers_config: str | Path | None,
+) -> dict[str, object] | None:
+    if layers_config is None:
+        return None
+
+    plan = REGISTRY.resolve(load_layers_config(layers_config))
+    needed_tile_layers: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(layer: str) -> None:
+        if layer in visited:
+            return
+        visited.add(layer)
+        spec = REGISTRY.get(layer)
+        if spec.source == "gee_tile":
+            needed_tile_layers.add(layer)
+            return
+        if spec.source == "derived":
+            for parent in plan.derived_dependencies.get(layer, []):
+                visit(parent)
+
+    for layer in plan.layers_in_order:
+        visit(layer)
+
+    return {
+        "rasters_hash": str(plan.rasters_hash),
+        "chip_groups": sorted(str(name) for name in plan.chip_groups.keys()),
+        "tile_layers": sorted(needed_tile_layers),
+    }
+
+
+def _filter_entries_for_selection(
+    entries: list[dict[str, object]],
+    selection: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    if selection is None:
+        return list(entries)
+
+    rasters_hash = str(selection["rasters_hash"])
+    chip_groups = set(str(name) for name in selection["chip_groups"])
+    tile_layers = set(str(name) for name in selection["tile_layers"])
+    rasters_prefix = Path("rasters") / rasters_hash
+    out: list[dict[str, object]] = []
+
+    for entry in entries:
+        rel = Path(str(entry["relative_path"]))
+        parts = rel.parts
+        if parts in [("trajectories.csv",), ("manifest.json",)]:
+            out.append(entry)
+            continue
+        if len(parts) < 2 or parts[0] != "rasters" or parts[1] != rasters_hash:
+            continue
+        if len(parts) == 3 and parts[2] == "chips_meta.json":
+            out.append(entry)
+            continue
+        if len(parts) >= 3 and rel.is_relative_to(rasters_prefix / "download_reports"):
+            out.append(entry)
+            continue
+        if len(parts) >= 4 and parts[2] == "chips" and parts[3] in chip_groups:
+            out.append(entry)
+            continue
+        if len(parts) >= 4 and parts[2] == "tiles" and parts[3] in tile_layers:
+            out.append(entry)
+            continue
+
+    return out
+
+
 def _cleanup_old_entries(study_dir: Path, entries: list[dict[str, object]]) -> None:
     for entry in entries:
         path = Path(study_dir) / str(entry["relative_path"])
@@ -277,6 +443,9 @@ def _extract_entries(
     session: requests.Session,
     archive: dict[str, object],
     pending: list[dict[str, object]],
+    *,
+    range_workers: int = 1,
+    range_prefetch_chunks: int | None = None,
 ) -> tuple[int, list[dict[str, object]]]:
     if not pending:
         return 0, []
@@ -284,6 +453,8 @@ def _extract_entries(
         session=session,
         url=str(archive["content_url"]),
         size=int(archive["content_length"]),
+        n_workers=range_workers,
+        prefetch_chunks=range_prefetch_chunks,
     )
     downloaded = 0
     failures: list[dict[str, object]] = []
@@ -348,6 +519,9 @@ def install_public_study(
     study_dir: Path,
     session: requests.Session,
     record: dict[str, object],
+    range_workers: int = 1,
+    range_prefetch_chunks: int | None = None,
+    layers_config: str | Path | None = None,
 ) -> dict[str, object]:
     study_dir = Path(study_dir)
     study_dir.mkdir(parents=True, exist_ok=True)
@@ -359,6 +533,7 @@ def install_public_study(
     response = session.head(str(record["content_url"]), allow_redirects=True, timeout=120)
     response.raise_for_status()
     archive = _archive_signature(record, response)
+    selection = _subset_selection(layers_config)
 
     state = {}
     if state_path.exists():
@@ -369,6 +544,7 @@ def install_public_study(
     if (
         state.get("archive", {}).get("signature") == archive["signature"]
         and state.get("status") == "ok"
+        and state.get("selection") == selection
     ):
         return {
             "status": "ok",
@@ -379,18 +555,28 @@ def install_public_study(
             "signature": str(archive["signature"]),
         }
 
-    entries = _load_entries(session, archive)
+    archive_entries = _load_entries(
+        session,
+        archive,
+        range_workers=range_workers,
+        range_prefetch_chunks=range_prefetch_chunks,
+    )
+    entries = _filter_entries_for_selection(archive_entries, selection)
     if (
         state.get("archive", {}).get("signature")
         and state.get("archive", {}).get("signature") != archive["signature"]
     ):
-        _cleanup_old_entries(study_dir, list(state.get("entries", [])))
+        _cleanup_old_entries(
+            study_dir,
+            list(state.get("archive_entries", state.get("entries", []))),
+        )
 
     pending = [entry for entry in entries if not _entry_exists(study_dir, entry)]
     if (
         state.get("archive", {}).get("signature") == archive["signature"]
         and state.get("status") == "failed"
         and report_path.exists()
+        and state.get("selection") == selection
     ):
         report = json.loads(report_path.read_text(encoding="utf-8"))
         failure_paths = {
@@ -409,13 +595,22 @@ def install_public_study(
     state = {
         "schema_version": "1",
         "archive": archive,
+        "archive_entries": archive_entries,
         "entries": entries,
+        "selection": selection,
         "status": "running",
         "started_at": started_at,
     }
     _write_json_atomic(state_path, state)
 
-    downloaded, failures = _extract_entries(study_dir, session, archive, pending)
+    downloaded, failures = _extract_entries(
+        study_dir,
+        session,
+        archive,
+        pending,
+        range_workers=range_workers,
+        range_prefetch_chunks=range_prefetch_chunks,
+    )
     completed_at = _utc_now_iso()
     existing = max(len(entries) - downloaded - len(failures), 0)
     status = "failed" if failures else "ok"
@@ -423,6 +618,7 @@ def install_public_study(
         "schema_version": "1",
         "study_id": str(record["study_id"]),
         "archive": archive,
+        "selection": selection,
         "requested_file_count": len(entries),
         "started_at": started_at,
         "completed_at": completed_at,
@@ -436,7 +632,9 @@ def install_public_study(
     state = {
         "schema_version": "1",
         "archive": archive,
+        "archive_entries": archive_entries,
         "entries": entries,
+        "selection": selection,
         "status": status,
         "started_at": started_at,
         "completed_at": completed_at,
@@ -452,7 +650,13 @@ def install_public_study(
     }
 
 
-def download_public_studies(*, studies: str | list[str] | None) -> int:
+def download_public_studies(
+    *,
+    studies: str | list[str] | None,
+    range_workers: int = 1,
+    range_prefetch_chunks: int | None = None,
+    layers_config: str | Path | None = None,
+) -> int:
     with requests.Session() as session:
         records = fetch_public_manifest(session=session)
         record_by_study = {
@@ -472,6 +676,18 @@ def download_public_studies(*, studies: str | list[str] | None) -> int:
         print(f"Public manifest: {PUBLIC_MANIFEST_URL}")
         print(f"Selected size: {_format_bytes(total_size_bytes)}")
         print(f"Destination root: {paths.studies_root()}")
+        if layers_config is not None:
+            print(f"Layers config filter: {layers_config}")
+        if int(range_workers) > 1:
+            effective_prefetch = (
+                int(range_prefetch_chunks)
+                if range_prefetch_chunks is not None
+                else int(range_workers)
+            )
+            print(
+                "Parallel range fetching: "
+                f"{int(range_workers)} workers, {effective_prefetch} in-flight chunks"
+            )
         print()
         for i, study_id in enumerate(selected, 1):
             if study_id not in record_by_study:
@@ -483,6 +699,9 @@ def download_public_studies(*, studies: str | list[str] | None) -> int:
                     study_dir=paths.study_dir(study_id),
                     session=session,
                     record=record_by_study[study_id],
+                    range_workers=range_workers,
+                    range_prefetch_chunks=range_prefetch_chunks,
+                    layers_config=layers_config,
                 )
                 failed = int(result["failed"])
                 status = "WARN" if failed > 0 else "OK"

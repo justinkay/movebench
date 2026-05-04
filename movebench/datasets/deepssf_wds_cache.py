@@ -95,6 +95,10 @@ _MANIFEST_SCHEMA_VERSION = "3"
 _PAYLOAD_FORMAT = "pth"
 
 
+def _collate_first(batch: list[Any]) -> Any:
+    return batch[0]
+
+
 def write_deepssf_wds_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -342,7 +346,7 @@ def build_deepssf_wds_cache(
         batch_size=1,
         shuffle=False,
         num_workers=int(num_workers),
-        collate_fn=lambda batch: batch[0],
+        collate_fn=_collate_first,
         drop_last=False,
     )
 
