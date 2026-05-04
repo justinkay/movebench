@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from movebench import Study
-from movebench.bench.config import deepssf_cache_hash_for_split, resolve_timescale
+from movebench.bench.config import resolve_timescale
 from movebench.datasets.deepssf_wds_cache import (
     cache_dir_for_study,
     deepssf_wds_cache_hash,
@@ -14,6 +14,8 @@ from movebench.datasets.deepssf_wds_cache import (
     read_deepssf_wds_manifest_if_complete,
 )
 from movebench.features.points import load_point_store_manifest, point_store_train_stats_path
+from movebench.layers import REGISTRY
+from movebench.layers.config import load_layers_config
 from movebench.study import normalize_split_keys, resolve_study_selection
 
 
@@ -69,6 +71,7 @@ def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional split keys. Accepts repeated values or comma-separated lists.",
     )
+    parser.add_argument("--layers-config", type=str, default=None)
     parser.add_argument("--samples-per-shard", type=int, default=None)
     parser.add_argument(
         "--spatial-dtype",
@@ -135,8 +138,6 @@ def _job_option(job: PackJob, key: str, fallback: object) -> object:
 
 def _expected_cache_hash(
     *,
-    study_id: str,
-    timescale_key: str,
     timescale: dict[str, object],
     split: str,
     options: dict[str, object],
@@ -145,13 +146,6 @@ def _expected_cache_hash(
     spatial_dtype = options.get("spatial_dtype")
     target_dtype = options.get("target_dtype")
     compression = options.get("compression")
-    if (
-        samples_per_shard is None
-        and spatial_dtype is None
-        and target_dtype is None
-        and compression is None
-    ):
-        return deepssf_cache_hash_for_split(timescale_key, split, study_id=study_id)
     return deepssf_wds_cache_hash(
         rasters_hash=str(timescale["rasters_hash"]),
         band_ids=list(timescale["all_band_ids"]),
@@ -172,11 +166,29 @@ def _cache_split_complete(cache_dir: Path) -> bool:
     return read_deepssf_wds_manifest_if_complete(cache_dir) is not None
 
 
+def _resolve_pack_timescale(
+    timescale_key: str,
+    *,
+    study_id: str,
+    layers_config: str | None,
+) -> dict[str, object]:
+    timescale = dict(resolve_timescale(str(timescale_key), study_id=str(study_id)))
+    if layers_config is None:
+        return timescale
+    plan = REGISTRY.resolve(load_layers_config(str(layers_config)))
+    timescale["layers_config"] = str(layers_config)
+    timescale["plan"] = plan
+    timescale["rasters_hash"] = str(plan.rasters_hash)
+    timescale["all_band_ids"] = plan.band_ids_in_order()
+    return timescale
+
+
 def resolve_pack_jobs(
     *,
     studies: list[str],
     timescales: list[str],
     splits: list[str] | None,
+    layers_config: str | None = None,
     samples_per_shard: int | None = None,
     spatial_dtype: str | None = None,
     target_dtype: str | None = None,
@@ -207,12 +219,14 @@ def resolve_pack_jobs(
                 [str(split) for split in study.split_inventory()["split_keys"]]
             ) or []
         for timescale_key in _split_arg_values(timescales) or []:
-            timescale = resolve_timescale(str(timescale_key), study_id=str(study_id))
+            timescale = _resolve_pack_timescale(
+                str(timescale_key),
+                study_id=str(study_id),
+                layers_config=layers_config,
+            )
             pending_splits: list[str] = []
             for split in study_splits:
                 cache_hash = _expected_cache_hash(
-                    study_id=str(study_id),
-                    timescale_key=str(timescale_key),
                     timescale=timescale,
                     split=str(split),
                     options=options,
@@ -314,6 +328,7 @@ def run_local_pack(
     studies: list[str],
     timescales: list[str],
     splits: list[str] | None,
+    layers_config: str | None = None,
     samples_per_shard: int | None = None,
     spatial_dtype: str | None = None,
     target_dtype: str | None = None,
@@ -329,6 +344,8 @@ def run_local_pack(
         "timescales": timescales,
         "splits": normalized_splits,
     }
+    if layers_config is not None:
+        resolve_kwargs["layers_config"] = layers_config
     if samples_per_shard is not None:
         resolve_kwargs["samples_per_shard"] = samples_per_shard
     if spatial_dtype is not None:
@@ -366,6 +383,7 @@ def run_local_pack_from_args(args: argparse.Namespace) -> int:
         studies=list(args.studies),
         timescales=list(args.timescales),
         splits=args.splits,
+        layers_config=args.layers_config,
         samples_per_shard=args.samples_per_shard,
         spatial_dtype=args.spatial_dtype,
         target_dtype=args.target_dtype,

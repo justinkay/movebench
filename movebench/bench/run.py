@@ -177,6 +177,85 @@ def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[
     }
 
 
+def _load_deepssf_cache_entry(
+    cache_dir: Path,
+    *,
+    split: str,
+) -> tuple[dict[str, object] | None, str | None]:
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None, f"missing deepSSF cache manifest for {split}"
+    if not list_deepssf_wds_shards(cache_dir):
+        return None, f"missing deepSSF shards for {split}"
+    try:
+        manifest = read_deepssf_wds_manifest(manifest_path)
+    except Exception as exc:
+        return None, f"invalid deepSSF cache manifest for {split}: {exc}"
+    if str(manifest.get("sample_identity", "")) != "point_id_start":
+        return None, (
+            f"deepSSF cache for {split} is missing sample_identity=point_id_start; "
+            "rebuild the cache"
+        )
+    return {
+        "cache_dir": cache_dir,
+        "manifest_path": manifest_path,
+        "manifest": manifest,
+    }, None
+
+
+def _compatible_deepssf_cache_candidates(
+    *,
+    study_id: str,
+    split: str,
+    expected_output_hw: tuple[int, int],
+    expected_rasters_hash: str,
+    requested_band_ids: list[str],
+    required_cache_band_ids: list[str] | None = None,
+) -> list[dict[str, object]]:
+    split = canonicalize_split_key(split)
+    split_dir = paths.study_dir(str(study_id)) / "cache" / "deepssf_wds" / str(split)
+    if not split_dir.exists():
+        return []
+    candidates: list[dict[str, object]] = []
+    for cache_dir in sorted(p for p in split_dir.iterdir() if p.is_dir()):
+        entry, _ = _load_deepssf_cache_entry(cache_dir, split=str(split))
+        if entry is None:
+            continue
+        manifest = dict(entry["manifest"])
+        if str(manifest.get("rasters_hash", "")) != str(expected_rasters_hash):
+            continue
+        manifest_band_ids = manifest.get("band_ids")
+        if not isinstance(manifest_band_ids, list) or not manifest_band_ids:
+            continue
+        cache_band_ids = [str(band_id) for band_id in manifest_band_ids]
+        if int(manifest["env_channels"]) != len(cache_band_ids):
+            continue
+        split_output_hw = tuple(int(v) for v in manifest["output_hw"])
+        if split_output_hw != expected_output_hw:
+            continue
+        if required_cache_band_ids is not None:
+            if cache_band_ids != required_cache_band_ids:
+                continue
+        elif any(band_id not in cache_band_ids for band_id in requested_band_ids):
+            continue
+        candidates.append(
+            {
+                **entry,
+                "cache_band_ids": cache_band_ids,
+                "channel_indices": [
+                    cache_band_ids.index(band_id) for band_id in requested_band_ids
+                ],
+            }
+        )
+    candidates.sort(
+        key=lambda candidate: (
+            len(candidate["cache_band_ids"]),
+            str(candidate["manifest_path"]),
+        )
+    )
+    return candidates
+
+
 def _preferred_split(splits: list[str]) -> str | None:
     if not splits:
         return None
@@ -261,6 +340,7 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
     return {
         "study_id": study_id,
         "timescale": timescale_key,
+        "has_train": bool(split_info["has_train"]),
         "held_out_splits": held_out_splits,
         "available_point_splits": point_splits_available,
         "available_raster_splits": raster_splits_available,
@@ -373,9 +453,11 @@ def expand_experiment(
                     method = bench_config.METHODS[str(method_key)]
                     requirement = str(method["artifact_requirement"])
                     if requirement == "deepssf_cache":
-                        evaluation_splits = list(readiness["available_raster_splits"])
-                        early_stop_split_key = readiness["early_stop_raster_split"]
-                        runnable = bool(readiness["raster_ready"])
+                        evaluation_splits = list(readiness["held_out_splits"])
+                        early_stop_split_key = _preferred_split(evaluation_splits)
+                        runnable = bool(
+                            readiness["has_train"] and evaluation_splits
+                        )
                     elif requirement == "points":
                         evaluation_splits = list(readiness["available_point_splits"])
                         early_stop_split_key = readiness["early_stop_point_split"]
@@ -606,10 +688,13 @@ def _resolve_deepssf_cache_artifacts(
         }
     channel_indices = [all_band_ids.index(band_id) for band_id in band_ids]
 
+    requested_splits = ["train", *list(run_payload["evaluation_split_keys"])]
     cache_manifests: dict[str, dict[str, object]] = {}
     reference_output_hw: tuple[int, int] | None = None
     reference_pixel_size_m: float | None = None
-    for split in ["train", *list(run_payload["evaluation_split_keys"])]:
+    exact_failure_reason: str | None = None
+    exact_cache_manifests: dict[str, dict[str, object]] = {}
+    for split in requested_splits:
         cache_hash = bench_config.deepssf_cache_hash_for_split(
             str(run_payload["timescale"]),
             str(split),
@@ -622,90 +707,115 @@ def _resolve_deepssf_cache_artifacts(
             / str(split)
             / str(cache_hash)
         )
-        manifest_path = cache_dir / "manifest.json"
-        if not manifest_path.exists():
-            return {
-                "status": "blocked",
-                "reason": f"missing deepSSF cache manifest for {split}",
-            }
-        if not list_deepssf_wds_shards(cache_dir):
-            return {
-                "status": "blocked",
-                "reason": f"missing deepSSF shards for {split}",
-            }
-        try:
-            manifest = read_deepssf_wds_manifest(manifest_path)
-        except Exception as exc:
-            return {
-                "status": "blocked",
-                "reason": f"invalid deepSSF cache manifest for {split}: {exc}",
-            }
-        if str(manifest.get("sample_identity", "")) != "point_id_start":
-            return {
-                "status": "blocked",
-                "reason": (
-                    f"deepSSF cache for {split} is missing sample_identity=point_id_start; "
-                    "rebuild the cache"
-                ),
-            }
+        entry, reason = _load_deepssf_cache_entry(cache_dir, split=str(split))
+        if entry is None:
+            exact_failure_reason = reason
+            exact_cache_manifests = {}
+            break
+        manifest = dict(entry["manifest"])
         env_channels = int(manifest["env_channels"])
         if env_channels != expected_env_channels:
-            return {
-                "status": "blocked",
-                "reason": (
-                    f"deepSSF cache for {split} exposes env_channels={env_channels} "
-                    f"but timescale {run_payload['timescale']} expects the full-cache "
-                    f"env_channels={expected_env_channels}"
-                ),
-            }
-        if channel_indices and max(channel_indices) >= env_channels:
-            return {
-                "status": "blocked",
-                "reason": (
-                    f"deepSSF cache for {split} exposes env_channels={env_channels} "
-                    f"but the requested covariate view needs index {max(channel_indices)}"
-                ),
-            }
+            exact_failure_reason = (
+                f"deepSSF cache for {split} exposes env_channels={env_channels} "
+                f"but timescale {run_payload['timescale']} expects the full-cache "
+                f"env_channels={expected_env_channels}"
+            )
+            exact_cache_manifests = {}
+            break
         split_output_hw = tuple(int(v) for v in manifest["output_hw"])
         if split_output_hw != expected_output_hw:
-            return {
-                "status": "blocked",
-                "reason": (
-                    f"deepSSF cache for {split} exposes output_hw={list(split_output_hw)} "
-                    f"but timescale {run_payload['timescale']} expects output_hw="
-                    f"{list(expected_output_hw)}"
-                ),
-            }
+            exact_failure_reason = (
+                f"deepSSF cache for {split} exposes output_hw={list(split_output_hw)} "
+                f"but timescale {run_payload['timescale']} expects output_hw="
+                f"{list(expected_output_hw)}"
+            )
+            exact_cache_manifests = {}
+            break
         split_pixel_size_m = float(manifest["pixel_size_m"])
         if reference_output_hw is None:
             reference_output_hw = split_output_hw
             reference_pixel_size_m = split_pixel_size_m
         elif split_output_hw != reference_output_hw:
-            return {
-                "status": "blocked",
-                "reason": (
-                    f"deepSSF cache metadata mismatch for {split}: "
-                    f"output_hw train={list(reference_output_hw)} {split}={list(split_output_hw)}"
-                ),
-            }
+            exact_failure_reason = (
+                f"deepSSF cache metadata mismatch for {split}: "
+                f"output_hw train={list(reference_output_hw)} {split}={list(split_output_hw)}"
+            )
+            exact_cache_manifests = {}
+            break
         elif reference_pixel_size_m is not None and not math.isclose(
             split_pixel_size_m,
             reference_pixel_size_m,
             rel_tol=1e-6,
             abs_tol=0.0,
         ):
+            exact_failure_reason = (
+                f"deepSSF cache metadata mismatch for {split}: "
+                f"pixel_size_m train={reference_pixel_size_m} {split}={split_pixel_size_m}"
+            )
+            exact_cache_manifests = {}
+            break
+        exact_cache_manifests[str(split)] = entry
+    if exact_cache_manifests:
+        cache_manifests = exact_cache_manifests
+    else:
+        reference_output_hw = None
+        reference_pixel_size_m = None
+        train_candidates = _compatible_deepssf_cache_candidates(
+            study_id=str(run_payload["study_id"]),
+            split="train",
+            expected_output_hw=expected_output_hw,
+            expected_rasters_hash=str(run_payload["rasters_hash"]),
+            requested_band_ids=band_ids,
+        )
+        for train_candidate in train_candidates:
+            candidate_cache_manifests = {"train": train_candidate}
+            candidate_band_ids = list(train_candidate["cache_band_ids"])
+            candidate_output_hw = tuple(
+                int(v) for v in train_candidate["manifest"]["output_hw"]
+            )
+            candidate_pixel_size_m = float(train_candidate["manifest"]["pixel_size_m"])
+            for split in requested_splits[1:]:
+                split_candidates = _compatible_deepssf_cache_candidates(
+                    study_id=str(run_payload["study_id"]),
+                    split=str(split),
+                    expected_output_hw=expected_output_hw,
+                    expected_rasters_hash=str(run_payload["rasters_hash"]),
+                    requested_band_ids=band_ids,
+                    required_cache_band_ids=candidate_band_ids,
+                )
+                if not split_candidates:
+                    candidate_cache_manifests = {}
+                    break
+                split_candidate = split_candidates[0]
+                split_output_hw = tuple(
+                    int(v) for v in split_candidate["manifest"]["output_hw"]
+                )
+                split_pixel_size_m = float(split_candidate["manifest"]["pixel_size_m"])
+                if split_output_hw != candidate_output_hw:
+                    candidate_cache_manifests = {}
+                    break
+                if not math.isclose(
+                    split_pixel_size_m,
+                    candidate_pixel_size_m,
+                    rel_tol=1e-6,
+                    abs_tol=0.0,
+                ):
+                    candidate_cache_manifests = {}
+                    break
+                candidate_cache_manifests[str(split)] = split_candidate
+            if candidate_cache_manifests:
+                cache_manifests = candidate_cache_manifests
+                reference_output_hw = candidate_output_hw
+                reference_pixel_size_m = candidate_pixel_size_m
+                channel_indices = list(train_candidate["channel_indices"])
+                break
+        if not cache_manifests:
+            if exact_failure_reason is None:
+                exact_failure_reason = "missing compatible deepSSF caches"
             return {
                 "status": "blocked",
-                "reason": (
-                    f"deepSSF cache metadata mismatch for {split}: "
-                    f"pixel_size_m train={reference_pixel_size_m} {split}={split_pixel_size_m}"
-                ),
+                "reason": exact_failure_reason,
             }
-        cache_manifests[str(split)] = {
-            "cache_dir": cache_dir,
-            "manifest_path": manifest_path,
-            "manifest": manifest,
-        }
 
     if reference_output_hw is None:
         return {
