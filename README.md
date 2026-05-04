@@ -15,6 +15,50 @@ conda activate movebench
 pip install -e .
 ```
 
+
+## Quickstart
+
+As a quickstart, let's prepare data and train models for some white storks! 𓅮 
+
+We will use a sample from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
+
+**1. Download:** We will use just the `lite` set of covariates (NDVI and DEM) to quickly get up and running. Use the MoveBench CLI to download:
+
+```bash
+movebench download --studies Accio_967b7813_raw_merged --layers-config configs/layers/lite_12h_12h.yaml --n-workers 4 
+```
+
+**2. Extract point features:** To quickly train SSFs, we will precompute all observed and candidate point features.
+
+```bash
+movebench extract --layers-config configs/layers/lite_12h_12h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies Accio_967b7813_raw_merged
+```
+
+**3. Pack deepSSF shards (Optional):** If you would like to train a deepSSF model as part of this quickstart, pack WebDataset shards:
+
+```bash
+movebench pack --studies Accio_967b7813_raw_merged --timescales 12h_lite
+```
+
+**4. Install MoveFormer dependencies (Optional):** If you would like to train a MoveFormer model as part of this quickstart, install its dependencies:
+
+```bash
+pip install -e '.[moveformer]'
+```
+
+**5. Train models!**
+
+```bash
+movebench bench run experiments/lite.py --studies Accio_967b7813_raw_merged
+```
+
+**6. Visualize results:**
+
+TODO a notebook or something.
+
+
+## Old content - to be reorganized - follows
+
 If you will run benchmark commands, also install the optional bench dependencies:
 
 ```bash
@@ -24,7 +68,7 @@ pip install -e '.[bench]'
 If you will be downloading rasters with `movebench download gee`, also install the optional GEE dependencies:
 
 ```bash
-pip install -e .[gee]
+pip install -e '.[gee]'
 ```
 
 3. If you will be downloading rasters with `movebench download gee`, authenticate with your Google Earth Engine account
