@@ -17,24 +17,9 @@ pip install -e .
 
 ## Quickstart
 
-As a quickstart, let's prepare data and train models for some white storks! 𓅮 
-
-We will use a sample from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
-
-
-### Notebook version
-
-A walkthrough from download to training and visualizing models via the MoveBench Python API can be found in [quickstart.ipynb](notebooks/quickstart.ipynb). 
-
-In order for the visualizations in the notebook to work, first install visualization dependencies:
-
-```bash
-pip install -e '.[plotting]'
-```
+As a quickstart, let's prepare data and train models for some white storks! 𓅮  We will use a sample from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
 
 ### CLI Version
-
-Alternatively, use the MoveBench CLI to execute the same workflow as in the
 
 **1. Download:** We will use just the `lite` set of covariates (NDVI and DEM) to quickly get up and running. Use the MoveBench CLI to download:
 
@@ -77,6 +62,19 @@ pip install -e '.[plotting]'
 ```
 
 Use [quickstart.ipynb](notebooks/quickstart.ipynb) to visualize outputs.
+
+
+### Notebook version
+
+A walkthrough of the same steps using the MoveBench Python API instead of the CLI can be found in [quickstart.ipynb](notebooks/quickstart.ipynb). 
+
+In order for the visualizations in the notebook to work, first install visualization dependencies:
+
+```bash
+pip install -e '.[plotting]'
+```
+
+There are known issues with OpenMP during deepSSF training in the notebook workflow on some platforms; if you run into issues, the easiest workaround is to use the CLI workflow for training.
 
 
 ## Downloading with GEE
