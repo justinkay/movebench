@@ -50,19 +50,6 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "target_dtype": "uint8",
         "compression": "none",
     },
-    "12h_lite": {
-        "key": "12h",
-        "step_time_s": 43200,
-        "layers_config": "configs/layers/lite_12h_12h.yaml",
-        "marine_layers_config": "configs/layers/all_ae_plus_marine_12h_12h.yaml",
-        "sampler_config": "configs/samplers/issf_defaults.yaml",
-        "output_hw": (101, 101),
-        "normalize": True,
-        "samples_per_shard": 256,
-        "spatial_dtype": "float16",
-        "target_dtype": "uint8",
-        "compression": "none",
-    },
     "1d": {
         "key": "1d",
         "step_time_s": 86400,
@@ -234,6 +221,23 @@ METHODS: dict[str, dict[str, object]] = {
             "eval_every_steps": 10, # effectively batch size is ~ batch_size*max_len
             "patience_evals": 10,
         },
+    },
+}
+
+METHODS["issf_linear_time"] = {
+    **METHODS["issf_linear"],
+    "key": "issf_linear_time",
+    "model": {
+        **dict(METHODS["issf_linear"].get("model", {})),
+        "include_time": True,
+    },
+}
+METHODS["issf_mlp_time"] = {
+    **METHODS["issf_mlp"],
+    "key": "issf_mlp_time",
+    "model": {
+        **dict(METHODS["issf_mlp"].get("model", {})),
+        "include_time": True,
     },
 }
 

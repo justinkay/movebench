@@ -279,6 +279,8 @@ def _run(
             "output_hw"
         ]
     )
+    model_cfg = dict(run_payload.get("method_model", {}))
+    include_time = bool(model_cfg.get("include_time", False))
 
     split_datasets: dict[str, iSSFDataset] = {}
 
@@ -291,6 +293,7 @@ def _run(
                 sampler_config=resolved_artifacts["sampler"],
                 split=str(split_key),
                 subset_band_ids=list(run_payload["band_ids"]),
+                include_time=include_time,
             )
         return split_datasets[split_key]
 
@@ -335,7 +338,6 @@ def _run(
             n_individuals=int(train_dataset.n_individuals),
         )
     elif model_kind == "mlp":
-        model_cfg = dict(run_payload.get("method_model", {}))
         model = MLPStepSelect(
             c_env,
             include_time=bool(train_dataset.include_time),

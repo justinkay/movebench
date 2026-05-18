@@ -95,6 +95,10 @@ _MANIFEST_SCHEMA_VERSION = "3"
 _PAYLOAD_FORMAT = "pth"
 
 
+def _collate_first(batch: list[Any]) -> Any:
+    return batch[0]
+
+
 def write_deepssf_wds_manifest(path: Path, manifest: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -125,6 +129,14 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
         raise ValueError(
             f"manifest.env_channels must be > 0; got {d.get('env_channels')!r}"
         )
+    band_ids = d.get("band_ids")
+    if band_ids is not None:
+        if not isinstance(band_ids, list):
+            raise ValueError("manifest.band_ids must be a list when present")
+        if len(band_ids) != int(d["env_channels"]):
+            raise ValueError(
+                "manifest.band_ids length must match manifest.env_channels"
+            )
     if str(d.get("sample_identity", "")) != "point_id_start":
         raise ValueError(
             "manifest.sample_identity must be 'point_id_start' for exact evaluation"
@@ -316,6 +328,8 @@ def build_deepssf_wds_cache(
                 "schema_version": _MANIFEST_SCHEMA_VERSION,
                 "payload_format": _PAYLOAD_FORMAT,
                 "cache_hash": str(out_dir.name),
+                "rasters_hash": str(plan.rasters_hash),
+                "band_ids": list(band_ids),
                 "output_hw": [int(H), int(W)],
                 "pixel_size_m": float(pixel_size_m),
                 "env_channels": int(env_channels),
@@ -342,7 +356,7 @@ def build_deepssf_wds_cache(
         batch_size=1,
         shuffle=False,
         num_workers=int(num_workers),
-        collate_fn=lambda batch: batch[0],
+        collate_fn=_collate_first,
         drop_last=False,
     )
 
@@ -427,6 +441,8 @@ def build_deepssf_wds_cache(
         "schema_version": _MANIFEST_SCHEMA_VERSION,
         "payload_format": _PAYLOAD_FORMAT,
         "cache_hash": str(out_dir.name),
+        "rasters_hash": str(plan.rasters_hash),
+        "band_ids": list(band_ids),
         "output_hw": [int(H), int(W)],
         "pixel_size_m": float(pixel_size_m),
         "env_channels": int(env_channels),

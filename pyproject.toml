@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "PyYAML",
-  "earthengine-api",
   "numpy",
   "pandas",
   "requests",
@@ -19,14 +18,21 @@ dependencies = [
   "tqdm",
   "webdataset",
 ]
-# removed rasterio and pyproj - should be installed with conda
 
 [project.scripts]
 movebench = "movebench.cli.main:main"
 
 [project.optional-dependencies]
-bench = [
+gee = [
+  "earthengine-api",
+]
+
+plotting = [
+  "cartopy",
+  "ipykernel",
   "matplotlib",
+  "pyproj",
+  "rasterio",
 ]
 
 apps = [

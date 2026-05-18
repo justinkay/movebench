@@ -15,133 +15,197 @@ conda activate movebench
 pip install -e .
 ```
 
-If you will run benchmark commands, also install the optional bench dependencies:
+## Quickstart
+
+As a quickstart, let's prepare data and train models for some white storks! 𓅮  We will use a sample from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
+
+### CLI Version
+
+**1. Download:** We will use just the `lite` set of covariates (NDVI and DEM) to quickly get up and running. Use the MoveBench CLI to download:
 
 ```bash
-pip install -e '.[bench]'
+movebench download --studies Accio_967b7813_raw_merged --layers-config configs/layers/lite_12h_12h.yaml --n-workers 4 
 ```
 
-3. If you will be downloading rasters, authenticate with your Google Earth Engine account
-
-```bash
-earthengine authenticate --auth_mode=notebook
-```
-
-## Quickstart: Data setup
-
-Download all trajectories in MoveBench v1.0 here (85 MB): https://drive.google.com/file/d/1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y/view?usp=sharing
-
-```bash
-mkdir -p data/raw
-curl "https://drive.usercontent.google.com/download?id=1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y&confirm=xxx" -o data/raw/movebench-csvs-v1.0.zip
-unzip data/raw/movebench-csvs-v1.0.zip -d data/raw
-```
-
-As a quickstart, let's prepare data and train models for some white storks 𓅮 We will use a sample from MoveBench that includes data from [this study](https://link.springer.com/article/10.1186/s40462-022-00328-3).
-
-**1. Ingest:** Ingest MoveBank-formatted CSVs into the repository.
-
-```
-movebench ingest data/raw/movebench-csvs-v1.0/
-```
-
-**2. Download:** Download a set of raster files for the study at some forecasting timescale. To get up and running quickly, lets use the `lite` set of covariates and a 12h forecast horizon.
-
-Make sure you have followed the instructions above to authenticate Google Earth Engine. Then,
-
-```bash
-movebench download --layers-config configs/layers/lite_12h_12h.yaml --studies Accio_967b7813_raw_merged
-```
-
-**3. Extract:** Extract point features for observed and candidate points from downloaded rasters, to be used by SSF-style methods.
+**2. Extract point features:** To quickly train SSFs, we will precompute all observed and candidate point features.
 
 ```bash
 movebench extract --layers-config configs/layers/lite_12h_12h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies Accio_967b7813_raw_merged
 ```
 
-**4. Pack (Optional: only required for deepSSF):** Create WebDataset shards, which bundle full raster stacks for efficient training/inference of raster-based methods.
+**3. Pack deepSSF shards (Optional):** If you would like to train a deepSSF model as part of this quickstart, pack WebDataset shards:
+
 ```bash
-movebench pack --studies Accio_967b7813_raw_merged --timescales 12h_lite
+movebench pack --studies Accio_967b7813_raw_merged --timescales 12h --layers-config configs/layers/lite_12h_12h.yaml
 ```
 
-**5. Bench:** Benchmark forecasting methods. If you skipped the previous step, the deepSSF runs will stay blocked.
+**4. Install MoveFormer dependencies (Optional):** If you would like to train a MoveFormer model as part of this quickstart, install its dependencies:
+
+```bash
+pip install -e '.[moveformer]'
+```
+
+**5. Train models!**
+
 ```bash
 movebench bench run experiments/lite.py --studies Accio_967b7813_raw_merged
 ```
 
-You can visualize predictions for your newly trained models with [prediction_examples.ipynb](notebooks/prediction_examples.ipynb) or [recursive_forecasting.ipynb](notebooks/recursive_forecasting.ipynb).
+Note that the deep learning models (deepSSF and MoveFormer) will take much longer to train unless you have a GPU.
 
-## Full data download
+**6. Visualize results (Optional):**
 
-Download all covariates for all studies at all benchmark timescales (warning: this will download roughly 7TB of data):
-
-```bash
-movebench download --layers-config configs/layers/all_ae_1h_1h.yaml --studies all
-movebench download --layers-config configs/layers/all_ae_12h_12h.yaml --studies all
-movebench download --layers-config configs/layers/all_ae_1d_1d.yaml --studies all
-movebench download --layers-config configs/layers/all_ae_7d_7d.yaml --studies all
-```
-
-## Full documentation
-
-- [Ingest](#ingest)
-- [Download](#download)
-- [Extract](#extract)
-- [Pack](#pack)
-- [Bench](#bench)
-- [Slurm](#slurm)
-
-### Ingest
-
-Ingest one MoveBank-formatted CSV or a directory of CSVs into the configured MoveBench data root:
+If you would like to visualize prediction results from your trained models, first install visualization dependencies:
 
 ```bash
-movebench ingest path/to/movebench-csvs-v1.0/
+pip install -e '.[plotting]'
 ```
 
-### Download
+Use [quickstart.ipynb](notebooks/quickstart.ipynb) to visualize outputs.
+
+
+### Notebook version
+
+A walkthrough of the same steps using the MoveBench Python API instead of the CLI can be found in [quickstart.ipynb](notebooks/quickstart.ipynb). 
+
+In order for the visualizations in the notebook to work, first install visualization dependencies:
 
 ```bash
-movebench download --layers-config configs/layers/all_ae_1h_1h.yaml --studies all
+pip install -e '.[plotting]'
 ```
 
-For "MoveBench-Mini", specify `--studies mini`. 
+There are known issues with OpenMP during deepSSF training in the notebook workflow on some platforms; if you run into issues, the easiest workaround is to use the CLI workflow for training.
 
-### Extract
 
-Extract point features for training SSF-style methods. To extract the default layers for all studies at a 1 hour timescale:
+
+
+## Full downloads
+
+Use `movebench download` to download published MoveBench studies.
+
+**Download all covariates for all studies.** This is massive (7 TB) and will take a very long time to transfer. Consider downloading a smaller subset (detailed below):
 
 ```bash
-movebench extract --layers-config configs/layers/all_ae_1h_1h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies all
+movebench download --studies all
 ```
 
-To launch this on many slurm jobs,
+Alternatively, you can use `--studies mini` to download the MoveBench-Mini set (10 studies, ~500GB for all covariates), or a comma separated list of named studies (e.g., in the quickstart, we used `--studies Accio_967b7813_raw_merged`). You can find the full list of named studies and how large they are with the full covariate set [here](https://data.csail.mit.edu/movebench/index.html).
+
+
+**To download a subset of covaraites, use layer configs:** This is useful for smaller workflows. You can find some examples in [configs/layers](configs/layers/). Any subset of the full published set in MoveBench can be downloaded directly from the archive. For example, to fetch only the 12h `lite` covariates for the quickstart study:
 
 ```bash
-movebench slurm extract --layers-config configs/layers/all_ae_1h_1h.yaml --sampler-config configs/samplers/issf_defaults.yaml --studies all --slurm-config {path/to/slurm/config.yaml}
+movebench download \
+  --studies Accio_967b7813_raw_merged \
+  --layers-config configs/layers/lite_12h_12h.yaml \
+  --n-workers 4
 ```
 
-### Pack
+## Starting from Movebank CSVs
 
-Create deepSSF cache shards after extraction:
+You can also start from the full MoveBench CSV bundle [here](https://drive.google.com/file/d/1kh-6EcgCx_ds_RBK9tJfKw5cbTaD6m8Y/view?usp=sharing) or from your own Movebank-formatted CSVs.
+
+**Ingest one CSV:**
 
 ```bash
-movebench pack --studies all --timescales 1h
+movebench ingest /path/to/study.csv --study-id my_study
 ```
 
-### Bench
+**Ingest a directory of CSVs:**
 
-Run the checked-in main benchmark experiment locally:
+```bash
+movebench ingest /path/to/movebench_csvs
+```
+
+## Downloading with GEE
+
+If you want to download rasters for your own study, or download different rasters for the MoveBench studies, or for some other reason want to use Google Earth Engine to perform downloads, use `movebench download gee`. You will first need to the optional GEE dependencies and authenticate with your Google Earth Engine account:
+
+```bash
+pip install -e '.[gee]'
+```
+
+```bash
+earthengine authenticate --auth_mode=notebook
+```
+
+`movebench download gee` works on local studies that already exist under `data/rasters/studies`, whether they came from `movebench ingest` or from the public ZIP workflow.
+
+
+To define a custom layer set, start from one of the YAMLs in `configs/layers/`, copy it, and edit the `raster_params`, `layers`, and `chip_groups` sections. `configs/layers/all.yaml` is a good general starting point, and `configs/layers/lite_12h_12h.yaml` is a minimal example. Then pass the new file to `movebench download gee`:
+
+```bash
+movebench download gee \
+  --studies my_study \
+  --layers-config configs/layers/my_layers.yaml
+```
+
+## Running experiments
+
+**Extract point features:** Run `movebench extract` with the layer config(s) you want to use for modeling, and a sampler config:
+
+```bash
+movebench extract \
+  --layers-config configs/layers/my_layers.yaml \
+  --sampler-config configs/samplers/issf_defaults.yaml \
+  --studies my_study
+```
+
+You can repeat `--layers-config` to prepare multiple layer sets.
+
+**Pack deepSSF shards (Optional):** This is only needed if you want to run deepSSF.
+
+```bash
+movebench pack --studies my_study --timescales 12h --layers-config configs/layers/my_layers.yaml
+```
+
+For the built-in benchmark timescales, you can omit `--layers-config` and pack directly from the defaults:
+
+```bash
+movebench pack --studies mini --timescales 1h 12h 1d 7d
+```
+
+**Run experiments:** Experiment definitions live in [experiments](experiments/). For example, to run the full benchmark on the `mini` set:
 
 ```bash
 movebench bench run experiments/main_results.py --studies mini
 ```
 
-### Slurm
+Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer.py`.
 
-The Slurm launchers mirror the local `extract`, `pack`, and `bench run` commands and accept shared defaults via `--slurm-config`.
+**Inspect benchmark state (Optional):**
 
 ```bash
-movebench slurm pack --studies all --timescales 1h --slurm-config configs/slurm/beery.yaml
-movebench slurm bench run experiments/main_results.py --studies mini --slurm-config configs/slurm/beery.yaml
+movebench bench plan experiments/main_results.py --studies mini
+movebench bench summary --studies mini
+movebench bench status --studies mini
+movebench bench report
+```
+
+
+## Slurm
+
+`movebench ingest` and the download commands run locally. The heavier downstream steps have Slurm launchers that accept shared defaults via `--slurm-config`.
+
+You will need to create your own slurm config that matches your configuration. You can find examples in [configs/slurm/](configs/slurm/).
+
+```bash
+movebench slurm extract \
+  --layers-config configs/layers/all_ae_1h_1h.yaml \
+  --layers-config configs/layers/all_ae_12h_12h.yaml \
+  --layers-config configs/layers/all_ae_1d_1d.yaml \
+  --layers-config configs/layers/all_ae_7d_7d.yaml \
+  --sampler-config configs/samplers/issf_defaults.yaml \
+  --studies mini \
+  --slurm-config path/to/slurm.yaml
+
+movebench slurm pack \
+  --studies mini \
+  --timescales 1h 12h 1d 7d \
+  --slurm-config path/to/slurm.yaml
+
+movebench slurm bench run \
+  experiments/main_results.py \
+  --studies mini \
+  --slurm-config path/to/slurm.yaml
 ```
