@@ -28,7 +28,14 @@ from movebench.datasets.thumbnails import (
     load_thumbnail_source_df,
     load_thumbnail_source_df_with_anomaly,
 )
+from movebench.thumbnail_basemaps import (
+    DEFAULT_THUMBNAIL_BASEMAP,
+    thumbnail_basemap_ids,
+    thumbnail_basemap_label,
+)
 from movebench.thumbnail_config import (
+    DEFAULT_BURST_GAP_QUANTILE,
+    DEFAULT_BURST_GAP_SECONDS,
     build_thumbnail_generation_config,
     dumps_thumbnail_generation_config,
     normalize_anomaly_config,
@@ -58,7 +65,7 @@ BACKGROUND_TRACK_COLORS = {
 MAX_POINTS_PER_PATH = 2_000
 GRID_COLS = 4
 DEFAULT_SOURCE_CSV_ROOT = Path(
-    "/data/vision/beery/scratch/shir/codes/vibecleaning/data/movement_example/cleaned_topout_v1"
+    "/Users/shirbar/Documents/PostDoc/codes/movebench/movement_raw"
 ).resolve()
 
 
@@ -143,6 +150,27 @@ def _source_label(csv_path: str) -> str:
     return Path(csv_path).name
 
 
+def _source_labels(source_csvs: list[str], source_root: Path) -> dict[str, str]:
+    counts: dict[str, int] = {}
+    for csv_path in source_csvs:
+        name = Path(csv_path).name
+        counts[name] = counts.get(name, 0) + 1
+
+    labels: dict[str, str] = {}
+    for csv_path in source_csvs:
+        path = Path(csv_path)
+        label = path.name
+        if counts[label] > 1:
+            try:
+                parent_label = str(path.parent.relative_to(source_root))
+            except ValueError:
+                parent_label = str(path.parent)
+            if parent_label and parent_label != ".":
+                label = f"{label} [{parent_label}]"
+        labels[csv_path] = label
+    return labels
+
+
 def _source_stem(csv_path: str) -> str:
     return Path(csv_path).stem
 
@@ -157,7 +185,7 @@ def list_source_csvs(source_root: str | Path) -> list[str]:
     if not root.exists():
         print(f"Warning: source CSV root {root} does not exist")
         return []
-    return [str(path) for path in sorted(root.glob("*.csv")) if path.is_file()]
+    return [str(path) for path in sorted(root.rglob("*.csv")) if path.is_file()]
 
 
 @st.cache_data(show_spinner=False)
@@ -263,9 +291,13 @@ def _read_generation_params() -> dict:
     stride_raw = int(st.session_state["draft_stride"])
     return {
         "img_size": int(st.session_state["draft_img_size"]),
+        "chunk_mode": str(st.session_state["draft_chunk_mode"]),
         "chunk_size": int(st.session_state["draft_chunk_size"]),
         "stride": None if stride_raw <= 0 else stride_raw,
         "min_chunk_size": int(st.session_state["draft_min_chunk_size"]),
+        "burst_gap_mode": str(st.session_state["draft_burst_gap_mode"]),
+        "burst_gap_seconds": float(st.session_state["draft_burst_gap_seconds"]),
+        "burst_gap_quantile": float(st.session_state["draft_burst_gap_quantile"]),
         "line_width": int(st.session_state["draft_line_width"]),
         "marker_radius": int(st.session_state["draft_marker_radius"]),
         "padding": int(st.session_state["draft_padding"]),
@@ -275,22 +307,34 @@ def _read_generation_params() -> dict:
 
 
 @st.cache_data(show_spinner=False)
-def build_thumbnail_bundle(csv_path: str, split: str, params_json: str, color_by: str | None) -> dict:
+def build_thumbnail_bundle(
+    csv_path: str,
+    split: str,
+    params_json: str,
+    color_by: str | None,
+    basemap: str,
+) -> dict:
     params = json.loads(params_json)
     split_arg = None if split == "all" else split
+    effective_basemap = DEFAULT_THUMBNAIL_BASEMAP if basemap == "osm" else basemap
     build = build_track_thumbnails(
         csv_path,
         split=split_arg,
         img_size=int(params["img_size"]),
+        chunk_mode=str(params.get("chunk_mode", "fixed")),
         chunk_size=int(params["chunk_size"]),
         stride=params["stride"],
         min_chunk_size=int(params["min_chunk_size"]),
+        burst_gap_mode=str(params.get("burst_gap_mode", "manual")),
+        burst_gap_seconds=float(params.get("burst_gap_seconds", DEFAULT_BURST_GAP_SECONDS)),
+        burst_gap_quantile=float(params.get("burst_gap_quantile", DEFAULT_BURST_GAP_QUANTILE)),
         line_width=int(params["line_width"]),
         marker_radius=int(params["marker_radius"]),
         padding=int(params["padding"]),
         scale_mode=str(params["scale_mode"]),
         scale_quantile=float(params["scale_quantile"]),
         color_by=color_by,
+        basemap=effective_basemap,
     )
     meta = build.metadata.copy()
     if len(meta) == 0:
@@ -299,6 +343,7 @@ def build_thumbnail_bundle(csv_path: str, split: str, params_json: str, color_by
             "metadata": meta,
             "chunk_paths": build.chunk_paths,
             "class_columns": [],
+            "burst_gap": build.burst_gap,
         }
 
     meta["start_time"] = pd.to_datetime(meta["start_time"])
@@ -310,7 +355,28 @@ def build_thumbnail_bundle(csv_path: str, split: str, params_json: str, color_by
         "metadata": meta,
         "chunk_paths": build.chunk_paths,
         "class_columns": class_columns,
+        "burst_gap": build.burst_gap,
     }
+
+
+def format_burst_gap_quantile(value: object) -> str:
+    quantile = float(value)
+    percentile = quantile * 100.0
+    decimals = 0 if abs(percentile - round(percentile)) < 1e-9 else 3
+    formatted = f"{percentile:.{decimals}f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return f"p{formatted}"
+
+
+def format_burst_gap_summary(info: dict[str, object]) -> str:
+    effective = float(info.get("effective_seconds", DEFAULT_BURST_GAP_SECONDS))
+    gap_count = int(info.get("gap_count", 0))
+    gap_phrase = f" from {gap_count:,} source gaps" if gap_count else " from 0 source gaps"
+    if str(info.get("mode", "manual")) == "quantile":
+        fallback = " (fallback)" if bool(info.get("used_fallback", False)) else ""
+        return f"{format_burst_gap_quantile(info.get('quantile', DEFAULT_BURST_GAP_QUANTILE))} = {effective:,.2f} s{gap_phrase}{fallback}"
+    return f"Manual = {effective:,.2f} s{gap_phrase}"
 
 
 def format_class_name(col: str) -> str:
@@ -904,9 +970,13 @@ def _step_filmstrip_page(delta: int, max_page: int) -> None:
 def ensure_generation_state() -> None:
     draft_defaults = {
         "img_size": 64,
+        "chunk_mode": "fixed",
         "chunk_size": 50,
         "stride": 0,
         "min_chunk_size": 10,
+        "burst_gap_mode": "quantile",
+        "burst_gap_seconds": DEFAULT_BURST_GAP_SECONDS,
+        "burst_gap_quantile": DEFAULT_BURST_GAP_QUANTILE,
         "line_width": 1,
         "marker_radius": 1,
         "padding": 2,
@@ -974,20 +1044,21 @@ def main() -> None:
     source_root_value = str(source_root_input).strip()
     if not source_root_value:
         st.error("Enter a CSV root folder to browse source files.")
-        st.stop()
+        return
 
     source_root = _resolve_source_root(source_root_value)
     if not source_root.exists():
         st.error(f"CSV root folder does not exist: {source_root}")
-        st.stop()
+        return
     if not source_root.is_dir():
         st.error(f"CSV root folder is not a directory: {source_root}")
-        st.stop()
+        return
 
     source_csvs = list_source_csvs(source_root)
     if not source_csvs:
         st.error(f"No CSV files found under {source_root}.")
-        st.stop()
+        return
+    source_labels = _source_labels(source_csvs, source_root)
 
     with top_controls:
         current_source = st.session_state.get("source_csv")
@@ -1000,7 +1071,7 @@ def main() -> None:
                 "CSV file",
                 source_csvs,
                 index=source_csvs.index(current_source),
-                format_func=_source_label,
+                format_func=lambda value: source_labels.get(value, _source_label(value)),
                 key="source_csv",
             )
         split_info = inspect_source_splits(source_csv)
@@ -1042,7 +1113,7 @@ def main() -> None:
     color_columns = source_info["color_columns"]
     appearance_controls = st.container()
     with appearance_controls:
-        a1, a2, a3 = st.columns([1.0, 1.35, 2.4], gap="medium")
+        a1, a2, a3, a4 = st.columns([1.0, 1.35, 1.15, 2.1], gap="medium")
         render_modes = ["Black & white", "Color by variable"]
         current_render_mode = st.session_state.get("thumbnail_render_mode", render_modes[0])
         if current_render_mode not in render_modes:
@@ -1074,10 +1145,24 @@ def main() -> None:
             else:
                 selected_color = None
                 st.selectbox("Color variable", ["No valid variables"], index=0, disabled=True)
+        thumbnail_basemap_options = [value for value in thumbnail_basemap_ids(include_none=True) if value != "osm"]
+        current_thumbnail_basemap = st.session_state.get("thumbnail_basemap", DEFAULT_THUMBNAIL_BASEMAP)
+        if current_thumbnail_basemap not in thumbnail_basemap_options:
+            current_thumbnail_basemap = DEFAULT_THUMBNAIL_BASEMAP
+            st.session_state["thumbnail_basemap"] = current_thumbnail_basemap
         with a3:
+            thumbnail_basemap = st.selectbox(
+                "Thumbnail basemap",
+                thumbnail_basemap_options,
+                index=thumbnail_basemap_options.index(current_thumbnail_basemap),
+                format_func=thumbnail_basemap_label,
+                key="thumbnail_basemap",
+            )
+        with a4:
             style_label = "black-and-white" if render_mode == "Black & white" or selected_color is None else f"colored by `{selected_color}`"
             st.caption(
-                f"Source: `{source_name}` | split: `{split}` | rendering: {style_label} | rows after filtering: {source_info['n_rows']:,}"
+                f"Source: `{source_name}` | split: `{split}` | rendering: {style_label} | "
+                f"basemap: `{thumbnail_basemap}` | rows after filtering: {source_info['n_rows']:,}"
             )
     color_by = selected_color if render_mode == "Color by variable" and selected_color is not None else None
     if render_mode == "Color by variable" and not color_columns:
@@ -1085,20 +1170,46 @@ def main() -> None:
 
     apply_clicked = False
     with st.expander("Generation settings", expanded=False):
-        g1, g2, g3, g4, g5 = st.columns(5, gap="medium")
+        g1, g2, g3, g4, g5, g6 = st.columns(6, gap="medium")
         with g1:
             st.number_input("Image size", min_value=16, max_value=256, step=8, key="draft_img_size")
-            st.number_input("Chunk size", min_value=2, max_value=500, step=1, key="draft_chunk_size")
+            st.radio("Chunk mode", ["fixed", "burst"], key="draft_chunk_mode")
         with g2:
-            st.number_input("Stride (0 = chunk size)", min_value=0, max_value=500, step=1, key="draft_stride")
-            st.number_input("Minimum chunk size", min_value=1, max_value=500, step=1, key="draft_min_chunk_size")
+            burst_mode = st.session_state.get("draft_chunk_mode") == "burst"
+            st.number_input("Chunk size", min_value=2, max_value=500, step=1, key="draft_chunk_size", disabled=burst_mode)
+            st.number_input("Stride (0 = chunk size)", min_value=0, max_value=500, step=1, key="draft_stride", disabled=burst_mode)
         with g3:
+            st.number_input("Minimum chunk size", min_value=1, max_value=500, step=1, key="draft_min_chunk_size")
+            st.radio(
+                "Burst gap mode",
+                ["quantile", "manual"],
+                key="draft_burst_gap_mode",
+                format_func=lambda value: "Quantile" if value == "quantile" else "Manual seconds",
+            )
+        with g4:
+            burst_gap_mode = st.session_state.get("draft_burst_gap_mode", "quantile")
+            st.number_input(
+                "Fallback seconds" if burst_gap_mode == "quantile" else "Burst gap seconds",
+                min_value=1.0,
+                max_value=604800.0,
+                step=300.0,
+                key="draft_burst_gap_seconds",
+            )
+            st.number_input(
+                "Burst gap quantile",
+                min_value=0.001,
+                max_value=1.0,
+                step=0.001,
+                format="%.3f",
+                key="draft_burst_gap_quantile",
+                disabled=burst_gap_mode != "quantile",
+            )
+        with g5:
             st.number_input("Line width", min_value=1, max_value=8, step=1, key="draft_line_width")
             st.number_input("Marker radius", min_value=0, max_value=8, step=1, key="draft_marker_radius")
-        with g4:
+        with g6:
             st.number_input("Padding", min_value=0, max_value=16, step=1, key="draft_padding")
             st.radio("Scale mode", ["individual", "chunk"], key="draft_scale_mode")
-        with g5:
             st.slider("Scale quantile", min_value=0.05, max_value=0.95, step=0.05, key="draft_scale_quantile")
             apply_clicked = st.button("Apply", width="stretch", type="primary")
 
@@ -1106,31 +1217,35 @@ def main() -> None:
         st.session_state["applied_generation_params"] = _read_generation_params()
 
     params = st.session_state["applied_generation_params"]
+    effective_params = {**params, "basemap": thumbnail_basemap}
     export_config = build_thumbnail_generation_config(
         csv_path=source_csv,
         split=split,
         params=params,
         color_by=color_by,
+        basemap=thumbnail_basemap,
     )
     export_config_json = dumps_thumbnail_generation_config(export_config)
     export_config_name = thumbnail_config_filename(export_config)
-    params_json = json.dumps(params, sort_keys=True)
-    signature = (source_csv, split, params_json, color_by)
+    params_json = json.dumps(effective_params, sort_keys=True)
+    signature = (source_csv, split, params_json, color_by, thumbnail_basemap)
     if st.session_state.get("_thumbnail_signature") != signature:
         st.session_state["_thumbnail_signature"] = signature
         st.session_state["active_chunk_idx"] = None
         st.session_state["selected_class"] = None
         st.session_state["selected_individual"] = None
 
-    bundle = build_thumbnail_bundle(source_csv, split, params_json, color_by)
+    bundle = build_thumbnail_bundle(source_csv, split, params_json, color_by, thumbnail_basemap)
     images = bundle["images"]
     meta = bundle["metadata"]
     chunk_paths = bundle["chunk_paths"]
     class_columns = bundle["class_columns"]
+    burst_gap = bundle["burst_gap"]
+    st.caption(f"Burst threshold: {format_burst_gap_summary(burst_gap)}")
 
     if len(meta) == 0:
         st.warning("No thumbnail chunks were produced for the current file/split/parameter combination.")
-        st.stop()
+        return
 
     browse_controls = st.container()
     with browse_controls:
@@ -1160,7 +1275,7 @@ def main() -> None:
     ordered_indices = sort_class_indices(meta, meta.index.tolist(), sort_mode)
     if not focus_match_set:
         st.warning(f"No chunks available for class: {format_class_name(selected_class)}")
-        st.stop()
+        return
 
     individual_options = ["All individuals"] + sorted(meta["individual_id"].astype(str).unique().tolist())
     current_individual = st.session_state.get("selected_individual")
@@ -1447,6 +1562,8 @@ def main() -> None:
                     {"field": "class handling", "value": str(class_display_mode)},
                     {"field": "focus class", "value": str(format_class_name(selected_class))},
                     {"field": "thumbnail style", "value": "Black & white" if color_by is None else f"Color by {color_by}"},
+                    {"field": "thumbnail basemap", "value": thumbnail_basemap_label(thumbnail_basemap)},
+                    {"field": "burst threshold", "value": format_burst_gap_summary(burst_gap)},
                     {"field": "split", "value": str(split)},
                     {"field": "filmstrip page", "value": f"{page} / {max_page}"},
                     {"field": "chunks on page", "value": str(len(page_indices))},

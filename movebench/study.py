@@ -432,14 +432,17 @@ class Study:
         *,
         split: str | None = "train",
         img_size: int = 64,
+        chunk_mode: str = "fixed",
         chunk_size: int = 50,
         stride: int | None = None,
         min_chunk_size: int = 10,
+        burst_gap_seconds: float = 3600.0,
         line_width: int = 1,
         marker_radius: int = 1,
         padding: int = 2,
         scale_mode: str = "individual",
         scale_quantile: float = 0.5,
+        basemap: str | None = None,
         transform=None,
     ):
         """Create a TrackThumbnailDataset for this study.
@@ -447,17 +450,22 @@ class Study:
         Renders GPS trajectory chunks as MNIST-style B&W thumbnail images.
         Requires only ``trajectories.csv`` — no raster downloads needed.
 
-        Each thumbnail shows ``chunk_size`` consecutive fixes drawn as a
-        connected polyline with a marker at each fix.  By default a fixed
-        per-individual spatial scale is used so that anomalously large chunks
-        visibly overflow the image.
+        Each thumbnail shows a fixed-size chunk or, with ``chunk_mode="burst"``,
+        one absolute time-gap burst drawn as a connected polyline with a marker
+        at each fix.  By default a fixed per-individual spatial scale is used so
+        that anomalously large chunks visibly overflow the image.
 
         Args:
             split:           "train", "test", or None for all splits.
             img_size:        Square image side in pixels (default 64).
+            chunk_mode:      ``"fixed"`` (default) or ``"burst"``.
             chunk_size:      Fixes per thumbnail (default 50).
             stride:          Step between chunk starts; None = non-overlapping.
             min_chunk_size:  Drop chunks shorter than this (default 10).
+            burst_gap_seconds:
+                             In burst mode, start a new burst when the gap
+                             between consecutive fixes is greater than this
+                             many seconds (default 3600).
             line_width:      Polyline stroke width (default 1).
             marker_radius:   Radius of the filled circle drawn at each fix
                              (default 1). Set to 0 for polyline only.
@@ -468,8 +476,11 @@ class Study:
                              ``"chunk"`` — legacy per-chunk bounding-box scale.
             scale_quantile:  Quantile of per-chunk extents used when
                              ``scale_mode="individual"`` (default 0.5 = median).
+            basemap:         Optional thumbnail basemap. Supported values are
+                             ``"positron"`` (default), ``"osm"``,
+                             ``"satellite"``, and ``"none"``.
             transform:       Optional torchvision-compatible transform applied
-                             to the (1, H, W) float32 tensor in __getitem__.
+                             to the float32 tensor in __getitem__.
         """
         from movebench.datasets.thumbnail_dataset import TrackThumbnailDataset
 
@@ -477,14 +488,17 @@ class Study:
             trajectories_path=self.trajectories_path,
             split=split,
             img_size=img_size,
+            chunk_mode=chunk_mode,
             chunk_size=chunk_size,
             stride=stride,
             min_chunk_size=min_chunk_size,
+            burst_gap_seconds=burst_gap_seconds,
             line_width=line_width,
             marker_radius=marker_radius,
             padding=padding,
             scale_mode=scale_mode,
             scale_quantile=scale_quantile,
+            basemap=basemap,
             transform=transform,
         )
 

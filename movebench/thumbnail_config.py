@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
+from movebench.thumbnail_basemaps import (
+    DEFAULT_THUMBNAIL_BASEMAP,
+    normalize_thumbnail_basemap,
+)
+
 CONFIG_VERSION = "thumbnail_generation.v1"
 DEFAULT_ANOMALY_SCORE_COLUMN = "iforest_anomaly_score"
+DEFAULT_THUMBNAIL_CHUNK_MODE = "fixed"
+DEFAULT_BURST_GAP_MODE = "manual"
+DEFAULT_BURST_GAP_SECONDS = 3600.0
+DEFAULT_BURST_GAP_QUANTILE = 0.999
 DEFAULT_ANOMALY_CONFIG = {
     "score_column": DEFAULT_ANOMALY_SCORE_COLUMN,
     "feature_columns": None,
@@ -119,12 +129,41 @@ def normalize_projection_config(projection: dict[str, Any] | None = None) -> dic
     }
 
 
+def normalize_thumbnail_chunk_mode(chunk_mode: str | None = None) -> str:
+    value = DEFAULT_THUMBNAIL_CHUNK_MODE if chunk_mode in (None, "") else str(chunk_mode).strip().lower()
+    if value not in {"fixed", "burst"}:
+        raise ValueError(f"thumbnail.chunk_mode must be 'fixed' or 'burst', got {chunk_mode!r}")
+    return value
+
+
+def normalize_burst_gap_seconds(value: Any = None) -> float:
+    gap = DEFAULT_BURST_GAP_SECONDS if value in (None, "") else float(value)
+    if not isfinite(gap) or gap <= 0.0:
+        raise ValueError(f"thumbnail.burst_gap_seconds must be positive, got {value!r}")
+    return float(gap)
+
+
+def normalize_burst_gap_mode(value: Any = None) -> str:
+    mode = DEFAULT_BURST_GAP_MODE if value in (None, "") else str(value).strip().lower()
+    if mode not in {"manual", "quantile"}:
+        raise ValueError(f"thumbnail.burst_gap_mode must be 'manual' or 'quantile', got {value!r}")
+    return mode
+
+
+def normalize_burst_gap_quantile(value: Any = None) -> float:
+    quantile = DEFAULT_BURST_GAP_QUANTILE if value in (None, "") else float(value)
+    if not isfinite(quantile) or quantile <= 0.0 or quantile > 1.0:
+        raise ValueError(f"thumbnail.burst_gap_quantile must satisfy 0 < q <= 1, got {value!r}")
+    return float(quantile)
+
+
 def build_thumbnail_generation_config(
     *,
     csv_path: str | Path,
     split: str,
     params: dict[str, Any],
     color_by: str | None,
+    basemap: str | None = None,
     individual_id: str | None = None,
     anomaly: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -139,15 +178,20 @@ def build_thumbnail_generation_config(
             },
             "thumbnail": {
                 "img_size": params.get("img_size"),
+                "chunk_mode": params.get("chunk_mode", DEFAULT_THUMBNAIL_CHUNK_MODE),
                 "chunk_size": params.get("chunk_size"),
                 "stride": stride,
                 "min_chunk_size": params.get("min_chunk_size"),
+                "burst_gap_mode": params.get("burst_gap_mode", DEFAULT_BURST_GAP_MODE),
+                "burst_gap_seconds": params.get("burst_gap_seconds", DEFAULT_BURST_GAP_SECONDS),
+                "burst_gap_quantile": params.get("burst_gap_quantile", DEFAULT_BURST_GAP_QUANTILE),
                 "line_width": params.get("line_width"),
                 "marker_radius": params.get("marker_radius"),
                 "padding": params.get("padding"),
                 "scale_mode": params.get("scale_mode"),
                 "scale_quantile": params.get("scale_quantile"),
                 "color_by": color_by,
+                "basemap": basemap,
             },
             "anomaly": normalize_anomaly_config(anomaly),
         }
@@ -172,6 +216,7 @@ def normalize_thumbnail_generation_config(config: dict[str, Any]) -> dict[str, A
     color_by = thumb.get("color_by")
     if color_by in ("", "none", "None"):
         color_by = None
+    basemap = normalize_thumbnail_basemap(thumb.get("basemap", DEFAULT_THUMBNAIL_BASEMAP))
     normalized = {
         "version": str(config.get("version", CONFIG_VERSION)),
         "data": {
@@ -181,15 +226,20 @@ def normalize_thumbnail_generation_config(config: dict[str, Any]) -> dict[str, A
         },
         "thumbnail": {
             "img_size": int(thumb["img_size"]),
+            "chunk_mode": normalize_thumbnail_chunk_mode(thumb.get("chunk_mode", DEFAULT_THUMBNAIL_CHUNK_MODE)),
             "chunk_size": int(thumb["chunk_size"]),
             "stride": None if stride in (None, "", 0, "0") else int(stride),
             "min_chunk_size": int(thumb["min_chunk_size"]),
+            "burst_gap_mode": normalize_burst_gap_mode(thumb.get("burst_gap_mode", DEFAULT_BURST_GAP_MODE)),
+            "burst_gap_seconds": normalize_burst_gap_seconds(thumb.get("burst_gap_seconds", DEFAULT_BURST_GAP_SECONDS)),
+            "burst_gap_quantile": normalize_burst_gap_quantile(thumb.get("burst_gap_quantile", DEFAULT_BURST_GAP_QUANTILE)),
             "line_width": int(thumb["line_width"]),
             "marker_radius": int(thumb["marker_radius"]),
             "padding": int(thumb["padding"]),
             "scale_mode": str(thumb["scale_mode"]),
             "scale_quantile": float(thumb["scale_quantile"]),
             "color_by": color_by,
+            "basemap": basemap,
         },
         "anomaly": anomaly,
     }
@@ -209,15 +259,20 @@ def thumbnail_build_kwargs(config_or_path: dict[str, Any] | str | Path) -> dict[
         "split": None if split == "all" else split,
         "individual_id": config["data"].get("individual_id"),
         "img_size": thumb["img_size"],
+        "chunk_mode": thumb["chunk_mode"],
         "chunk_size": thumb["chunk_size"],
         "stride": thumb["stride"],
         "min_chunk_size": thumb["min_chunk_size"],
+        "burst_gap_mode": thumb["burst_gap_mode"],
+        "burst_gap_seconds": thumb["burst_gap_seconds"],
+        "burst_gap_quantile": thumb["burst_gap_quantile"],
         "line_width": thumb["line_width"],
         "marker_radius": thumb["marker_radius"],
         "padding": thumb["padding"],
         "scale_mode": thumb["scale_mode"],
         "scale_quantile": thumb["scale_quantile"],
         "color_by": thumb["color_by"],
+        "basemap": thumb["basemap"],
         "anomaly_config": config["anomaly"],
     }
 

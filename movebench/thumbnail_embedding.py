@@ -24,7 +24,13 @@ from movebench.datasets.thumbnails import (
     load_thumbnail_source_df_with_anomaly,
 )
 from movebench.paths import repo_root
-from movebench.thumbnail_config import normalize_anomaly_config, normalize_embedding_config
+from movebench.thumbnail_basemaps import DEFAULT_THUMBNAIL_BASEMAP, normalize_thumbnail_basemap
+from movebench.thumbnail_config import (
+    normalize_anomaly_config,
+    normalize_burst_gap_seconds,
+    normalize_embedding_config,
+    normalize_thumbnail_chunk_mode,
+)
 
 SOURCE_CSV_ROOT = Path(
     "/data/vision/beery/scratch/shir/codes/vibecleaning/data/movement_example/cleaned_hightemporalres"
@@ -79,10 +85,13 @@ def list_embedding_sources(source_root: Path | str = SOURCE_CSV_ROOT) -> list[di
     root = Path(source_root).resolve()
     if not root.exists():
         return []
+    csv_paths = [path for path in sorted(root.rglob("*.csv")) if path.is_file() and not path.name.startswith("_")]
+    name_counts: dict[str, int] = {}
+    for path in csv_paths:
+        name_counts[path.name] = name_counts.get(path.name, 0) + 1
+
     rows: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.csv")):
-        if not path.is_file() or path.name.startswith("_"):
-            continue
+    for path in csv_paths:
         header = pd.read_csv(path, nrows=0)
         if "set" in header.columns:
             split_df = pd.read_csv(path, usecols=["set"], low_memory=False)
@@ -96,9 +105,17 @@ def list_embedding_sources(source_root: Path | str = SOURCE_CSV_ROOT) -> list[di
             include_movement_features=True,
             anomaly_config=anomaly,
         )
+        label = path.name
+        if name_counts.get(path.name, 0) > 1:
+            try:
+                parent_label = str(path.parent.relative_to(root))
+            except ValueError:
+                parent_label = str(path.parent)
+            if parent_label and parent_label != ".":
+                label = f"{label} [{parent_label}]"
         rows.append(
             {
-                "label": path.name,
+                "label": label,
                 "path": str(path),
                 "splits": ["all"] + splits,
                 "default_split": "train" if "train" in splits else "all",
@@ -128,15 +145,18 @@ def default_run_config(csv_path: str | None = None) -> dict[str, Any]:
         },
         "thumbnail": {
             "img_size": 64,
+            "chunk_mode": "fixed",
             "chunk_size": 50,
             "stride": None,
             "min_chunk_size": 10,
+            "burst_gap_seconds": 3600.0,
             "line_width": 1,
             "marker_radius": 1,
             "padding": 2,
             "scale_mode": "individual",
             "scale_quantile": 0.5,
             "color_by": None,
+            "basemap": DEFAULT_THUMBNAIL_BASEMAP,
         },
         "anomaly": normalize_anomaly_config(None),
         "embedding": {
@@ -181,6 +201,7 @@ def normalize_run_config(config: dict[str, Any]) -> dict[str, Any]:
     color_by = thumb.get("color_by")
     if color_by in ("", "none", "None"):
         color_by = None
+    basemap = normalize_thumbnail_basemap(thumb.get("basemap", DEFAULT_THUMBNAIL_BASEMAP))
     embedding = normalize_embedding_config(emb)
 
     return {
@@ -191,15 +212,18 @@ def normalize_run_config(config: dict[str, Any]) -> dict[str, Any]:
         },
         "thumbnail": {
             "img_size": int(thumb["img_size"]),
+            "chunk_mode": normalize_thumbnail_chunk_mode(thumb.get("chunk_mode", "fixed")),
             "chunk_size": int(thumb["chunk_size"]),
             "stride": None if stride in (None, "", 0, "0") else int(stride),
             "min_chunk_size": int(thumb["min_chunk_size"]),
+            "burst_gap_seconds": normalize_burst_gap_seconds(thumb.get("burst_gap_seconds", 3600.0)),
             "line_width": int(thumb["line_width"]),
             "marker_radius": int(thumb["marker_radius"]),
             "padding": int(thumb["padding"]),
             "scale_mode": str(thumb["scale_mode"]),
             "scale_quantile": float(thumb["scale_quantile"]),
             "color_by": color_by,
+            "basemap": basemap,
         },
         "anomaly": anomaly,
         "embedding": embedding,
@@ -972,15 +996,18 @@ def _thumbnail_params(config: dict[str, Any]) -> dict[str, Any]:
     thumb = dict(config["thumbnail"])
     return {
         "img_size": thumb["img_size"],
+        "chunk_mode": thumb["chunk_mode"],
         "chunk_size": thumb["chunk_size"],
         "stride": thumb["stride"],
         "min_chunk_size": thumb["min_chunk_size"],
+        "burst_gap_seconds": thumb["burst_gap_seconds"],
         "line_width": thumb["line_width"],
         "marker_radius": thumb["marker_radius"],
         "padding": thumb["padding"],
         "scale_mode": thumb["scale_mode"],
         "scale_quantile": thumb["scale_quantile"],
         "color_by": thumb["color_by"],
+        "basemap": thumb["basemap"],
         "anomaly_config": dict(config["anomaly"]),
     }
 
@@ -1019,15 +1046,18 @@ def execute_run(
             split=split_arg,
             individual_id=normalized["data"].get("individual_id"),
             img_size=int(normalized["thumbnail"]["img_size"]),
+            chunk_mode=str(normalized["thumbnail"]["chunk_mode"]),
             chunk_size=int(normalized["thumbnail"]["chunk_size"]),
             stride=normalized["thumbnail"]["stride"],
             min_chunk_size=int(normalized["thumbnail"]["min_chunk_size"]),
+            burst_gap_seconds=float(normalized["thumbnail"]["burst_gap_seconds"]),
             line_width=int(normalized["thumbnail"]["line_width"]),
             marker_radius=int(normalized["thumbnail"]["marker_radius"]),
             padding=int(normalized["thumbnail"]["padding"]),
             scale_mode=str(normalized["thumbnail"]["scale_mode"]),
             scale_quantile=float(normalized["thumbnail"]["scale_quantile"]),
             color_by=normalized["thumbnail"]["color_by"],
+            basemap=normalized["thumbnail"]["basemap"],
             anomaly_config=normalized["anomaly"],
         )
         meta = build.metadata.copy()

@@ -23,14 +23,17 @@ class TrackThumbnailDataset(Dataset):
         trajectories_path: Path | str,
         split: str | None = "train",
         img_size: int = 64,
+        chunk_mode: str = "fixed",
         chunk_size: int = 50,
         stride: int | None = None,
         min_chunk_size: int = 10,
+        burst_gap_seconds: float = 3600.0,
         line_width: int = 1,
         marker_radius: int = 1,
         padding: int = 2,
         scale_mode: str = "individual",
         scale_quantile: float = 0.5,
+        basemap: str | None = None,
         exclude_outlier_cols: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
         transform=None,
     ) -> None:
@@ -40,14 +43,17 @@ class TrackThumbnailDataset(Dataset):
             trajectories_path,
             split=split,
             img_size=img_size,
+            chunk_mode=chunk_mode,
             chunk_size=chunk_size,
             stride=stride,
             min_chunk_size=min_chunk_size,
+            burst_gap_seconds=burst_gap_seconds,
             line_width=line_width,
             marker_radius=marker_radius,
             padding=padding,
             scale_mode=scale_mode,
             scale_quantile=scale_quantile,
+            basemap=basemap,
             exclude_outlier_cols=exclude_outlier_cols,
         )
         self._images = build.images
@@ -62,7 +68,14 @@ class TrackThumbnailDataset(Dataset):
         import torch
 
         img = self._images[idx]
-        tensor = torch.from_numpy(img).unsqueeze(0).float() / 255.0
+        tensor = torch.from_numpy(img)
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        elif tensor.ndim == 3:
+            tensor = tensor.permute(2, 0, 1)
+        else:
+            raise ValueError(f"Unexpected thumbnail image shape: {tuple(tensor.shape)!r}")
+        tensor = tensor.float() / 255.0
         if self._transform is not None:
             tensor = self._transform(tensor)
 

@@ -25,6 +25,7 @@ from PIL import Image
 
 from movebench import Study
 from movebench.datasets.thumbnails import build_track_thumbnails
+from movebench.thumbnail_basemaps import DEFAULT_THUMBNAIL_BASEMAP, thumbnail_basemap_spec
 from movebench.trajectories import INDIVIDUAL_COL, LAT_COL, LON_COL, SET_COL, TIME_COL
 
 PATH_ALPHA = 0.25
@@ -72,7 +73,8 @@ def _temporal_color(idx: int, total: int) -> str:
 
 
 def _image_to_data_url(img: np.ndarray) -> str:
-    pil = Image.fromarray(img, mode="L")
+    mode = "L" if img.ndim == 2 else "RGB"
+    pil = Image.fromarray(img, mode=mode)
     buf = io.BytesIO()
     pil.save(buf, format="PNG", optimize=True)
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -149,9 +151,12 @@ def _build_class_pdfs(
             rows = 4
             title = (
                 f"{study_id} | {_format_class_name(class_name)} | split={split} | "
-                f"chunk={params['chunk_size']} stride={params['stride'] or params['chunk_size']} "
+                f"mode={params['chunk_mode']} chunk={params['chunk_size']} "
+                f"stride={params['stride'] or params['chunk_size']} "
                 f"img={params['img_size']} scale={params['scale_mode']}"
             )
+            if params.get("basemap"):
+                title += f" basemap={params['basemap']}"
             for start in range(0, len(idxs), per_page):
                 page = idxs[start : start + per_page]
                 fig, axes = plt.subplots(rows, cols, figsize=(cols * 2.5, rows * 2.6))
@@ -160,7 +165,10 @@ def _build_class_pdfs(
                     ax.axis("off")
                 for ax, idx in zip(axes_arr, page):
                     row = meta.loc[idx]
-                    ax.imshow(images[idx], cmap="gray", vmin=0, vmax=255)
+                    if images[idx].ndim == 2:
+                        ax.imshow(images[idx], cmap="gray", vmin=0, vmax=255)
+                    else:
+                        ax.imshow(images[idx])
                     ax.set_title(
                         f"#{int(row['global_chunk_idx'])} | {row['individual_id']}\n"
                         f"{pd.Timestamp(row['start_time']).strftime('%Y-%m-%d')}",
@@ -187,14 +195,17 @@ def _build_payload(
         Study(study_id).trajectories_path,
         split=split_arg,
         img_size=params["img_size"],
+        chunk_mode=params["chunk_mode"],
         chunk_size=params["chunk_size"],
         stride=params["stride"],
         min_chunk_size=params["min_chunk_size"],
+        burst_gap_seconds=params["burst_gap_seconds"],
         line_width=params["line_width"],
         marker_radius=params["marker_radius"],
         padding=params["padding"],
         scale_mode=params["scale_mode"],
         scale_quantile=params["scale_quantile"],
+        basemap=params["basemap"],
     )
     meta = build.metadata.copy()
     if len(meta) == 0:
@@ -512,12 +523,13 @@ def _html_template(payload: dict) -> str:
     const subtitle = document.getElementById("subtitle");
     subtitle.textContent =
       `${{DATA.study_id}} | split=${{DATA.split}} | chunk=${{DATA.params.chunk_size}} | ` +
-      `stride=${{DATA.params.stride ?? DATA.params.chunk_size}} | img=${{DATA.params.img_size}} | scale=${{DATA.params.scale_mode}}`;
+      `stride=${{DATA.params.stride ?? DATA.params.chunk_size}} | img=${{DATA.params.img_size}} | ` +
+      `scale=${{DATA.params.scale_mode}} | basemap=${{DATA.params.basemap}}`;
 
     const map = L.map("map", {{ preferCanvas: true }});
-    L.tileLayer("https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
+    L.tileLayer("{thumbnail_basemap_spec(DEFAULT_THUMBNAIL_BASEMAP).tile_url}", {{
       maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors"
+      attribution: "{thumbnail_basemap_spec(DEFAULT_THUMBNAIL_BASEMAP).attribution}"
     }}).addTo(map);
 
     const fullTrackLayer = L.layerGroup().addTo(map);
@@ -711,14 +723,21 @@ def main() -> None:
     parser.add_argument("--split", default="train", choices=["train", "test", "all"])
     parser.add_argument("--out", required=True, help="Output directory for index.html and PDFs.")
     parser.add_argument("--img-size", type=int, default=64)
+    parser.add_argument("--chunk-mode", choices=["fixed", "burst"], default="fixed")
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--stride", type=int, default=0, help="0 means use chunk size.")
     parser.add_argument("--min-chunk-size", type=int, default=10)
+    parser.add_argument("--burst-gap-seconds", type=float, default=3600.0)
     parser.add_argument("--line-width", type=int, default=1)
     parser.add_argument("--marker-radius", type=int, default=1)
     parser.add_argument("--padding", type=int, default=2)
     parser.add_argument("--scale-mode", choices=["individual", "chunk"], default="individual")
     parser.add_argument("--scale-quantile", type=float, default=0.5)
+    parser.add_argument(
+        "--basemap",
+        choices=["positron", "topographic", "osm", "satellite", "none"],
+        default=DEFAULT_THUMBNAIL_BASEMAP,
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out)
@@ -726,14 +745,17 @@ def main() -> None:
 
     params = {
         "img_size": int(args.img_size),
+        "chunk_mode": str(args.chunk_mode),
         "chunk_size": int(args.chunk_size),
         "stride": None if int(args.stride) <= 0 else int(args.stride),
         "min_chunk_size": int(args.min_chunk_size),
+        "burst_gap_seconds": float(args.burst_gap_seconds),
         "line_width": int(args.line_width),
         "marker_radius": int(args.marker_radius),
         "padding": int(args.padding),
         "scale_mode": str(args.scale_mode),
         "scale_quantile": float(args.scale_quantile),
+        "basemap": str(args.basemap),
     }
 
     payload = _build_payload(

@@ -121,6 +121,8 @@ def build_thumbnail_pdf_bytes(
     )
     if params.get("scale_mode") == "individual":
         title += f" q={float(params.get('scale_quantile', 0.5)):.2f}"
+    if params.get("basemap"):
+        title += f" basemap={params['basemap']}"
     with PdfPages(buf) as pdf:
         for page_start in range(0, len(ordered_indices), per_page):
             page_indices = ordered_indices[page_start : page_start + per_page]

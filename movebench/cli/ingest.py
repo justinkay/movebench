@@ -343,9 +343,9 @@ def run(args: argparse.Namespace) -> int:
         if args.study_id is not None:
             parser.error("--study-id cannot be used when source_path is a directory (one study per CSV).")
 
-        csv_paths = sorted(source_path.glob("*.csv"))
+        csv_paths = sorted(p for p in source_path.rglob("*.csv") if p.is_file())
         if not csv_paths:
-            parser.error(f"No CSV files found in directory: {source_path}")
+            parser.error(f"No CSV files found under directory: {source_path}")
 
         stem_counts = Counter([p.stem for p in csv_paths])
         dupes = sorted([s for s, c in stem_counts.items() if c > 1])
@@ -431,4 +431,3 @@ def run(args: argparse.Namespace) -> int:
         log_prefix="",
     )
     return 0
-

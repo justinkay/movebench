@@ -23,6 +23,7 @@ from movebench.thumbnail_embedding import (
     thumbnail_png_bytes,
     chunk_detail_payload,
 )
+from movebench.thumbnail_basemaps import thumbnail_basemap_ids, thumbnail_basemap_label
 
 _JOBS: dict[str, threading.Thread] = {}
 _LOCK = threading.Lock()
@@ -72,6 +73,11 @@ def _build_handler(cache_root: Path, source_root: Path):
             if path == "/api/sources":
                 self._json(
                     {
+                        "basemap_options": [
+                            {"value": key, "label": thumbnail_basemap_label(key)}
+                            for key in thumbnail_basemap_ids(include_none=True)
+                            if key != "osm"
+                        ],
                         "default_config": default_run_config(),
                         "sources": list_embedding_sources(source_root),
                     }
@@ -364,6 +370,13 @@ def _index_html() -> str:
         </select></label>
       </div>
       <div class="grid2">
+        <label>Chunk mode<select id="chunk-mode">
+          <option value="fixed">Fixed</option>
+          <option value="burst">Burst</option>
+        </select></label>
+        <label>Burst gap (s)<input id="burst-gap-seconds" type="number" min="1" step="300" value="3600" /></label>
+      </div>
+      <div class="grid2">
         <label>Chunk size<input id="chunk-size" type="number" min="2" value="50" /></label>
         <label>Stride<input id="stride" type="number" min="0" value="0" /></label>
       </div>
@@ -384,9 +397,10 @@ def _index_html() -> str:
           <option value="individual">Individual</option>
           <option value="chunk">Chunk</option>
         </select></label>
-        <label>Color by<select id="color-by-select"></select></label>
+        <label>Thumbnail basemap<select id="thumbnail-basemap"></select></label>
       </div>
       <div class="grid2">
+        <label>Color by<select id="color-by-select"></select></label>
         <label>Device<select id="device-pref">
           <option value="auto">Auto</option>
           <option value="cuda">CUDA</option>
@@ -441,6 +455,7 @@ def _index_html() -> str:
   </div>
   <script>
     const state = {
+      basemapOptions: [],
       sources: [],
       currentRunId: null,
       currentPoints: null,
@@ -461,11 +476,16 @@ def _index_html() -> str:
 
     async function loadSources() {
       const data = await fetchJson("/api/sources");
+      state.basemapOptions = data.basemap_options || [];
+      const basemapSelect = document.getElementById("thumbnail-basemap");
+      basemapSelect.innerHTML = state.basemapOptions.map((option) => `<option value="${option.value}">${option.label}</option>`).join("");
       state.sources = data.sources || [];
       const sourceSelect = document.getElementById("source-select");
       sourceSelect.innerHTML = state.sources.map((s, idx) => `<option value="${idx}">${s.label}</option>`).join("");
       if (state.sources.length) applySource(0, data.default_config || null);
       sourceSelect.addEventListener("change", () => applySource(Number(sourceSelect.value), null));
+      document.getElementById("chunk-mode").addEventListener("change", syncChunkModeControls);
+      syncChunkModeControls();
     }
 
     function applySource(idx, defaultConfig) {
@@ -477,9 +497,25 @@ def _index_html() -> str:
       const colorBy = document.getElementById("color-by-select");
       colorBy.innerHTML = [`<option value="">Black & white</option>`].concat((source.color_columns || []).map((c) => `<option value="${c}">${c}</option>`)).join("");
       if (defaultConfig) {
+        document.getElementById("chunk-mode").value = defaultConfig.thumbnail.chunk_mode || "fixed";
         document.getElementById("chunk-size").value = defaultConfig.thumbnail.chunk_size;
         document.getElementById("stride").value = defaultConfig.thumbnail.stride || 0;
+        document.getElementById("min-chunk-size").value = defaultConfig.thumbnail.min_chunk_size;
+        document.getElementById("img-size").value = defaultConfig.thumbnail.img_size;
+        document.getElementById("burst-gap-seconds").value = defaultConfig.thumbnail.burst_gap_seconds || 3600;
+        document.getElementById("line-width").value = defaultConfig.thumbnail.line_width;
+        document.getElementById("marker-radius").value = defaultConfig.thumbnail.marker_radius;
+        document.getElementById("padding").value = defaultConfig.thumbnail.padding;
+        document.getElementById("scale-mode").value = defaultConfig.thumbnail.scale_mode || "individual";
+        document.getElementById("thumbnail-basemap").value = defaultConfig.thumbnail.basemap || "positron";
+        syncChunkModeControls();
       }
+    }
+
+    function syncChunkModeControls() {
+      const burstMode = document.getElementById("chunk-mode").value === "burst";
+      document.getElementById("chunk-size").disabled = burstMode;
+      document.getElementById("stride").disabled = burstMode;
     }
 
     function currentSource() {
@@ -495,15 +531,18 @@ def _index_html() -> str:
         },
         thumbnail: {
           img_size: Number(document.getElementById("img-size").value),
+          chunk_mode: document.getElementById("chunk-mode").value,
           chunk_size: Number(document.getElementById("chunk-size").value),
           stride: Number(document.getElementById("stride").value) || null,
           min_chunk_size: Number(document.getElementById("min-chunk-size").value),
+          burst_gap_seconds: Number(document.getElementById("burst-gap-seconds").value) || 3600,
           line_width: Number(document.getElementById("line-width").value),
           marker_radius: Number(document.getElementById("marker-radius").value),
           padding: Number(document.getElementById("padding").value),
           scale_mode: document.getElementById("scale-mode").value,
           scale_quantile: 0.5,
           color_by: document.getElementById("color-by-select").value || null,
+          basemap: document.getElementById("thumbnail-basemap").value || "positron",
         },
         embedding: {
           model_name: "dinov2_vits14",
