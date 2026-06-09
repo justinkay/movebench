@@ -12,6 +12,7 @@ from movebench.synthetic.movement import (
     PLANNED_ANOMALY_TYPES,
     InjectionSpec,
     SimulationConfig,
+    _apply_gps_observation_model,
     benchmark_profile,
     demo_profile,
     simulate_movement,
@@ -84,6 +85,10 @@ def test_profile_constructors_declare_planned_defaults():
     assert (demo.n_individuals, demo.fixes_per_individual) == (20, 240)
     assert demo.anomalous_individual_count == 7
     assert len({item.individual_index for item in demo.injections}) == 7
+    stationary = next(
+        item for item in demo.injections if item.anomaly_type == "stationary"
+    )
+    assert stationary.duration_fixes == 72
 
     assert (benchmark.n_individuals, benchmark.fixes_per_individual) == (100, 720)
     assert benchmark.anomalous_individual_count == 18
@@ -101,6 +106,7 @@ def test_profile_constructors_declare_planned_defaults():
         ) == (6, 12)
         assert config.turn_concentration_kappa == 6.25
         assert config.gps_noise_sd_m == 3.0
+        assert config.gps_quantization_m == 1.0
 
 
 def test_turn_concentration_must_be_nonnegative():
@@ -117,8 +123,53 @@ def test_gps_noise_standard_deviation_must_be_nonnegative():
         simulate_movement(config)
 
 
+def test_gps_quantization_must_be_nonnegative_or_none():
+    config = replace(_checkpoint_config(), gps_quantization_m=-0.1)
+
+    with pytest.raises(ValueError, match="gps_quantization_m"):
+        simulate_movement(config)
+
+
+def test_gps_observations_lie_on_local_meter_quantization_grid():
+    quantization_m = 2.0
+    east_m = np.linspace(-10.0, 10.0, 41)
+    north_m = np.linspace(15.0, -5.0, 41)
+    observed_east_m, observed_north_m = _apply_gps_observation_model(
+        east_m,
+        north_m,
+        standard_deviation_m=3.0,
+        quantization_m=quantization_m,
+        rng=np.random.default_rng(123),
+    )
+
+    np.testing.assert_allclose(
+        observed_east_m / quantization_m,
+        np.round(observed_east_m / quantization_m),
+    )
+    np.testing.assert_allclose(
+        observed_north_m / quantization_m,
+        np.round(observed_north_m / quantization_m),
+    )
+    assert not np.array_equal(observed_east_m, east_m)
+    assert not np.array_equal(observed_north_m, north_m)
+
+
+def test_zero_and_none_disable_gps_quantization():
+    config = replace(_checkpoint_config(), gps_quantization_m=0.0)
+    disabled_with_zero = simulate_movement(config)
+    disabled_with_none = simulate_movement(
+        replace(config, gps_quantization_m=None)
+    )
+
+    pd.testing.assert_frame_equal(disabled_with_zero, disabled_with_none)
+
+
 def test_global_gps_noise_is_deterministic_and_only_changes_coordinates():
-    latent_config = replace(_checkpoint_config(), gps_noise_sd_m=0.0)
+    latent_config = replace(
+        _checkpoint_config(),
+        gps_noise_sd_m=0.0,
+        gps_quantization_m=None,
+    )
     observed_config = replace(latent_config, gps_noise_sd_m=3.0)
     latent = simulate_movement(latent_config)
     observed = simulate_movement(observed_config)
@@ -367,7 +418,11 @@ def test_demo_injections_have_buffered_nonoverlapping_session_windows():
             .dt.total_seconds()
             .dropna()
         )
-        assert (surrounding_gaps <= 3600.0).all()
+        anomaly_type = injected["synthetic:anomaly_type"].iloc[0]
+        if anomaly_type == "stationary":
+            assert (surrounding_gaps > 3600.0).any()
+        else:
+            assert (surrounding_gaps <= 3600.0).all()
 
 
 def test_explicit_overlapping_injections_are_rejected():
@@ -515,8 +570,8 @@ def test_demo_stationary_is_sustained_and_near_stationary():
         & np.isfinite(steps)
     ]
 
-    assert len(indexes) >= 8
-    assert duration_hours >= 6.0
+    assert len(indexes) == 72
+    assert duration_hours >= 72.0
     assert np.median(steps[indexes[1:]]) < baseline_median * 0.1
     assert downstream_step < np.quantile(baseline_steps, 0.99) * 2
 
@@ -531,10 +586,10 @@ def test_demo_stationary_is_sustained_and_near_stationary():
         .shape[0]
         == 1
     )
-    assert (
-        individual.loc[indexes, [LON_COL, LAT_COL]].drop_duplicates().shape[0]
-        == len(indexes)
-    )
+    stationary_grid_cells = individual.loc[
+        indexes, [LON_COL, LAT_COL]
+    ].drop_duplicates()
+    assert 1 < len(stationary_grid_cells) < len(indexes)
 
 
 def test_demo_csv_remains_movebench_compatible(tmp_path):

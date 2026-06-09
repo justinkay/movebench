@@ -100,6 +100,7 @@ class SimulationConfig:
     turn_concentration_kappa: float = 6.25
     individual_offset_sd_m: float = 2_000.0
     gps_noise_sd_m: float = 3.0
+    gps_quantization_m: float | None = 1.0
     study_name: str = "Synthetic movement benchmark"
     taxon_name: str = "Synthetic animal"
     set_name: str = "train"
@@ -121,6 +122,7 @@ def demo_profile(
             severity=0.65,
             notes=f"demo {anomaly_type} injection",
             distance_m=50_000.0,
+            duration_fixes=72 if anomaly_type == STATIONARY else None,
         )
         for index, anomaly_type in enumerate(anomaly_types)
     )
@@ -254,10 +256,11 @@ def simulate_movement(config: SimulationConfig) -> pd.DataFrame:
             )
             reserved_fix_indexes.update(reserved_indexes)
 
-        observed_east_m, observed_north_m = _apply_gps_observation_noise(
+        observed_east_m, observed_north_m = _apply_gps_observation_model(
             east_m,
             north_m,
             standard_deviation_m=config.gps_noise_sd_m,
+            quantization_m=config.gps_quantization_m,
             rng=observation_rng,
         )
         longitudes, latitudes = _local_meters_to_lon_lat(
@@ -363,6 +366,8 @@ def _validate_config(config: SimulationConfig) -> None:
         raise ValueError("individual_offset_sd_m must be nonnegative")
     if config.gps_noise_sd_m < 0:
         raise ValueError("gps_noise_sd_m must be nonnegative")
+    if config.gps_quantization_m is not None and config.gps_quantization_m < 0:
+        raise ValueError("gps_quantization_m must be nonnegative or None")
     if not -180.0 <= config.anchor_lon <= 180.0:
         raise ValueError("anchor_lon must be between -180 and 180")
     if not -85.0 <= config.anchor_lat <= 85.0:
@@ -519,6 +524,7 @@ def _resolve_injection_indexes(
         session_ids=session_ids,
         placement_span=placement_span,
         reserved_fix_indexes=reserved_fix_indexes,
+        require_single_session=spec.anomaly_type != STATIONARY,
     )
     if spec.fix_index is not None:
         if int(spec.fix_index) not in candidates:
@@ -555,7 +561,7 @@ def _injection_shape(spec: InjectionSpec) -> tuple[tuple[int, ...], int]:
         LOCATION_PING_PONG: max(6, int(round(6 + 4 * severity))),
         LOCATION_CLUSTERS_INTERLEAVED: max(6, int(round(6 + 6 * severity))),
         TRANSPORT_FAST_LINEAR: max(5, int(round(5 + 5 * severity))),
-        STATIONARY: max(8, int(round(8 + 6 * severity))),
+        STATIONARY: max(48, int(round(48 + 36 * severity))),
     }
     length = spec.duration_fixes or default_lengths[spec.anomaly_type]
     return tuple(range(length)), length
@@ -566,11 +572,21 @@ def _eligible_injection_starts(
     session_ids: np.ndarray,
     placement_span: int,
     reserved_fix_indexes: set[int],
+    require_single_session: bool,
 ) -> list[int]:
     count = len(session_ids)
     lower_track_bound = int(np.floor(count * 0.2))
     upper_track_bound = int(np.ceil(count * 0.8))
     candidates: list[int] = []
+    if not require_single_session:
+        first = max(2, lower_track_bound)
+        last = min(count - placement_span - 2, upper_track_bound - placement_span)
+        for start in range(first, last + 1):
+            reservation = range(start - 2, start + placement_span + 2)
+            if not any(index in reserved_fix_indexes for index in reservation):
+                candidates.append(start)
+        return candidates
+
     for session_id in np.unique(session_ids):
         session_indexes = np.flatnonzero(session_ids == session_id)
         session_start = int(session_indexes[0])
@@ -812,27 +828,34 @@ def _inject_stationary(
     )
 
 
-def _apply_gps_observation_noise(
+def _apply_gps_observation_model(
     east_m: np.ndarray,
     north_m: np.ndarray,
     *,
     standard_deviation_m: float,
+    quantization_m: float | None,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     observed_east_m = east_m.copy()
     observed_north_m = north_m.copy()
-    if standard_deviation_m == 0.0:
-        return observed_east_m, observed_north_m
-    observed_east_m += rng.normal(
-        0.0,
-        standard_deviation_m,
-        size=len(observed_east_m),
-    )
-    observed_north_m += rng.normal(
-        0.0,
-        standard_deviation_m,
-        size=len(observed_north_m),
-    )
+    if standard_deviation_m != 0.0:
+        observed_east_m += rng.normal(
+            0.0,
+            standard_deviation_m,
+            size=len(observed_east_m),
+        )
+        observed_north_m += rng.normal(
+            0.0,
+            standard_deviation_m,
+            size=len(observed_north_m),
+        )
+    if quantization_m not in (None, 0.0):
+        observed_east_m = (
+            np.round(observed_east_m / quantization_m) * quantization_m
+        )
+        observed_north_m = (
+            np.round(observed_north_m / quantization_m) * quantization_m
+        )
     return observed_east_m, observed_north_m
 
 
