@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -78,6 +79,12 @@ def _step_lengths(group: pd.DataFrame) -> np.ndarray:
     )
 
 
+@pytest.fixture(scope="module")
+def benchmark_simulation() -> tuple[SimulationConfig, pd.DataFrame]:
+    config = benchmark_profile(seed=101)
+    return config, simulate_movement(config)
+
+
 def test_profile_constructors_declare_planned_defaults():
     demo = demo_profile()
     benchmark = benchmark_profile()
@@ -91,8 +98,27 @@ def test_profile_constructors_declare_planned_defaults():
     assert stationary.duration_fixes == 72
 
     assert (benchmark.n_individuals, benchmark.fixes_per_individual) == (100, 720)
-    assert benchmark.anomalous_individual_count == 18
-    assert len({item.individual_index for item in benchmark.injections}) == 18
+    anomalous_individuals = {
+        item.individual_index for item in benchmark.injections
+    }
+    assert benchmark.anomalous_individual_count == 30
+    assert len(anomalous_individuals) == 30
+    assert benchmark.n_individuals - len(anomalous_individuals) == 70
+    assert Counter(item.anomaly_type for item in benchmark.injections) == {
+        "gps_spike_single": 5,
+        "gps_spike_few": 5,
+        "gps_spike_cluster": 4,
+        "location_ping_pong": 4,
+        "location_clusters_interleaved": 4,
+        "transport_fast_linear": 4,
+        "stationary": 4,
+    }
+    assert benchmark.injections == benchmark_profile(seed=0).injections
+    assert {
+        item.individual_index for item in benchmark_profile(seed=1).injections
+    } != anomalous_individuals
+    assert demo.individual_start_spread_m == 4_000.0
+    assert benchmark.individual_start_spread_m == 15_000.0
 
     for config in (demo, benchmark):
         assert (config.session_min_fixes, config.session_max_fixes) == (12, 36)
@@ -114,6 +140,37 @@ def test_turn_concentration_must_be_nonnegative():
 
     with pytest.raises(ValueError, match="turn_concentration_kappa"):
         simulate_movement(config)
+
+
+def test_individual_start_spread_must_be_nonnegative():
+    config = replace(_checkpoint_config(), individual_start_spread_m=-1.0)
+
+    with pytest.raises(ValueError, match="individual_start_spread_m"):
+        simulate_movement(config)
+
+
+def test_individual_start_spread_only_changes_coordinates():
+    centered_config = replace(
+        _checkpoint_config(),
+        individual_start_spread_m=0.0,
+    )
+    spread_config = replace(
+        centered_config,
+        individual_start_spread_m=4_000.0,
+    )
+    centered = simulate_movement(centered_config)
+    spread = simulate_movement(spread_config)
+
+    non_coordinate_columns = [
+        column for column in CSV_COLUMNS if column not in {LON_COL, LAT_COL}
+    ]
+    pd.testing.assert_frame_equal(
+        centered[non_coordinate_columns],
+        spread[non_coordinate_columns],
+    )
+    assert not centered[[LON_COL, LAT_COL]].equals(
+        spread[[LON_COL, LAT_COL]]
+    )
 
 
 def test_gps_noise_standard_deviation_must_be_nonnegative():
@@ -275,7 +332,7 @@ def test_normal_and_injected_label_invariants():
 def test_spike_is_inside_session_and_extreme_relative_to_baseline():
     result = simulate_movement(_checkpoint_config())
     individual = result[
-        result[INDIVIDUAL_COL] == "synthetic-002"
+        result[INDIVIDUAL_COL] == "synthetic-002-gps_spike_single"
     ].reset_index(drop=True)
     anomaly_index = int(np.flatnonzero(individual["synthetic:is_anomaly"])[0])
     times = pd.to_datetime(individual[TIME_COL])
@@ -599,6 +656,158 @@ def test_demo_csv_remains_movebench_compatible(tmp_path):
     featured = compute_movement_features(loaded)
 
     assert len(loaded) == 20 * 240
+    assert len(featured) == len(loaded)
+    assert {"step_length_m", "time_since_last", "turn_angle_rad"}.issubset(
+        featured.columns
+    )
+
+
+def test_benchmark_dimensions_allocation_and_severity_variation(
+    benchmark_simulation,
+):
+    config, result = benchmark_simulation
+    counts = result.groupby(INDIVIDUAL_COL).size()
+    anomalies = result[result["synthetic:is_anomaly"]]
+    anomalous_individuals = set(anomalies[INDIVIDUAL_COL])
+    all_individuals = set(result[INDIVIDUAL_COL])
+
+    assert result.shape == (100 * 720, len(CSV_COLUMNS))
+    assert result[INDIVIDUAL_COL].nunique() == 100
+    assert counts.eq(720).all()
+    assert len(anomalous_individuals) == 30
+    assert len(all_individuals - anomalous_individuals) == 70
+    assert Counter(
+        anomalies.groupby("synthetic:anomaly_type")[INDIVIDUAL_COL].nunique()
+        .to_dict()
+    ) == Counter(
+        {
+            "gps_spike_single": 5,
+            "gps_spike_few": 5,
+            "gps_spike_cluster": 4,
+            "location_ping_pong": 4,
+            "location_clusters_interleaved": 4,
+            "transport_fast_linear": 4,
+            "stationary": 4,
+        }
+    )
+    assert set(anomalies["synthetic:anomaly_type"]) == set(
+        PLANNED_ANOMALY_TYPES
+    )
+    assert (
+        anomalies.groupby("synthetic:anomaly_type")["synthetic:severity"]
+        .nunique()
+        .gt(1)
+        .all()
+    )
+    assert len(config.injections) == 30
+    for individual_id, group in result.groupby(INDIVIDUAL_COL, sort=False):
+        anomaly_types = set(
+            group.loc[
+                group["synthetic:is_anomaly"],
+                "synthetic:anomaly_type",
+            ]
+        )
+        if anomaly_types:
+            assert all(
+                anomaly_type in individual_id
+                for anomaly_type in anomaly_types
+            )
+        else:
+            assert individual_id.count("-") == 1
+
+
+def test_benchmark_labels_and_injection_windows_do_not_overlap(
+    benchmark_simulation,
+):
+    _config, result = benchmark_simulation
+    anomalies = result[result["synthetic:is_anomaly"]]
+    normal = result[~result["synthetic:is_anomaly"]]
+
+    assert not anomalies["visible"].any()
+    assert anomalies["manually-marked-outlier"].all()
+    assert anomalies["synthetic:injection_id"].ne("none").all()
+    assert anomalies["synthetic:severity"].between(0.0, 1.0).all()
+    assert anomalies["synthetic:notes"].str.strip().ne("").all()
+    assert normal["visible"].all()
+    assert not normal["manually-marked-outlier"].any()
+    assert normal["synthetic:anomaly_type"].eq("normal").all()
+    assert normal["synthetic:injection_id"].eq("none").all()
+    assert normal["synthetic:severity"].eq(0.0).all()
+    assert normal["synthetic:notes"].eq("baseline").all()
+    assert not result["algorithm-marked-outlier"].any()
+    assert (
+        anomalies.groupby(INDIVIDUAL_COL)["synthetic:injection_id"]
+        .nunique()
+        .eq(1)
+        .all()
+    )
+
+    for injection_id, injected in anomalies.groupby(
+        "synthetic:injection_id",
+        sort=False,
+    ):
+        individual = result[
+            result[INDIVIDUAL_COL] == injected[INDIVIDUAL_COL].iloc[0]
+        ].reset_index(drop=True)
+        indexes = individual.index[
+            individual["synthetic:injection_id"].eq(injection_id)
+        ].to_numpy()
+        first, last = int(indexes.min()), int(indexes.max())
+        assert first >= 2
+        assert last + 2 < len(individual)
+        assert not individual.loc[
+            [first - 2, first - 1, last + 1, last + 2],
+            "synthetic:is_anomaly",
+        ].any()
+
+
+def test_benchmark_coordinates_timestamps_and_start_offsets(
+    benchmark_simulation,
+):
+    config, result = benchmark_simulation
+    assert result[LON_COL].between(-180.0, 180.0).all()
+    assert result[LAT_COL].between(-90.0, 90.0).all()
+
+    starts = result.groupby(INDIVIDUAL_COL, sort=False).first()
+    assert len(starts[[LON_COL, LAT_COL]].drop_duplicates()) == 100
+    start_distances = haversine_m(
+        config.anchor_lat,
+        config.anchor_lon,
+        starts[LAT_COL].to_numpy(),
+        starts[LON_COL].to_numpy(),
+    )
+    assert np.max(start_distances) <= config.individual_start_spread_m + 100.0
+    assert np.quantile(start_distances, 0.75) > 5_000.0
+
+    for _individual, group in result.groupby(INDIVIDUAL_COL, sort=False):
+        timestamps = pd.to_datetime(group[TIME_COL])
+        assert timestamps.is_monotonic_increasing
+        assert timestamps.is_unique
+
+
+def test_benchmark_is_deterministic_and_seed_sensitive(
+    benchmark_simulation,
+):
+    config, result = benchmark_simulation
+    repeated = simulate_movement(config)
+    changed_config = benchmark_profile(seed=config.seed + 1)
+    changed = simulate_movement(changed_config)
+
+    pd.testing.assert_frame_equal(result, repeated)
+    assert not result[[LON_COL, LAT_COL]].equals(changed[[LON_COL, LAT_COL]])
+    assert config.injections != changed_config.injections
+
+
+def test_benchmark_csv_is_movebench_compatible(
+    tmp_path,
+    benchmark_simulation,
+):
+    config, _result = benchmark_simulation
+    path = write_movement_csv(tmp_path / "benchmark.csv", config)
+    loaded = load_trajectories_csv(str(path))
+    featured = compute_movement_features(loaded)
+
+    assert len(loaded) == 100 * 720
     assert len(featured) == len(loaded)
     assert {"step_length_m", "time_since_last", "turn_angle_rad"}.issubset(
         featured.columns

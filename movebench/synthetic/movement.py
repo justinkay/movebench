@@ -98,7 +98,7 @@ class SimulationConfig:
     mean_step_length_m: float = 60.0
     step_length_cv: float = 0.35
     turn_concentration_kappa: float = 6.25
-    individual_offset_sd_m: float = 2_000.0
+    individual_start_spread_m: float = 4_000.0
     gps_noise_sd_m: float = 3.0
     gps_quantization_m: float | None = 1.0
     study_name: str = "Synthetic movement benchmark"
@@ -140,6 +140,7 @@ def demo_profile(
         within_session_max_minutes=60,
         between_session_min_hours=6,
         between_session_max_hours=12,
+        individual_start_spread_m=4_000.0,
         study_name="Synthetic movement benchmark demo",
         injections=injections,
     )
@@ -152,16 +153,20 @@ def benchmark_profile(
 ) -> SimulationConfig:
     """Return the planned anomaly-sparse evaluation profile."""
     allocation = (
-        (GPS_SPIKE_SINGLE, (0.35, 0.65, 1.0)),
-        ("gps_spike_few", (0.35, 0.65, 1.0)),
-        ("gps_spike_cluster", (0.35, 1.0)),
-        ("location_ping_pong", (0.35, 0.65, 1.0)),
-        ("location_clusters_interleaved", (0.35, 1.0)),
-        ("transport_fast_linear", (0.35, 0.65, 1.0)),
-        ("stationary", (0.35, 1.0)),
+        (GPS_SPIKE_SINGLE, (0.25, 0.45, 0.65, 0.85, 1.0)),
+        (GPS_SPIKE_FEW, (0.25, 0.45, 0.65, 0.85, 1.0)),
+        (GPS_SPIKE_CLUSTER, (0.35, 0.60, 0.80, 1.0)),
+        (LOCATION_PING_PONG, (0.35, 0.60, 0.80, 1.0)),
+        (LOCATION_CLUSTERS_INTERLEAVED, (0.35, 0.60, 0.80, 1.0)),
+        (TRANSPORT_FAST_LINEAR, (0.35, 0.60, 0.80, 1.0)),
+        (STATIONARY, (0.35, 0.60, 0.80, 1.0)),
     )
+    allocation_rng = np.random.default_rng(
+        np.random.SeedSequence([int(seed), 5])
+    )
+    anomalous_individuals = allocation_rng.permutation(100)[:30].tolist()
     injections: list[InjectionSpec] = []
-    individual_index = 82
+    allocation_index = 0
     type_counts: dict[str, int] = {}
     for anomaly_type, severities in allocation:
         for severity in severities:
@@ -171,14 +176,14 @@ def benchmark_profile(
             injections.append(
                 InjectionSpec(
                     anomaly_type=anomaly_type,
-                    individual_index=individual_index,
+                    individual_index=anomalous_individuals[allocation_index],
                     injection_id=f"{anomaly_type}_{ordinal:03d}",
                     severity=severity,
                     notes=f"benchmark {anomaly_type} injection",
                     distance_m=distance_m,
                 )
             )
-            individual_index += 1
+            allocation_index += 1
 
     return SimulationConfig(
         profile_name="benchmark",
@@ -187,13 +192,14 @@ def benchmark_profile(
         anchor_lat=anchor_lat,
         n_individuals=100,
         fixes_per_individual=720,
-        anomalous_individual_count=18,
+        anomalous_individual_count=30,
         session_min_fixes=12,
         session_max_fixes=36,
         within_session_min_minutes=50,
         within_session_max_minutes=60,
         between_session_min_hours=6,
         between_session_max_hours=12,
+        individual_start_spread_m=15_000.0,
         study_name="Synthetic movement benchmark",
         injections=tuple(injections),
     )
@@ -224,9 +230,16 @@ def simulate_movement(config: SimulationConfig) -> pd.DataFrame:
         movement_rng = _individual_rng(config.seed, individual_index, 2)
         injection_rng = _individual_rng(config.seed, individual_index, 3)
         observation_rng = _individual_rng(config.seed, individual_index, 4)
+        start_offset_rng = _individual_rng(config.seed, individual_index, 5)
 
         timestamps, session_ids = _generate_timestamps(config, timestamp_rng)
         east_m, north_m = _generate_correlated_random_walk(config, movement_rng)
+        start_east_m, start_north_m = _generate_individual_start_offset(
+            config.individual_start_spread_m,
+            start_offset_rng,
+        )
+        east_m += start_east_m
+        north_m += start_north_m
         labels = [_normal_labels() for _ in range(config.fixes_per_individual)]
 
         reserved_fix_indexes: set[int] = set()
@@ -271,7 +284,10 @@ def simulate_movement(config: SimulationConfig) -> pd.DataFrame:
         )
         _validate_coordinates(longitudes, latitudes)
 
-        individual_id = f"synthetic-{individual_index + 1:03d}"
+        individual_id = _individual_identifier(
+            individual_index,
+            individual_specs,
+        )
         tag_id = f"synthetic-tag-{individual_index + 1:03d}"
         for fix_index in range(config.fixes_per_individual):
             event_id = 9_000_000_000_000 + (individual_index + 1) * 1_000_000 + fix_index + 1
@@ -362,8 +378,8 @@ def _validate_config(config: SimulationConfig) -> None:
         raise ValueError("step_length_cv must be positive")
     if config.turn_concentration_kappa < 0:
         raise ValueError("turn_concentration_kappa must be nonnegative")
-    if config.individual_offset_sd_m < 0:
-        raise ValueError("individual_offset_sd_m must be nonnegative")
+    if config.individual_start_spread_m < 0:
+        raise ValueError("individual_start_spread_m must be nonnegative")
     if config.gps_noise_sd_m < 0:
         raise ValueError("gps_noise_sd_m must be nonnegative")
     if config.gps_quantization_m is not None and config.gps_quantization_m < 0:
@@ -424,6 +440,17 @@ def _individual_rng(seed: int, individual_index: int, stream: int) -> np.random.
         [int(seed), int(individual_index), int(stream)]
     )
     return np.random.default_rng(seed_sequence)
+
+
+def _individual_identifier(
+    individual_index: int,
+    injections: Sequence[InjectionSpec],
+) -> str:
+    base = f"synthetic-{individual_index + 1:03d}"
+    anomaly_types = sorted({spec.anomaly_type for spec in injections})
+    if not anomaly_types:
+        return base
+    return f"{base}-{'-'.join(anomaly_types)}"
 
 
 def _generate_timestamps(
@@ -488,10 +515,8 @@ def _generate_correlated_random_walk(
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
     count = config.fixes_per_individual
-    east_m = np.empty(count, dtype=np.float64)
-    north_m = np.empty(count, dtype=np.float64)
-    east_m[0] = float(rng.normal(0.0, config.individual_offset_sd_m))
-    north_m[0] = float(rng.normal(0.0, config.individual_offset_sd_m))
+    east_m = np.zeros(count, dtype=np.float64)
+    north_m = np.zeros(count, dtype=np.float64)
     if count == 1:
         return east_m, north_m
 
@@ -510,6 +535,20 @@ def _generate_correlated_random_walk(
     east_m[1:] = east_m[0] + np.cumsum(step_lengths * np.cos(headings))
     north_m[1:] = north_m[0] + np.cumsum(step_lengths * np.sin(headings))
     return east_m, north_m
+
+
+def _generate_individual_start_offset(
+    spread_m: float,
+    rng: np.random.Generator,
+) -> tuple[float, float]:
+    if spread_m == 0.0:
+        return 0.0, 0.0
+    radius_m = spread_m * np.sqrt(rng.random())
+    bearing_rad = rng.uniform(-np.pi, np.pi)
+    return (
+        float(radius_m * np.cos(bearing_rad)),
+        float(radius_m * np.sin(bearing_rad)),
+    )
 
 
 def _resolve_injection_indexes(
