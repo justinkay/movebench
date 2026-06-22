@@ -16,6 +16,7 @@ from movebench.synthetic.movement import (
     _apply_gps_observation_model,
     benchmark_profile,
     demo_profile,
+    large_benchmark_profile,
     simulate_movement,
     write_movement_csv,
 )
@@ -88,6 +89,7 @@ def benchmark_simulation() -> tuple[SimulationConfig, pd.DataFrame]:
 def test_profile_constructors_declare_planned_defaults():
     demo = demo_profile()
     benchmark = benchmark_profile()
+    large_benchmark = large_benchmark_profile()
 
     assert (demo.n_individuals, demo.fixes_per_individual) == (20, 240)
     assert demo.anomalous_individual_count == 7
@@ -97,30 +99,44 @@ def test_profile_constructors_declare_planned_defaults():
     )
     assert stationary.duration_fixes == 72
 
-    assert (benchmark.n_individuals, benchmark.fixes_per_individual) == (100, 720)
+    assert (benchmark.n_individuals, benchmark.fixes_per_individual) == (200, 720)
     anomalous_individuals = {
         item.individual_index for item in benchmark.injections
     }
-    assert benchmark.anomalous_individual_count == 30
-    assert len(anomalous_individuals) == 30
-    assert benchmark.n_individuals - len(anomalous_individuals) == 70
+    assert benchmark.anomalous_individual_count == 70
+    assert len(anomalous_individuals) == 70
+    assert benchmark.n_individuals - len(anomalous_individuals) == 130
     assert Counter(item.anomaly_type for item in benchmark.injections) == {
-        "gps_spike_single": 5,
-        "gps_spike_few": 5,
-        "gps_spike_cluster": 4,
-        "location_ping_pong": 4,
-        "location_clusters_interleaved": 4,
-        "transport_fast_linear": 4,
-        "stationary": 4,
+        anomaly_type: 10 for anomaly_type in PLANNED_ANOMALY_TYPES
     }
     assert benchmark.injections == benchmark_profile(seed=0).injections
     assert {
         item.individual_index for item in benchmark_profile(seed=1).injections
     } != anomalous_individuals
+
+    assert (large_benchmark.n_individuals, large_benchmark.fixes_per_individual) == (
+        300,
+        720,
+    )
+    large_anomalous_individuals = {
+        item.individual_index for item in large_benchmark.injections
+    }
+    assert large_benchmark.anomalous_individual_count == 105
+    assert len(large_anomalous_individuals) == 105
+    assert large_benchmark.n_individuals - len(large_anomalous_individuals) == 195
+    assert Counter(item.anomaly_type for item in large_benchmark.injections) == {
+        anomaly_type: 15 for anomaly_type in PLANNED_ANOMALY_TYPES
+    }
+    assert large_benchmark.injections == large_benchmark_profile(seed=0).injections
+    assert {
+        item.individual_index for item in large_benchmark_profile(seed=1).injections
+    } != large_anomalous_individuals
+
     assert demo.individual_start_spread_m == 4_000.0
     assert benchmark.individual_start_spread_m == 15_000.0
+    assert large_benchmark.individual_start_spread_m == 15_000.0
 
-    for config in (demo, benchmark):
+    for config in (demo, benchmark, large_benchmark):
         assert (config.session_min_fixes, config.session_max_fixes) == (12, 36)
         assert (
             config.within_session_min_minutes,
@@ -671,24 +687,16 @@ def test_benchmark_dimensions_allocation_and_severity_variation(
     anomalous_individuals = set(anomalies[INDIVIDUAL_COL])
     all_individuals = set(result[INDIVIDUAL_COL])
 
-    assert result.shape == (100 * 720, len(CSV_COLUMNS))
-    assert result[INDIVIDUAL_COL].nunique() == 100
+    assert result.shape == (200 * 720, len(CSV_COLUMNS))
+    assert result[INDIVIDUAL_COL].nunique() == 200
     assert counts.eq(720).all()
-    assert len(anomalous_individuals) == 30
-    assert len(all_individuals - anomalous_individuals) == 70
+    assert len(anomalous_individuals) == 70
+    assert len(all_individuals - anomalous_individuals) == 130
     assert Counter(
         anomalies.groupby("synthetic:anomaly_type")[INDIVIDUAL_COL].nunique()
         .to_dict()
     ) == Counter(
-        {
-            "gps_spike_single": 5,
-            "gps_spike_few": 5,
-            "gps_spike_cluster": 4,
-            "location_ping_pong": 4,
-            "location_clusters_interleaved": 4,
-            "transport_fast_linear": 4,
-            "stationary": 4,
-        }
+        {anomaly_type: 10 for anomaly_type in PLANNED_ANOMALY_TYPES}
     )
     assert set(anomalies["synthetic:anomaly_type"]) == set(
         PLANNED_ANOMALY_TYPES
@@ -699,7 +707,7 @@ def test_benchmark_dimensions_allocation_and_severity_variation(
         .gt(1)
         .all()
     )
-    assert len(config.injections) == 30
+    assert len(config.injections) == 70
     for individual_id, group in result.groupby(INDIVIDUAL_COL, sort=False):
         anomaly_types = set(
             group.loc[
@@ -769,7 +777,7 @@ def test_benchmark_coordinates_timestamps_and_start_offsets(
     assert result[LAT_COL].between(-90.0, 90.0).all()
 
     starts = result.groupby(INDIVIDUAL_COL, sort=False).first()
-    assert len(starts[[LON_COL, LAT_COL]].drop_duplicates()) == 100
+    assert len(starts[[LON_COL, LAT_COL]].drop_duplicates()) == 200
     start_distances = haversine_m(
         config.anchor_lat,
         config.anchor_lon,
@@ -807,7 +815,7 @@ def test_benchmark_csv_is_movebench_compatible(
     loaded = load_trajectories_csv(str(path))
     featured = compute_movement_features(loaded)
 
-    assert len(loaded) == 100 * 720
+    assert len(loaded) == 200 * 720
     assert len(featured) == len(loaded)
     assert {"step_length_m", "time_since_last", "turn_angle_rad"}.issubset(
         featured.columns

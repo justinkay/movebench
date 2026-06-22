@@ -6,6 +6,7 @@ from movebench.synthetic.movement import (
     SimulationConfig,
     benchmark_profile,
     demo_profile,
+    large_benchmark_profile,
     simulate_movement,
     write_movement_csv,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "SimulationConfig",
     "benchmark_profile",
     "demo_profile",
+    "large_benchmark_profile",
     "simulate_movement",
     "write_movement_csv",
 ]

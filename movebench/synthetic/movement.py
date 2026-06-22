@@ -146,53 +146,66 @@ def demo_profile(
     )
 
 
+def _benchmark_injections(
+    *,
+    seed: int,
+    n_individuals: int,
+    anomalies_per_type: int,
+    notes_prefix: str,
+) -> tuple[InjectionSpec, ...]:
+    total_anomalies = len(PLANNED_ANOMALY_TYPES) * anomalies_per_type
+    if total_anomalies > n_individuals:
+        raise ValueError("benchmark anomaly allocation exceeds n_individuals")
+
+    allocation_rng = np.random.default_rng(
+        np.random.SeedSequence([int(seed), 5])
+    )
+    anomalous_individuals = allocation_rng.permutation(n_individuals)[
+        :total_anomalies
+    ].tolist()
+    severities = np.linspace(0.25, 1.0, anomalies_per_type)
+
+    injections: list[InjectionSpec] = []
+    allocation_index = 0
+    for anomaly_type in PLANNED_ANOMALY_TYPES:
+        for ordinal, severity in enumerate(severities, start=1):
+            severity_value = float(severity)
+            distance_m = 20_000.0 + 80_000.0 * severity_value
+            injections.append(
+                InjectionSpec(
+                    anomaly_type=anomaly_type,
+                    individual_index=anomalous_individuals[allocation_index],
+                    injection_id=f"{anomaly_type}_{ordinal:03d}",
+                    severity=severity_value,
+                    notes=f"{notes_prefix} {anomaly_type} injection",
+                    distance_m=distance_m,
+                )
+            )
+            allocation_index += 1
+    return tuple(injections)
+
+
 def benchmark_profile(
     seed: int = 0,
     anchor_lon: float = DEFAULT_ANCHOR_LON,
     anchor_lat: float = DEFAULT_ANCHOR_LAT,
 ) -> SimulationConfig:
     """Return the planned anomaly-sparse evaluation profile."""
-    allocation = (
-        (GPS_SPIKE_SINGLE, (0.25, 0.45, 0.65, 0.85, 1.0)),
-        (GPS_SPIKE_FEW, (0.25, 0.45, 0.65, 0.85, 1.0)),
-        (GPS_SPIKE_CLUSTER, (0.35, 0.60, 0.80, 1.0)),
-        (LOCATION_PING_PONG, (0.35, 0.60, 0.80, 1.0)),
-        (LOCATION_CLUSTERS_INTERLEAVED, (0.35, 0.60, 0.80, 1.0)),
-        (TRANSPORT_FAST_LINEAR, (0.35, 0.60, 0.80, 1.0)),
-        (STATIONARY, (0.35, 0.60, 0.80, 1.0)),
+    injections = _benchmark_injections(
+        seed=seed,
+        n_individuals=200,
+        anomalies_per_type=10,
+        notes_prefix="benchmark",
     )
-    allocation_rng = np.random.default_rng(
-        np.random.SeedSequence([int(seed), 5])
-    )
-    anomalous_individuals = allocation_rng.permutation(100)[:30].tolist()
-    injections: list[InjectionSpec] = []
-    allocation_index = 0
-    type_counts: dict[str, int] = {}
-    for anomaly_type, severities in allocation:
-        for severity in severities:
-            ordinal = type_counts.get(anomaly_type, 0) + 1
-            type_counts[anomaly_type] = ordinal
-            distance_m = 20_000.0 + 80_000.0 * severity
-            injections.append(
-                InjectionSpec(
-                    anomaly_type=anomaly_type,
-                    individual_index=anomalous_individuals[allocation_index],
-                    injection_id=f"{anomaly_type}_{ordinal:03d}",
-                    severity=severity,
-                    notes=f"benchmark {anomaly_type} injection",
-                    distance_m=distance_m,
-                )
-            )
-            allocation_index += 1
 
     return SimulationConfig(
         profile_name="benchmark",
         seed=seed,
         anchor_lon=anchor_lon,
         anchor_lat=anchor_lat,
-        n_individuals=100,
+        n_individuals=200,
         fixes_per_individual=720,
-        anomalous_individual_count=30,
+        anomalous_individual_count=70,
         session_min_fixes=12,
         session_max_fixes=36,
         within_session_min_minutes=50,
@@ -201,7 +214,40 @@ def benchmark_profile(
         between_session_max_hours=12,
         individual_start_spread_m=15_000.0,
         study_name="Synthetic movement benchmark",
-        injections=tuple(injections),
+        injections=injections,
+    )
+
+
+def large_benchmark_profile(
+    seed: int = 0,
+    anchor_lon: float = DEFAULT_ANCHOR_LON,
+    anchor_lat: float = DEFAULT_ANCHOR_LAT,
+) -> SimulationConfig:
+    """Return the larger optional synthetic benchmark profile."""
+    injections = _benchmark_injections(
+        seed=seed,
+        n_individuals=300,
+        anomalies_per_type=15,
+        notes_prefix="large benchmark",
+    )
+
+    return SimulationConfig(
+        profile_name="large_benchmark",
+        seed=seed,
+        anchor_lon=anchor_lon,
+        anchor_lat=anchor_lat,
+        n_individuals=300,
+        fixes_per_individual=720,
+        anomalous_individual_count=105,
+        session_min_fixes=12,
+        session_max_fixes=36,
+        within_session_min_minutes=50,
+        within_session_max_minutes=60,
+        between_session_min_hours=6,
+        between_session_max_hours=12,
+        individual_start_spread_m=15_000.0,
+        study_name="Synthetic movement benchmark large",
+        injections=injections,
     )
 
 
