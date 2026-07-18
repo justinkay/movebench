@@ -29,6 +29,19 @@ from movebench.rasters import (
 )
 
 
+def _copy_first_valid_gee_tile(
+    merged_data, new_data, merged_mask, new_mask, **_kwargs
+):
+    data = np.asarray(new_data)
+    np.copyto(
+        merged_data,
+        data,
+        where=merged_mask
+        & ~new_mask
+        & (data != GEE_NODATA_SENTINEL),
+    )
+
+
 def _year_from_timestamp(ts: Any) -> int:
     if ts is None:
         raise ValueError("timestamp is required to resolve a year-based layer")
@@ -449,13 +462,16 @@ class LayerIO:
                 datasets = [rasterio.open(p) for p in matches]
                 try:
                     mosaic, out_transform = merge(
-                        datasets, bounds=bounds_latlon, nodata=datasets[0].nodata
+                        datasets,
+                        bounds=bounds_latlon,
+                        nodata=GEE_NODATA_SENTINEL,
+                        method=_copy_first_valid_gee_tile,
                     )
                     base = Raster(
                         array=mosaic,
                         transform=out_transform,
                         crs=datasets[0].crs,
-                        nodata=datasets[0].nodata,
+                        nodata=GEE_NODATA_SENTINEL,
                         bounds=bounds_latlon,
                         band_ids=[f"band_{i + 1}" for i in range(mosaic.shape[0])],
                     )
