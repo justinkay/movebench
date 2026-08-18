@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+from pyproj import CRS
+from rasterio.enums import Resampling
 
-from movebench.layers.constants import METERS_PER_DEG_LAT, METERS_PER_DEG_LON_EQUATOR
-from movebench.rasters import Raster
+from movebench.rasters import Raster, aeqd_work_grid, reproject_multipart_to_meters
 
 
 def _band_index(r: Raster, band_id: str) -> int:
@@ -37,28 +38,32 @@ def _landsat_band(landsat: Raster, band: str) -> np.ndarray:
     return _band_array(landsat, f"landsat.{band}")
 
 
-def _gradient_meters(elev: np.ndarray, transform) -> tuple[np.ndarray, np.ndarray]:
-    """Compute elevation gradients in m/m, assuming transform is in degrees (EPSG:4326)."""
+def _require_metric_grid(raster: Raster) -> None:
+    crs = CRS.from_user_input(raster.crs)
+    units = [axis.unit_conversion_factor for axis in crs.axis_info[:2]]
+    operation = crs.coordinate_operation
+    if (
+        not crs.is_projected
+        or any(abs(float(unit) - 1.0) > 1e-9 for unit in units)
+        or operation is None
+        or "Azimuthal Equidistant" not in operation.method_name
+    ):
+        raise ValueError("Metric terrain derivatives require an observation-centered AEQD meter grid")
 
-    dx_deg = abs(transform.a)
-    dy_deg = abs(transform.e)
 
-    # Use center latitude for longitude correction.
-    nrows = elev.shape[0]
-    center_row = nrows // 2
-    center_lat = transform.f + center_row * transform.e
-    lat_rad = np.radians(center_lat)
-
-    dy_m = dy_deg * METERS_PER_DEG_LAT
-    dx_m = dx_deg * METERS_PER_DEG_LON_EQUATOR * np.cos(lat_rad)
-
-    gy, gx = np.gradient(elev, dy_m, dx_m)
+def _gradient_meters(elev: np.ndarray, raster: Raster) -> tuple[np.ndarray, np.ndarray]:
+    _require_metric_grid(raster)
+    gy, gx = np.gradient(
+        elev,
+        abs(float(raster.transform.e)),
+        abs(float(raster.transform.a)),
+    )
     return gy, gx
 
 
 def compute_slope(*, dem: Raster) -> np.ndarray:
     elev = dem.array[0].astype(np.float64)
-    gy, gx = _gradient_meters(elev, dem.transform)
+    gy, gx = _gradient_meters(elev, dem)
     slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
     slope_deg = np.degrees(slope_rad).astype(np.float32)
     return slope_deg[np.newaxis]
@@ -66,7 +71,7 @@ def compute_slope(*, dem: Raster) -> np.ndarray:
 
 def compute_aspect(*, dem: Raster) -> np.ndarray:
     elev = dem.array[0].astype(np.float64)
-    gy, gx = _gradient_meters(elev, dem.transform)
+    gy, gx = _gradient_meters(elev, dem)
 
     # radians, north=0 clockwise
     aspect_rad = np.arctan2(-gx, gy)
@@ -76,6 +81,7 @@ def compute_aspect(*, dem: Raster) -> np.ndarray:
 
 
 def compute_rugosity(*, dem: Raster) -> np.ndarray:
+    _require_metric_grid(dem)
     elev = dem.array[0].astype(np.float64)
     H, W = elev.shape
 
@@ -138,6 +144,8 @@ def compute_landsat_lst(*, landsat: Raster) -> np.ndarray:
 def compute_orographic_uplift_hourly(
     *, slope: Raster, aspect: Raster, era5_land_hourly: Raster
 ) -> np.ndarray:
+    _require_metric_grid(slope)
+    _require_metric_grid(aspect)
     slope_rad = np.radians(slope.array[0])
 
     sin_asp = aspect.array[0]
@@ -161,6 +169,81 @@ def compute_orographic_uplift_hourly(
         wo = wind_speed * np.sin(slope_rad) * np.cos(wind_dir - aspect_rad)
     wo = np.where(np.isfinite(wo), wo, np.nan).astype(np.float32)
     return wo[np.newaxis]
+
+
+def derive_metric_terrain_layers(
+    *,
+    dem_parts: list[Raster],
+    dst_crs,
+    support_bounds_m: tuple[float, float, float, float],
+    requested_layers: set[str],
+    era5_land_hourly: Raster | None = None,
+) -> dict[str, Raster]:
+    """Warp DEM once, then derive requested terrain on its fine AEQD grid."""
+    transform, width, height, _resolution, bounds = aeqd_work_grid(
+        dem_parts,
+        dst_crs,
+        support_bounds_m,
+        halo_pixels=1,
+    )
+    [dem_array], _transform, _crs = reproject_multipart_to_meters(
+        [dem_parts],
+        dst_crs,
+        resampling=Resampling.bilinear,
+        dst_width=width,
+        dst_height=height,
+        dst_transform=transform,
+    )
+    dem = Raster(
+        array=dem_array,
+        transform=transform,
+        crs=dst_crs,
+        nodata=np.nan,
+        bounds=bounds,
+        band_ids=dem_parts[0].band_ids,
+    )
+
+    needed = set(requested_layers)
+    if "orographic_uplift_hourly" in needed:
+        needed.update(("slope", "aspect"))
+
+    result: dict[str, Raster] = {}
+
+    def store(layer: str, array: np.ndarray) -> None:
+        result[layer] = Raster(
+            array=array,
+            transform=transform,
+            crs=dst_crs,
+            nodata=np.nan,
+            bounds=bounds,
+            band_ids={
+                "slope": ["slope.slope"],
+                "aspect": ["aspect.aspect_sin", "aspect.aspect_cos"],
+                "rugosity": ["rugosity.tri"],
+                "orographic_uplift_hourly": [
+                    "orographic_uplift_hourly.orographic_uplift_hourly"
+                ],
+            }[layer],
+        )
+
+    if "slope" in needed:
+        store("slope", compute_slope(dem=dem))
+    if "aspect" in needed:
+        store("aspect", compute_aspect(dem=dem))
+    if "rugosity" in needed:
+        store("rugosity", compute_rugosity(dem=dem))
+    if "orographic_uplift_hourly" in needed:
+        if era5_land_hourly is None:
+            raise ValueError("orographic uplift requires era5_land_hourly")
+        store(
+            "orographic_uplift_hourly",
+            compute_orographic_uplift_hourly(
+                slope=result["slope"],
+                aspect=result["aspect"],
+                era5_land_hourly=era5_land_hourly,
+            ),
+        )
+    return result
 
 
 def compute_thermal_uplift_hourly(

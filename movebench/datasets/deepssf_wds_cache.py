@@ -25,6 +25,7 @@ import hashlib
 import json
 import math
 import random
+import shutil
 import tarfile
 import warnings
 from pathlib import Path
@@ -32,16 +33,14 @@ from typing import Any, Iterable, Literal
 
 import torch
 import webdataset as wds
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 import movebench.paths as paths
-
-import shutil
 from movebench.features.points import resolve_sampler_hash
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.layers.plan import LayerPlan
 from movebench.trajectories import canonicalize_split_key
-from torch.utils.data import Subset
 
 Compression = Literal["none", "gz"]
 SpatialDType = Literal["float16", "float32"]
@@ -72,8 +71,9 @@ def deepssf_wds_cache_hash(
     return _stable_hash_dict(
         {
             "kind": "deepssf_wds_cache",
-            "schema_version": "3",
+            "schema_version": "5",
             "payload_format": "pth",
+            "geometry": LOCAL_GEOMETRY,
             "rasters_hash": str(rasters_hash),
             "band_ids": list(band_ids),
             "split": str(split),
@@ -91,7 +91,7 @@ def deepssf_wds_cache_hash(
     )
 
 
-_MANIFEST_SCHEMA_VERSION = "3"
+_MANIFEST_SCHEMA_VERSION = "5"
 _PAYLOAD_FORMAT = "pth"
 
 
@@ -111,6 +111,10 @@ def read_deepssf_wds_manifest(path: Path) -> dict[str, Any]:
     if str(d.get("schema_version", "")) != _MANIFEST_SCHEMA_VERSION:
         raise ValueError(
             f"Unsupported schema_version={d.get('schema_version')!r} (expected {_MANIFEST_SCHEMA_VERSION!r})."
+        )
+    if d.get("geometry") != LOCAL_GEOMETRY:
+        raise ValueError(
+            f"Unsupported geometry={d.get('geometry')!r} (expected {LOCAL_GEOMETRY!r})."
         )
     payload = str(d.get("payload_format", _PAYLOAD_FORMAT))
     if payload != _PAYLOAD_FORMAT:
@@ -327,6 +331,7 @@ def build_deepssf_wds_cache(
             manifest: dict[str, Any] = {
                 "schema_version": _MANIFEST_SCHEMA_VERSION,
                 "payload_format": _PAYLOAD_FORMAT,
+                "geometry": LOCAL_GEOMETRY,
                 "cache_hash": str(out_dir.name),
                 "rasters_hash": str(plan.rasters_hash),
                 "band_ids": list(band_ids),
@@ -440,6 +445,7 @@ def build_deepssf_wds_cache(
     manifest: dict[str, Any] = {
         "schema_version": _MANIFEST_SCHEMA_VERSION,
         "payload_format": _PAYLOAD_FORMAT,
+        "geometry": LOCAL_GEOMETRY,
         "cache_hash": str(out_dir.name),
         "rasters_hash": str(plan.rasters_hash),
         "band_ids": list(band_ids),

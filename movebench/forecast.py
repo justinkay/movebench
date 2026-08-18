@@ -6,16 +6,27 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
+from tqdm import tqdm
 
 import movebench.bench.config as bench_config
+import movebench.layers.derived as derived
 import movebench.paths as paths
 from movebench.bench.run import load_saved_run_bundle
+from movebench.features.normalization import load_points_normalization_mean_std
+from movebench.geometry import (
+    LOCAL_GEOMETRY,
+    centered_grid_coordinates_m,
+    local_aeqd_crs,
+    lonlat_from_local_xy_m,
+    validate_local_bounds_m,
+)
 from movebench.layers.config import DEFAULT_RASTER_PARAMS
 from movebench.layers.constants import (
     GEE_NODATA_SENTINEL,
@@ -26,11 +37,14 @@ from movebench.layers.constants import (
     WGS84_MIN_LAT,
     WGS84_MIN_LON,
 )
-from movebench.layers.registry import REGISTRY, LayerRegistry
+from movebench.layers.io import LayerIO
 from movebench.layers.plan import LayerPlan
+from movebench.layers.registry import REGISTRY, LayerRegistry
+from movebench.lib.moveformer.geo_transformers.geo_utils import gcs_to_n_vector
+from movebench.rasters import reproject_multipart_to_meters
 from movebench.trajectories import (
     SET_COL,
-    bearing_rad,
+    arrival_bearing_rad,
     canonicalize_split_key,
     fit_interval_step_support,
     load_trajectories_csv,
@@ -65,6 +79,7 @@ class RecursiveForecastResult:
     timestamp_ns: torch.Tensor
     sampled_row: torch.Tensor
     sampled_col: torch.Tensor
+    geometry: str
 
 
 @dataclass(frozen=True)
@@ -263,6 +278,16 @@ class _MoveFormerForecastScorer:
                     valid=chosen_valid.view(-1, 1).expand(-1, points_per_step).contiguous(),
                     candidate_lon=next_lon[trajectory_idx].detach().cpu().repeat(points_per_step),
                     candidate_lat=next_lat[trajectory_idx].detach().cpu().repeat(points_per_step),
+                    candidate_x_m=torch.full(
+                        (points_per_step,),
+                        (float(col) - (self.output_hw[1] - 1) / 2.0)
+                        * float(self.pixel_size_m),
+                    ),
+                    candidate_y_m=torch.full(
+                        (points_per_step,),
+                        ((self.output_hw[0] - 1) / 2.0 - float(row))
+                        * float(self.pixel_size_m),
+                    ),
                 )
             )
 
@@ -338,13 +363,19 @@ def _encode_moveformer_records(
     records: list[Any],
     previous_record: Any | None,
 ) -> dict[str, Any]:
-    from movebench.datasets.moveformer import _coords_m, _to_datetime64
+    from movebench.datasets.moveformer import (
+        _coords_m,
+        _set_local_movement_vectors,
+        _to_datetime64,
+    )
 
     window = list(records)
     seq_env = torch.stack([record.env for record in window], dim=0)
     seq_valid = torch.stack([record.valid for record in window], dim=0)
     candidate_lon = torch.stack([record.candidate_lon for record in window], dim=0)
     candidate_lat = torch.stack([record.candidate_lat for record in window], dim=0)
+    candidate_x_m = torch.stack([record.candidate_x_m for record in window], dim=0)
+    candidate_y_m = torch.stack([record.candidate_y_m for record in window], dim=0)
     cov_cand = seq_env.permute(0, 2, 1).numpy().astype(np.float32, copy=False)
     cov_valid = seq_valid.permute(0, 2, 1).numpy()
     cov_cand = np.where(cov_valid, cov_cand, np.float32(np.nan)).astype(
@@ -383,6 +414,14 @@ def _encode_moveformer_records(
         "cov_cand": cov_cand,
     }
     encoded = seed.processor.encode(traj)
+    _set_local_movement_vectors(
+        encoded,
+        start_lon=start_lon,
+        start_lat=start_lat,
+        candidate_x_m=candidate_x_m,
+        candidate_y_m=candidate_y_m,
+        mov_vec_scale=seed.mov_vec_scale,
+    )
     encoded["loss_mask"] = np.zeros((len(window),), dtype=np.bool_)
     encoded["prediction_mask"] = np.zeros((len(window),), dtype=np.bool_)
     encoded["prediction_mask"][-1] = True
@@ -391,11 +430,9 @@ def _encode_moveformer_records(
         dtype=np.int64,
     )
     encoded["coords_m"] = _coords_m(
-        start_lon=start_lon,
-        start_lat=start_lat,
-        candidate_lon=candidate_lon,
-        candidate_lat=candidate_lat,
-    ).astype(np.float32, copy=False)
+        candidate_x_m=candidate_x_m,
+        candidate_y_m=candidate_y_m,
+    )
     return encoded
 
 
@@ -408,61 +445,46 @@ def _moveformer_candidate_features(
     mov_vec_scale: float,
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    from pyproj import Transformer
-
-    from movebench.lib.moveformer.geo_transformers.geo_utils import (
-        gcs_to_bearing,
-        gcs_to_distance,
-        gcs_to_n_vector,
-        to_rad,
-    )
-
     height, width = (int(output_hw[0]), int(output_hw[1]))
-    x_coords = np.asarray(
-        [(col - (width // 2)) * float(pixel_size_m) for col in range(width)],
-        dtype=np.float64,
-    )
-    y_coords = np.asarray(
-        [((height // 2) - row) * float(pixel_size_m) for row in range(height)],
-        dtype=np.float64,
-    )
+    x_coords, y_coords = centered_grid_coordinates_m(output_hw, pixel_size_m)
     x_hw, y_hw = np.meshgrid(x_coords, y_coords, indexing="xy")
-    to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    from_3857 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
     start_lon = state.lon.detach().cpu().numpy().astype(np.float64, copy=False)
     start_lat = state.lat.detach().cpu().numpy().astype(np.float64, copy=False)
-    start_x, start_y = to_3857.transform(start_lon, start_lat)
-    cand_x = np.asarray(start_x, dtype=np.float64).reshape(-1, 1, 1) + x_hw[None]
-    cand_y = np.asarray(start_y, dtype=np.float64).reshape(-1, 1, 1) + y_hw[None]
-    cand_lon, cand_lat = from_3857.transform(cand_x.reshape(-1), cand_y.reshape(-1))
-    cand_lon = np.asarray(cand_lon, dtype=np.float64).reshape(-1, height * width)
-    cand_lat = np.asarray(cand_lat, dtype=np.float64).reshape(-1, height * width)
+    cand_lon, cand_lat = lonlat_from_local_xy_m(
+        start_lon[:, None, None],
+        start_lat[:, None, None],
+        x_hw[None],
+        y_hw[None],
+    )
+    cand_lon = cand_lon.reshape(-1, height * width)
+    cand_lat = cand_lat.reshape(-1, height * width)
 
     loc_x, loc_y, loc_z = gcs_to_n_vector(cand_lat, cand_lon)
     location_cand = torch.from_numpy(
         np.stack([loc_x, loc_y, loc_z], axis=-1).astype(np.float32, copy=False)
     ).to(device=device)
-    bearing = to_rad(gcs_to_bearing(start_lat[:, None], start_lon[:, None], cand_lat, cand_lon))
-    distance_m = gcs_to_distance(
-        start_lat[:, None],
-        start_lon[:, None],
-        cand_lat,
-        cand_lon,
-    )[..., None]
+    candidate_xy_m = np.broadcast_to(
+        np.stack([x_hw, y_hw], axis=-1)[None],
+        (len(start_lon), height, width, 2),
+    ).reshape(len(start_lon), height * width, 2)
     location_cand_mov = torch.from_numpy(
-        (
-            np.stack([np.sin(bearing), np.cos(bearing)], axis=-1)
-            * distance_m
-            * float(mov_vec_scale)
-        ).astype(np.float32, copy=False)
+        (candidate_xy_m * float(mov_vec_scale)).astype(np.float32, copy=False)
     ).to(device=device)
-    cov_cand = grid_batch.env.to(device=device, dtype=torch.float32).permute(0, 2, 3, 1).reshape(
+    cov_cand = grid_batch.env.to(device=device, dtype=torch.float32).permute(
+        0, 2, 3, 1
+    ).reshape(
         int(grid_batch.env.shape[0]),
         height * width,
         int(grid_batch.env.shape[1]),
     )
-    cov_valid = grid_batch.valid.to(device=device, dtype=torch.bool).permute(0, 2, 3, 1).reshape_as(cov_cand)
-    cov_cand = torch.where(cov_valid, cov_cand, torch.full_like(cov_cand, torch.nan))
+    cov_valid = grid_batch.valid.to(device=device, dtype=torch.bool).permute(
+        0, 2, 3, 1
+    ).reshape_as(cov_cand)
+    cov_cand = torch.where(
+        cov_valid,
+        cov_cand,
+        torch.full_like(cov_cand, torch.nan),
+    )
     return {
         "location_cand": location_cand,
         "location_cand_mov": location_cand_mov,
@@ -745,25 +767,14 @@ def _rows_cols_to_lon_lat(
     output_hw: tuple[int, int],
     pixel_size_m: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from pyproj import Transformer
-
-    to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    from_3857 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-    start_x, start_y = to_3857.transform(
+    x_coords, y_coords = centered_grid_coordinates_m(output_hw, pixel_size_m)
+    x_m = x_coords[sampled_col.detach().cpu().numpy()]
+    y_m = y_coords[sampled_row.detach().cpu().numpy()]
+    next_lon, next_lat = lonlat_from_local_xy_m(
         state.lon.detach().cpu().numpy(),
         state.lat.detach().cpu().numpy(),
-    )
-    x_offsets = (
-        sampled_col.detach().cpu().numpy().astype(np.float64, copy=False)
-        - (int(output_hw[1]) // 2)
-    ) * float(pixel_size_m)
-    y_offsets = (
-        (int(output_hw[0]) // 2)
-        - sampled_row.detach().cpu().numpy().astype(np.float64, copy=False)
-    ) * float(pixel_size_m)
-    next_lon, next_lat = from_3857.transform(
-        np.asarray(start_x, dtype=np.float64) + x_offsets,
-        np.asarray(start_y, dtype=np.float64) + y_offsets,
+        x_m,
+        y_m,
     )
     return (
         torch.as_tensor(next_lon, dtype=torch.float32),
@@ -778,7 +789,7 @@ def _next_bearing_rad(
     end_lon: torch.Tensor,
     end_lat: torch.Tensor,
 ) -> torch.Tensor:
-    values = bearing_rad(
+    values = arrival_bearing_rad(
         start_lat.detach().cpu().numpy().astype(np.float64, copy=False),
         start_lon.detach().cpu().numpy().astype(np.float64, copy=False),
         end_lat.detach().cpu().numpy().astype(np.float64, copy=False),
@@ -1120,32 +1131,52 @@ def _extract_grid_batch(
     buffer_m: float,
     normalize_env: bool,
 ) -> _GridBatch:
-    from pyproj import Transformer
-    from rasterio.enums import Resampling
-    from rasterio.transform import from_bounds
-
-    from movebench.features.normalization import load_points_normalization_mean_std
-    from movebench.layers.io import LayerIO
-    from movebench.rasters import reproject_to_meters
-
+    height, width = (int(output_hw[0]), int(output_hw[1]))
+    pixel_size_m = (2.0 * float(buffer_m)) / float(width - 1)
+    support_bounds_m = (
+        -float(buffer_m) - 0.5 * pixel_size_m,
+        -float(buffer_m) - 0.5 * pixel_size_m,
+        float(buffer_m) + 0.5 * pixel_size_m,
+        float(buffer_m) + 0.5 * pixel_size_m,
+    )
+    validate_local_bounds_m(support_bounds_m)
+    fixed_dst_transform = from_bounds(
+        *support_bounds_m,
+        width,
+        height,
+    )
     registry = registry or _synthetic_tile_registry(plan)
     io = LayerIO(study_dir=Path(study_dir), plan=plan, registry=registry)
     timestamp = pd.Timestamp(int(state.timestamp_ns[0].item()), unit="ns", tz="UTC")
     raster_cache = {}
-    rasters = [
-        io.load_layer_cached(
-            str(layer),
+
+    def get_source_raster(layer: str):
+        spec = registry.get(layer)
+        if spec.metric_grid_derived:
+            raise ValueError(f"{layer} must be derived after AEQD reprojection")
+        return io.load_layer_cached(
+            layer,
             cache=raster_cache,
             bounds_latlon=bounds_latlon,
             timestamp=timestamp,
         )
-        for layer in plan.layers_in_order
-    ]
-    categorical_layers = {
+
+    metric_layers = {
         str(layer)
         for layer in plan.layers_in_order
-        if bool(registry.get(str(layer)).categorical)
+        if registry.get(str(layer)).metric_grid_derived
     }
+    source_rasters = {
+        str(layer): get_source_raster(str(layer))
+        for layer in plan.layers_in_order
+        if str(layer) not in metric_layers
+    }
+    if metric_layers:
+        source_rasters["dem"] = get_source_raster("dem")
+        if "orographic_uplift_hourly" in metric_layers:
+            source_rasters["era5_land_hourly"] = get_source_raster(
+                "era5_land_hourly"
+            )
 
     mean = std = None
     if normalize_env:
@@ -1155,62 +1186,86 @@ def _extract_grid_batch(
             sampler_config=sampler_config,
         )
 
-    to_target = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
     env_rows = []
     valid_rows = []
-    height, width = (int(output_hw[0]), int(output_hw[1]))
-    px = (2.0 * float(buffer_m)) / float(width - 1)
-
     for lon_i, lat_i in zip(state.lon.tolist(), state.lat.tolist()):
-        x0, y0 = to_target.transform(float(lon_i), float(lat_i))
-        fixed_dst_transform = from_bounds(
-            float(x0) - float(buffer_m) - 0.5 * px,
-            float(y0) - float(buffer_m) - 0.5 * px,
-            float(x0) + float(buffer_m) + 0.5 * px,
-            float(y0) + float(buffer_m) + 0.5 * px,
-            width,
-            height,
+        target_crs = local_aeqd_crs(float(lon_i), float(lat_i))
+        terrain = (
+            derived.derive_metric_terrain_layers(
+                dem_parts=[source_rasters["dem"]],
+                dst_crs=target_crs,
+                support_bounds_m=support_bounds_m,
+                requested_layers=metric_layers,
+                era5_land_hourly=source_rasters.get("era5_land_hourly"),
+            )
+            if metric_layers
+            else {}
         )
-        aligned_arrays, final_transform, _final_crs = reproject_to_meters(
-            rasters,
-            dst_crs="EPSG:3857",
-            resampling=Resampling.bilinear,
-            dst_height=height,
-            dst_width=width,
-            dst_transform=fixed_dst_transform,
-        )
-        if categorical_layers:
-            for idx, layer in enumerate(plan.layers_in_order):
-                if str(layer) not in categorical_layers:
-                    continue
-                nearest_arrays, _, _ = reproject_to_meters(
-                    [rasters[idx]],
-                    dst_crs="EPSG:3857",
-                    resampling=Resampling.nearest,
-                    dst_height=height,
-                    dst_width=width,
-                    dst_transform=final_transform,
-                )
-                aligned_arrays[idx] = nearest_arrays[0]
 
-        env = torch.zeros((int(plan.num_channels()), height, width), dtype=torch.float32)
+        rasters = [
+            terrain[str(layer)]
+            if str(layer) in metric_layers
+            else source_rasters[str(layer)]
+            for layer in plan.layers_in_order
+        ]
+        methods = []
+        for layer, raster in zip(plan.layers_in_order, rasters):
+            spec = registry.get(str(layer))
+            if spec.categorical:
+                methods.append(Resampling.nearest)
+            elif spec.metric_grid_derived:
+                source_resolution = max(
+                    abs(float(raster.transform.a)),
+                    abs(float(raster.transform.e)),
+                )
+                methods.append(
+                    Resampling.average
+                    if pixel_size_m >= source_resolution
+                    else Resampling.bilinear
+                )
+            else:
+                methods.append(Resampling.bilinear)
+
+        aligned_arrays, _final_transform, _final_crs = (
+            reproject_multipart_to_meters(
+                [[raster] for raster in rasters],
+                dst_crs=target_crs,
+                resampling=methods,
+                dst_height=height,
+                dst_width=width,
+                dst_transform=fixed_dst_transform,
+            )
+        )
+
+        env = torch.zeros(
+            (int(plan.num_channels()), height, width),
+            dtype=torch.float32,
+        )
         valid = torch.zeros_like(env, dtype=torch.bool)
-        for idx, layer in enumerate(plan.layers_in_order):
+        for index, layer in enumerate(plan.layers_in_order):
             layer = str(layer)
             start, end = plan.layer_slice(layer)
             spec = registry.get(layer)
             vals = torch.from_numpy(
-                aligned_arrays[idx].astype(np.float32, copy=False)
+                aligned_arrays[index].astype(np.float32, copy=False)
             )
-            vmask = _compute_valid_mask(vals, rasters[idx].nodata)
+            vmask = _compute_valid_mask(vals, rasters[index].nodata)
             if spec.categorical:
-                class_vals = torch.clamp(vals[0].to(torch.int64), 0, int(spec.num_classes) - 1)
+                class_vals = torch.clamp(
+                    vals[0].to(torch.int64),
+                    0,
+                    int(spec.num_classes) - 1,
+                )
                 one_hot = (
                     F.one_hot(class_vals, int(spec.num_classes))
                     .permute(2, 0, 1)
                     .to(torch.float32)
                 )
-                vexp = vmask[0].unsqueeze(0).expand(int(spec.num_classes), -1, -1)
+                vexp = vmask[0].unsqueeze(0).expand(
+                    int(spec.num_classes),
+                    -1,
+                    -1,
+                )
                 env[start:end] = one_hot * vexp.to(one_hot.dtype)
                 valid[start:end] = vexp
                 continue
@@ -1219,10 +1274,15 @@ def _extract_grid_batch(
                 vmask = vmask & (vals >= lo) & (vals <= hi)
             env[start:end] = torch.where(vmask, vals, torch.zeros_like(vals))
             valid[start:end] = vmask
+
         if normalize_env:
             assert mean is not None
             assert std is not None
-            env = torch.where(valid, (env - mean.view(-1, 1, 1)) / std.view(-1, 1, 1), torch.zeros_like(env))
+            env = torch.where(
+                valid,
+                (env - mean.view(-1, 1, 1)) / std.view(-1, 1, 1),
+                torch.zeros_like(env),
+            )
         env_rows.append(env)
         valid_rows.append(valid)
 
@@ -1248,6 +1308,8 @@ def run_recursive_forecast(
 
     run_dir = Path(config.run_dir)
     run_payload, resolved_artifacts = load_saved_run_bundle(run_dir)
+    if run_payload.get("geometry") != LOCAL_GEOMETRY:
+        raise ValueError("run geometry does not match the current AEQD contract")
     method = str(run_payload["method"])
     if method not in _SUPPORTED_METHODS:
         raise ValueError(f"Unsupported recursive forecast method: {method!r}")
@@ -1401,4 +1463,5 @@ def run_recursive_forecast(
         timestamp_ns=timestamp_ns,
         sampled_row=sampled_row,
         sampled_col=sampled_col,
+        geometry=LOCAL_GEOMETRY,
     )

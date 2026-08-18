@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from movebench.geometry import geodesic_distance_m, local_xy_m_from_lonlat
+
 # Movebank / trajectories.csv schema
 LON_COL = "location-long"
 LAT_COL = "location-lat"
@@ -42,46 +44,37 @@ class IntervalStepSupport:
     max_step_length_m: float
 
 
-def haversine_distance_m(
-    start_lat_deg: np.ndarray,
-    start_lon_deg: np.ndarray,
-    end_lat_deg: np.ndarray,
-    end_lon_deg: np.ndarray,
-) -> np.ndarray:
-    """Vectorized haversine distance in meters."""
-    start_lat = np.deg2rad(np.asarray(start_lat_deg, dtype=np.float64))
-    start_lon = np.deg2rad(np.asarray(start_lon_deg, dtype=np.float64))
-    end_lat = np.deg2rad(np.asarray(end_lat_deg, dtype=np.float64))
-    end_lon = np.deg2rad(np.asarray(end_lon_deg, dtype=np.float64))
-
-    dlat = end_lat - start_lat
-    dlon = end_lon - start_lon
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(start_lat) * np.cos(end_lat) * np.sin(dlon / 2.0) ** 2
-    )
-    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-    return 6371000.0 * c
-
-
 def bearing_rad(
     start_lat_deg: np.ndarray,
     start_lon_deg: np.ndarray,
     end_lat_deg: np.ndarray,
     end_lon_deg: np.ndarray,
 ) -> np.ndarray:
-    """Vectorized forward bearing in radians, wrapped to [-pi, pi]."""
-    start_lat = np.deg2rad(np.asarray(start_lat_deg, dtype=np.float64))
-    start_lon = np.deg2rad(np.asarray(start_lon_deg, dtype=np.float64))
-    end_lat = np.deg2rad(np.asarray(end_lat_deg, dtype=np.float64))
-    end_lon = np.deg2rad(np.asarray(end_lon_deg, dtype=np.float64))
+    """Vectorized WGS84 forward bearing in radians, wrapped to [-pi, pi]."""
+    x_m, y_m = local_xy_m_from_lonlat(
+        start_lon_deg,
+        start_lat_deg,
+        end_lon_deg,
+        end_lat_deg,
+    )
+    out = np.arctan2(x_m, y_m)
+    return (out + np.pi) % (2.0 * np.pi) - np.pi
 
-    dlon = end_lon - start_lon
-    y = np.sin(dlon) * np.cos(end_lat)
-    x = np.cos(start_lat) * np.sin(end_lat) - np.sin(start_lat) * np.cos(
-        end_lat
-    ) * np.cos(dlon)
-    out = np.arctan2(y, x)
+
+def arrival_bearing_rad(
+    start_lat_deg: np.ndarray,
+    start_lon_deg: np.ndarray,
+    end_lat_deg: np.ndarray,
+    end_lon_deg: np.ndarray,
+) -> np.ndarray:
+    """Bearing of travel on arrival, expressed at the endpoint."""
+    x_m, y_m = local_xy_m_from_lonlat(
+        end_lon_deg,
+        end_lat_deg,
+        start_lon_deg,
+        start_lat_deg,
+    )
+    out = np.arctan2(-x_m, -y_m)
     return (out + np.pi) % (2.0 * np.pi) - np.pi
 
 
@@ -300,7 +293,7 @@ def prepare_interval_step_starts(
         end_times = burst_times[chosen_rel[selected]]
         actual_s = (end_times - start_times) / 1_000_000_000.0
         error_s = actual_s - float(step_time_s)
-        lengths = haversine_distance_m(
+        lengths = geodesic_distance_m(
             burst_lat[selected],
             burst_lon[selected],
             burst_lat[chosen_rel[selected]],
@@ -413,9 +406,6 @@ def compute_movement_features(
     # Sort so diffs make sense; keep original index (point ids).
     df = df.sort_values([INDIVIDUAL_COL, TIME_COL])
 
-    df["lat_rad"] = np.deg2rad(df[LAT_COL])
-    df["lon_rad"] = np.deg2rad(df[LON_COL])
-
     g = df.groupby(INDIVIDUAL_COL)
 
     # ---- time gaps per individual ----
@@ -428,17 +418,12 @@ def compute_movement_features(
     # ---- step length per individual ----
     lat_prev_deg = g[LAT_COL].shift()
     lon_prev_deg = g[LON_COL].shift()
-    df["step_length_m"] = haversine_distance_m(
+    df["step_length_m"] = geodesic_distance_m(
         lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
         lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
         df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
         df[LON_COL].to_numpy(dtype=np.float64, copy=False),
     )
-
-    df["lat_prev"] = g["lat_rad"].shift()
-    df["lon_prev"] = g["lon_rad"].shift()
-    df["lat_rad"] - df["lat_prev"]
-    dlon = df["lon_rad"] - df["lon_prev"]
 
     # Initial valid step mask (time + positive distance).
     df["valid_step"] = (
@@ -456,13 +441,19 @@ def compute_movement_features(
     df["valid_step"] &= df["step_length_m"] <= max_step_len
 
     # ---- turn angles ----
-    y = np.sin(dlon) * np.cos(df["lat_rad"])
-    x = np.cos(df["lat_prev"]) * np.sin(df["lat_rad"]) - np.sin(
-        df["lat_prev"]
-    ) * np.cos(df["lat_rad"]) * np.cos(dlon)
-    df["bearing"] = np.arctan2(y, x)  # [-pi, pi], NaN at first row per individual
-
-    df["bearing_prev"] = g["bearing"].shift()
+    df["bearing"] = bearing_rad(
+        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
+        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
+        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
+    )
+    df["arrival_bearing"] = arrival_bearing_rad(
+        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
+        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
+        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
+        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
+    )
+    df["bearing_prev"] = g["arrival_bearing"].shift()
     df["valid_step_prev"] = g["valid_step"].shift()
 
     turn = df["bearing"] - df["bearing_prev"]
@@ -490,10 +481,7 @@ def compute_movement_features(
 
     df = df.drop(
         columns=[
-            "lat_rad",
-            "lon_rad",
-            "lat_prev",
-            "lon_prev",
+            "arrival_bearing",
             "burst_start",
             "is_first_in_indiv",
         ]
@@ -550,7 +538,7 @@ def select_step_starts(
     prev_lon = grouped[LON_COL].shift()
     prev_lat = grouped[LAT_COL].shift()
     d = d.copy()
-    d["start_bearing"] = bearing_rad(
+    d["start_bearing"] = arrival_bearing_rad(
         prev_lat.to_numpy(dtype=np.float64, copy=False),
         prev_lon.to_numpy(dtype=np.float64, copy=False),
         d[LAT_COL].to_numpy(dtype=np.float64, copy=False),

@@ -9,7 +9,9 @@ import torch.nn.functional as F
 import movebench.bench.evaluation.runner as evaluation_runner
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.models.deepssf import DeepSSF
+
 
 def _slice_spatial(
     spatial: torch.Tensor,
@@ -130,6 +132,7 @@ def _prediction_payload(
         point_id_chunks.append(point_id_start.to(dtype=torch.int64).cpu())
     return {
         "prediction_kind": "grid",
+        "geometry": LOCAL_GEOMETRY,
         "point_id_start": torch.cat(point_id_chunks, dim=0),
         "scores": torch.cat(scores_chunks, dim=0),
         "pixel_size_m": float(pixel_size_m),

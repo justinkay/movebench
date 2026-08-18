@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from movebench.geometry import LOCAL_GEOMETRY
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -16,6 +18,8 @@ def utc_now_iso() -> str:
 _SHARED_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "candidate_lon": {"dtype": "float32", "shape": "points"},
     "candidate_lat": {"dtype": "float32", "shape": "points"},
+    "candidate_x_m": {"dtype": "float32", "shape": "points"},
+    "candidate_y_m": {"dtype": "float32", "shape": "points"},
     "step_length_m": {"dtype": "float32", "shape": "points"},
     "turn_angle_rad": {"dtype": "float32", "shape": "points"},
     "start_lon": {"dtype": "float32", "shape": []},
@@ -87,9 +91,9 @@ class PointFeatureManifest:
     def validate_basic(self, *, root_dir: Path | None = None) -> None:
         if not self.schema_version:
             raise ValueError("schema_version is required")
-        if self.schema_version != "4":
+        if self.schema_version != "6":
             raise ValueError(
-                f"Unsupported point feature manifest schema_version={self.schema_version!r} (expected '4')"
+                f"Unsupported point feature manifest schema_version={self.schema_version!r} (expected '6')"
             )
         if not self.rasters_hash:
             raise ValueError("rasters_hash is required")
@@ -109,10 +113,16 @@ class PointFeatureManifest:
             "gap_q",
             "points_per_step",
             "choice_policy",
-            "target_crs",
+            "geometry",
         ):
             if key not in self.extraction:
                 raise ValueError(f"extraction.{key} is required")
+
+        if self.extraction["geometry"] != LOCAL_GEOMETRY:
+            raise ValueError(
+                f"Unsupported extraction.geometry={self.extraction['geometry']!r} "
+                f"(expected {LOCAL_GEOMETRY!r})"
+            )
 
         points_per_step = int(self.extraction["points_per_step"])
         shared_path = str(self.shared.get("path", "")).strip()

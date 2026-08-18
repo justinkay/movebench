@@ -15,6 +15,7 @@ from movebench.features.points import (
     point_store_train_stats_path,
     resolve_sampler_hash,
 )
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.layers.plan import LayerPlan
 
 
@@ -40,6 +41,14 @@ def load_points_normalization_mean_std(
 
     with open(stats_path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
+    if str(payload.get("schema_version")) != "4":
+        raise ValueError(f"Unsupported normalization schema in {stats_path}")
+    if payload.get("geometry") != LOCAL_GEOMETRY:
+        raise ValueError(f"Unsupported normalization geometry in {stats_path}")
+    if payload.get("rasters_hash") != str(plan.rasters_hash):
+        raise ValueError(f"Normalization rasters_hash mismatch in {stats_path}")
+    if payload.get("sampler_hash") != str(sampler_hash):
+        raise ValueError(f"Normalization sampler_hash mismatch in {stats_path}")
     band_stats: dict[str, Any] = dict(payload.get("band_stats", {}))
 
     mean = torch.zeros(int(plan.num_channels()), dtype=torch.float32)
@@ -137,9 +146,10 @@ def compute_points_normalization_stats(
             band_stats[band_id] = {"mean": mean, "std": std, "count": count}
 
     stats = {
-        "schema_version": "2",
+        "schema_version": "4",
         "created_at": utc_now_iso(),
         "source": "points",
+        "geometry": LOCAL_GEOMETRY,
         "source_split": "train",
         "scope": "all_candidates",
         "ddof": 0,

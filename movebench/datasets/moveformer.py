@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
-from pyproj import Transformer
 
 from movebench.datasets.ssf import (
     _movement_stats_from_reader,
@@ -25,17 +22,11 @@ from movebench.features.points import (
     load_point_store_manifest,
     resolve_sampler_hash,
 )
-from movebench.layers.constants import WGS84_CRS
+from movebench.geometry import local_xy_m_from_lonlat
 from movebench.layers.plan import LayerPlan
 from movebench.lib.moveformer.geo_transformers.trajectory import (
     SimpleTrajectoryProcessor,
 )
-
-
-@lru_cache(maxsize=1)
-def _crs_transformers():
-    to_3857 = Transformer.from_crs(WGS84_CRS, "EPSG:3857", always_xy=True)
-    return to_3857
 
 
 @dataclass(frozen=True)
@@ -51,6 +42,8 @@ class _StepRecord:
     valid: torch.Tensor
     candidate_lon: torch.Tensor
     candidate_lat: torch.Tensor
+    candidate_x_m: torch.Tensor
+    candidate_y_m: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -81,22 +74,39 @@ def _to_datetime64(ns_values: list[int]) -> np.ndarray:
 
 def _coords_m(
     *,
+    candidate_x_m: torch.Tensor,
+    candidate_y_m: torch.Tensor,
+) -> np.ndarray:
+    coords = torch.stack([candidate_x_m, candidate_y_m], dim=-1)
+    return coords[:, 1:, :].numpy().astype(np.float32, copy=False)
+
+
+def _set_local_movement_vectors(
+    encoded: dict[str, np.ndarray],
+    *,
     start_lon: np.ndarray,
     start_lat: np.ndarray,
-    candidate_lon: torch.Tensor,
-    candidate_lat: torch.Tensor,
-) -> np.ndarray:
-    to_3857 = _crs_transformers()
-    start_x, start_y = to_3857.transform(start_lon, start_lat)
-    cand_x, cand_y = to_3857.transform(
-        candidate_lon.reshape(-1).numpy(),
-        candidate_lat.reshape(-1).numpy(),
-    )
-    coords = np.stack([cand_x, cand_y], axis=-1).astype(np.float32, copy=False)
-    coords = coords.reshape(int(candidate_lon.shape[0]), int(candidate_lon.shape[1]), 2)
-    coords[:, :, 0] -= np.asarray(start_x, dtype=np.float32).reshape(-1, 1)
-    coords[:, :, 1] -= np.asarray(start_y, dtype=np.float32).reshape(-1, 1)
-    return coords[:, 1:, :]
+    candidate_x_m: torch.Tensor,
+    candidate_y_m: torch.Tensor,
+    mov_vec_scale: float,
+) -> None:
+    location_mov = np.zeros((len(start_lon), 2), dtype=np.float32)
+    if len(start_lon) > 1:
+        prev_x_m, prev_y_m = local_xy_m_from_lonlat(
+            start_lon[1:],
+            start_lat[1:],
+            start_lon[:-1],
+            start_lat[:-1],
+        )
+        location_mov[1:] = -np.stack([prev_x_m, prev_y_m], axis=-1)
+    candidate_xy_m = torch.stack([candidate_x_m, candidate_y_m], dim=-1).numpy()
+    encoded["location_mov"] = location_mov * float(mov_vec_scale)
+    encoded["location_tgt_mov"] = (
+        candidate_xy_m[:, 0, :] * float(mov_vec_scale)
+    ).astype(np.float32, copy=False)
+    encoded["location_cand_mov"] = (
+        candidate_xy_m * float(mov_vec_scale)
+    ).astype(np.float32, copy=False)
 
 
 def _split_mask(
@@ -360,7 +370,7 @@ class MoveFormerPointStoreDataset(Dataset):
             use_target=True,
             use_candidates=True,
             add_dtime=True,
-            add_mov_vec=True,
+            add_mov_vec=False,
             mov_vec_scale=float(self._mov_vec_scale),
             handle_nan=False,
             pass_through=["taxon", "cov", "cov_cand"],
@@ -390,6 +400,8 @@ class MoveFormerPointStoreDataset(Dataset):
                 shared_keys=[
                     "candidate_lon",
                     "candidate_lat",
+                    "candidate_x_m",
+                    "candidate_y_m",
                     "start_lon",
                     "start_lat",
                     "individual_id",
@@ -423,6 +435,8 @@ class MoveFormerPointStoreDataset(Dataset):
 
                 candidate_lon = block["candidate_lon"].index_select(1, self._cand_perm)
                 candidate_lat = block["candidate_lat"].index_select(1, self._cand_perm)
+                candidate_x_m = block["candidate_x_m"].index_select(1, self._cand_perm)
+                candidate_y_m = block["candidate_y_m"].index_select(1, self._cand_perm)
                 env = env.index_select(2, self._cand_perm)
                 valid = valid.index_select(2, self._cand_perm)
                 individual_ids = [str(x) for x in block["individual_id"].tolist()]
@@ -443,6 +457,8 @@ class MoveFormerPointStoreDataset(Dataset):
                             valid=valid[idx].cpu(),
                             candidate_lon=candidate_lon[idx].cpu(),
                             candidate_lat=candidate_lat[idx].cpu(),
+                            candidate_x_m=candidate_x_m[idx].cpu(),
+                            candidate_y_m=candidate_y_m[idx].cpu(),
                         )
                     )
 
@@ -508,6 +524,8 @@ class MoveFormerPointStoreDataset(Dataset):
         seq_valid = torch.stack([record.valid for record in window], dim=0)
         candidate_lon = torch.stack([record.candidate_lon for record in window], dim=0)
         candidate_lat = torch.stack([record.candidate_lat for record in window], dim=0)
+        candidate_x_m = torch.stack([record.candidate_x_m for record in window], dim=0)
+        candidate_y_m = torch.stack([record.candidate_y_m for record in window], dim=0)
         if self.candidate_subset_size is not None:
             num_negatives = int(self.candidate_subset_size) - 1
             negative_idx = torch.randperm(int(seq_env.shape[2]) - 1)[:num_negatives] + 1
@@ -519,6 +537,8 @@ class MoveFormerPointStoreDataset(Dataset):
             seq_valid = seq_valid.index_select(2, keep_idx)
             candidate_lon = candidate_lon.index_select(1, keep_idx)
             candidate_lat = candidate_lat.index_select(1, keep_idx)
+            candidate_x_m = candidate_x_m.index_select(1, keep_idx)
+            candidate_y_m = candidate_y_m.index_select(1, keep_idx)
         cov_cand = seq_env.permute(0, 2, 1).numpy().astype(np.float32, copy=False)
         cov_cand_valid = seq_valid.permute(0, 2, 1).numpy()
         cov_cand = np.where(cov_cand_valid, cov_cand, np.float32(np.nan)).astype(
@@ -565,15 +585,21 @@ class MoveFormerPointStoreDataset(Dataset):
             "cov_cand": cov_cand,
         }
         encoded = self._processor.encode(traj)
+        _set_local_movement_vectors(
+            encoded,
+            start_lon=start_lon,
+            start_lat=start_lat,
+            candidate_x_m=candidate_x_m,
+            candidate_y_m=candidate_y_m,
+            mov_vec_scale=self._mov_vec_scale,
+        )
         encoded["prediction_mask"] = _prediction_mask(chain, start, end, self.split)
         encoded["point_id_start"] = np.asarray(
             [record.point_id_start for record in window],
             dtype=np.int64,
         )
         encoded["coords_m"] = _coords_m(
-            start_lon=start_lon,
-            start_lat=start_lat,
-            candidate_lon=candidate_lon,
-            candidate_lat=candidate_lat,
-        ).astype(np.float32, copy=False)
+            candidate_x_m=candidate_x_m,
+            candidate_y_m=candidate_y_m,
+        )
         return encoded

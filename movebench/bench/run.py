@@ -487,6 +487,7 @@ def expand_experiment(
                         "rasters_hash": str(timescale["rasters_hash"]),
                         "sampler_config": str(timescale["sampler_config"]),
                         "sampler_hash": str(timescale["sampler_hash"]),
+                        "geometry": str(timescale["geometry"]),
                         "covariate_set": str(covariate_set_key),
                         "band_ids": band_ids,
                         "method": str(method_key),

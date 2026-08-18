@@ -10,6 +10,7 @@ import movebench.paths as paths
 from movebench.datasets.deepssf_wds_cache import deepssf_wds_cache_hash
 from movebench.features.config import load_sampler_config
 from movebench.features.points import resolve_sampler_hash
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
 from movebench.study import MARINE_STUDIES, is_named_study_set
@@ -367,6 +368,7 @@ def resolve_timescale(
     resolved["plan"] = plan
     resolved["sampler"] = sampler_config
     resolved["sampler_hash"] = sampler_hash
+    resolved["geometry"] = LOCAL_GEOMETRY
     resolved["rasters_hash"] = str(plan.rasters_hash)
     resolved["all_band_ids"] = plan.band_ids_in_order()
     return resolved

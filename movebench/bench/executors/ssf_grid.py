@@ -3,14 +3,15 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from tqdm import tqdm
 
 import numpy as np
 import torch
 from scipy import stats
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from movebench.datasets.chips import ChipDataset
+from movebench.geometry import LOCAL_GEOMETRY, centered_grid_coordinates_m
 from movebench.trajectories import (
     SET_COL,
     canonicalize_split_key,
@@ -228,13 +229,9 @@ def _grid_centers_np(
     width: int,
     pixel_size_m: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    x_coords = np.asarray(
-        [(col - (width // 2)) * float(pixel_size_m) for col in range(width)],
-        dtype=np.float64,
-    )
-    y_coords = np.asarray(
-        [((height // 2) - row) * float(pixel_size_m) for row in range(height)],
-        dtype=np.float64,
+    x_coords, y_coords = centered_grid_coordinates_m(
+        (height, width),
+        pixel_size_m,
     )
     return np.meshgrid(x_coords, y_coords, indexing="xy")
 
@@ -487,6 +484,7 @@ def build_ssf_grid_artifact(
     if len(grid_dataset) == 0:
         return {
             "prediction_kind": "grid",
+            "geometry": LOCAL_GEOMETRY,
             "point_id_start": torch.zeros((0,), dtype=torch.int64),
             "scores": torch.zeros((0, height, width), dtype=torch.float32),
             "pixel_size_m": float(grid_dataset.pixel_size_m),
@@ -562,6 +560,7 @@ def build_ssf_grid_artifact(
 
     return {
         "prediction_kind": "grid",
+        "geometry": LOCAL_GEOMETRY,
         "point_id_start": torch.cat(point_id_chunks, dim=0),
         "scores": torch.cat(scores_chunks, dim=0),
         "pixel_size_m": float(grid_dataset.pixel_size_m),

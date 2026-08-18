@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import json
 import math
-from functools import lru_cache
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from tqdm import tqdm
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
-from pyproj import Transformer
+from tqdm import tqdm
 
 import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
@@ -20,12 +19,12 @@ import movebench.bench.executors.ssf_grid as ssf_grid
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 from movebench.features.points import PointStoreReader
-from movebench.lib.moveformer.geo_transformers.geo_utils import (
-    gcs_to_bearing,
-    gcs_to_distance,
-    gcs_to_n_vector,
-    to_rad,
+from movebench.geometry import (
+    LOCAL_GEOMETRY,
+    centered_grid_coordinates_m,
+    lonlat_from_local_xy_m,
 )
+from movebench.lib.moveformer.geo_transformers.geo_utils import gcs_to_n_vector
 from movebench.lib.moveformer.geo_transformers.training_utils import (
     collate_sequence_dicts,
 )
@@ -53,13 +52,6 @@ def _eval_metrics(
     }
 
 
-@lru_cache(maxsize=1)
-def _grid_transformers() -> tuple[Transformer, Transformer]:
-    return (
-        Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True),
-        Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True),
-    )
-
 
 @lru_cache(maxsize=32)
 def _grid_offsets_np(
@@ -68,25 +60,11 @@ def _grid_offsets_np(
     width: int,
     pixel_size_m: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    x_coords_m, y_coords_m = evaluation_runner._grid_coordinates(
-        width=int(width),
-        height=int(height),
-        pixel_size_m=float(pixel_size_m),
+    x_coords_m, y_coords_m = centered_grid_coordinates_m(
+        (height, width),
+        pixel_size_m,
     )
-    x_hw = (
-        x_coords_m.unsqueeze(0)
-        .expand(int(height), int(width))
-        .cpu()
-        .numpy()
-        .astype(np.float64, copy=False)
-    )
-    y_hw = (
-        y_coords_m.unsqueeze(1)
-        .expand(int(height), int(width))
-        .cpu()
-        .numpy()
-        .astype(np.float64, copy=False)
-    )
+    x_hw, y_hw = np.meshgrid(x_coords_m, y_coords_m, indexing="xy")
     return x_hw, y_hw
 
 
@@ -340,13 +318,11 @@ def _grid_candidate_features(
         width=width,
         pixel_size_m=pixel_size_m,
     )
-    to_3857, from_3857 = _grid_transformers()
-    start_x_m, start_y_m = to_3857.transform(start_lon, start_lat)
-    cand_x_m = np.asarray(start_x_m, dtype=np.float64).reshape(-1, 1, 1) + x_hw[None]
-    cand_y_m = np.asarray(start_y_m, dtype=np.float64).reshape(-1, 1, 1) + y_hw[None]
-    cand_lon, cand_lat = from_3857.transform(
-        cand_x_m.reshape(-1),
-        cand_y_m.reshape(-1),
+    cand_lon, cand_lat = lonlat_from_local_xy_m(
+        start_lon[:, None, None],
+        start_lat[:, None, None],
+        x_hw[None],
+        y_hw[None],
     )
     cand_lon = np.asarray(cand_lon, dtype=np.float64).reshape(
         len(ordered_point_ids),
@@ -362,26 +338,12 @@ def _grid_candidate_features(
         np.stack([loc_x, loc_y, loc_z], axis=-1).astype(np.float32, copy=False)
     ).to(device=device)
 
-    bearing_rad = to_rad(
-        gcs_to_bearing(
-            start_lat[:, None],
-            start_lon[:, None],
-            cand_lat,
-            cand_lon,
-        )
-    )
-    distance_m = gcs_to_distance(
-        start_lat[:, None],
-        start_lon[:, None],
-        cand_lat,
-        cand_lon,
-    )[..., None]
+    candidate_xy_m = np.broadcast_to(
+        np.stack([x_hw, y_hw], axis=-1)[None],
+        (len(ordered_point_ids), height, width, 2),
+    ).reshape(len(ordered_point_ids), height * width, 2)
     location_cand_mov = torch.from_numpy(
-        (
-            np.stack([np.sin(bearing_rad), np.cos(bearing_rad)], axis=-1)
-            * distance_m
-            * float(mov_vec_scale)
-        ).astype(np.float32, copy=False)
+        (candidate_xy_m * float(mov_vec_scale)).astype(np.float32, copy=False)
     ).to(device=device)
 
     env = env.to(device=device, dtype=torch.float32, non_blocking=device.type == "cuda")
@@ -422,6 +384,7 @@ def _grid_prediction_payload(
     if int(point_ids.shape[0]) == 0:
         return {
             "prediction_kind": "grid",
+            "geometry": LOCAL_GEOMETRY,
             "point_id_start": point_ids,
             "scores": torch.zeros((0, height, width), dtype=torch.float32),
             "pixel_size_m": pixel_size_m,
@@ -501,6 +464,7 @@ def _grid_prediction_payload(
 
     return {
         "prediction_kind": "grid",
+        "geometry": LOCAL_GEOMETRY,
         "point_id_start": torch.cat(point_id_chunks, dim=0),
         "scores": torch.cat(score_chunks, dim=0),
         "pixel_size_m": pixel_size_m,

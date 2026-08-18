@@ -9,9 +9,8 @@ import torch
 
 import movebench.bench.config as bench_config
 import movebench.bench.executors.ssf_grid as ssf_grid
-from pyproj import Transformer
-
 from movebench.features.points import PointStoreReader
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.trajectories import (
     INDIVIDUAL_COL,
     LAT_COL,
@@ -19,11 +18,9 @@ from movebench.trajectories import (
     POINT_ID_COL,
     TIME_COL,
     bearing_rad,
-    haversine_distance_m,
+    geodesic_distance_m,
     load_trajectories_csv,
 )
-
-_TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 
 def _step_context(shared: dict[str, torch.Tensor], trajectories_path: Path) -> dict[str, torch.Tensor]:
@@ -57,7 +54,7 @@ def _step_context(shared: dict[str, torch.Tensor], trajectories_path: Path) -> d
             prev_step_length_m = float("nan")
         else:
             prev_step_length_m = float(
-                haversine_distance_m(
+                geodesic_distance_m(
                     [float(prev["lat"])],
                     [float(prev["lon"])],
                     [float(row["lat"])],
@@ -72,7 +69,6 @@ def _step_context(shared: dict[str, torch.Tensor], trajectories_path: Path) -> d
     selected_rows = [by_point[point_id] for point_id in wanted]
     start_lon = [float(row["lon"]) for row in selected_rows]
     start_lat = [float(row["lat"]) for row in selected_rows]
-    start_x, start_y = _TO_3857.transform(start_lon, start_lat)
 
     true_lon = shared["candidate_lon"][:, -1].to(dtype=torch.float64).numpy()
     true_lat = shared["candidate_lat"][:, -1].to(dtype=torch.float64).numpy()
@@ -82,8 +78,6 @@ def _step_context(shared: dict[str, torch.Tensor], trajectories_path: Path) -> d
 
     return {
         "point_id_start": point_ids.to(dtype=torch.int64).cpu(),
-        "start_x_m": torch.tensor(start_x, dtype=torch.float32),
-        "start_y_m": torch.tensor(start_y, dtype=torch.float32),
         "start_bearing_rad": torch.tensor(start_bearing, dtype=torch.float32),
         "prev_step_length_m": torch.tensor(
             [float(row["prev_step_length_m"]) for row in selected_rows],
@@ -112,7 +106,10 @@ def _write_predictions(
 ) -> None:
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, pred_dir / f"{split_key}.pt")
+    torch.save(
+        {**payload, "geometry": LOCAL_GEOMETRY},
+        pred_dir / f"{split_key}.pt",
+    )
 
 
 def run_nomove(*, run_payload, resolved_artifacts, run_dir, tracker):
@@ -123,7 +120,7 @@ def run_nomove(*, run_payload, resolved_artifacts, run_dir, tracker):
             manifest=resolved_artifacts["point_stores"][split_key]["manifest"],
         )
         ctx = _step_context(shared, trajectories_path)
-        zeros = torch.zeros_like(ctx["start_x_m"])
+        zeros = torch.zeros_like(ctx["start_bearing_rad"])
         _write_predictions(
             Path(run_dir),
             split_key=str(split_key),

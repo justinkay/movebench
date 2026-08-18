@@ -1,8 +1,14 @@
 import csv
 import random
+from array import array
 from functools import lru_cache
 from math import isfinite
 from pathlib import Path
+
+from movebench.geometry import (
+    geodesic_distance_m,
+    minimal_circular_longitude_extent,
+)
 
 
 MAX_SERIES_POINTS = 5000
@@ -106,17 +112,6 @@ def quantile(values: list[float], q: float) -> float | None:
     return float(sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * ratio)
 
 
-def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
-    from math import atan2, cos, radians, sin, sqrt
-
-    phi1 = radians(lat1)
-    phi2 = radians(lat2)
-    delta_phi = radians(lat2 - lat1)
-    delta_lambda = radians(lon2 - lon1)
-    a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
-    return 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
-
-
 def span_to_zoom(span_deg: float) -> float:
     if span_deg <= 0:
         return 2.0
@@ -170,11 +165,10 @@ def _build_trajectory_summary_cached(path_str: str, _mtime_ns: int) -> dict:
         species_by_individual: dict[str, str] = {}
         row_counts: dict[str, int] = {}
         group_samples: dict[tuple[str, str], dict] = {}
-        stat_samples: dict[str, dict[str, list[float] | int]] = {}
+        stat_samples: dict[str, dict] = {}
 
         total_rows = 0
-        min_lon = float("inf")
-        max_lon = float("-inf")
+        longitudes = array("d")
         min_lat = float("inf")
         max_lat = float("-inf")
         min_time_ms = None
@@ -218,8 +212,7 @@ def _build_trajectory_summary_cached(path_str: str, _mtime_ns: int) -> dict:
             total_rows += 1
             row_counts[individual] = row_counts.get(individual, 0) + 1
 
-            min_lon = min(min_lon, lon)
-            max_lon = max(max_lon, lon)
+            longitudes.append(lon)
             min_lat = min(min_lat, lat)
             max_lat = max(max_lat, lat)
             min_time_ms = time_ms if min_time_ms is None else min(min_time_ms, time_ms)
@@ -239,11 +232,11 @@ def _build_trajectory_summary_cached(path_str: str, _mtime_ns: int) -> dict:
             previous = group["prev"]
             if previous and time_ms > previous[0]:
                 delta_s = (time_ms - previous[0]) / 1000.0
-                step_m = haversine_meters(previous[1], previous[2], lon, lat)
+                endpoints = (previous[2], previous[1], lat, lon)
                 indiv_stats["seen_fix"] += 1
                 indiv_stats["seen_step"] += 1
                 reservoir_append(indiv_stats["fix"], delta_s, indiv_stats["seen_fix"], MAX_STAT_SAMPLES)
-                reservoir_append(indiv_stats["step"], step_m, indiv_stats["seen_step"], MAX_STAT_SAMPLES)
+                reservoir_append(indiv_stats["step"], endpoints, indiv_stats["seen_step"], MAX_STAT_SAMPLES)
             group["prev"] = (time_ms, lon, lat)
 
     if total_rows == 0 or min_time_ms is None or max_time_ms is None:
@@ -266,14 +259,26 @@ def _build_trajectory_summary_cached(path_str: str, _mtime_ns: int) -> dict:
     stats = {}
     for individual in individuals:
         indiv_stats = stat_samples.get(individual, {"fix": [], "step": []})
+        endpoints = indiv_stats.get("step", [])
+        step_m = (
+            geodesic_distance_m(
+                [item[0] for item in endpoints],
+                [item[1] for item in endpoints],
+                [item[2] for item in endpoints],
+                [item[3] for item in endpoints],
+            ).tolist()
+            if endpoints
+            else []
+        )
         stats[individual] = {
             "row_count": int(row_counts.get(individual, 0)),
             "median_fix_s": median(indiv_stats.get("fix", [])),
-            "median_step_m": median(indiv_stats.get("step", [])),
-            "p95_step_m": quantile(indiv_stats.get("step", []), 0.95),
+            "median_step_m": median(step_m),
+            "p95_step_m": quantile(step_m, 0.95),
         }
 
-    span = max(max_lon - min_lon, max_lat - min_lat)
+    center_lon, lon_span = minimal_circular_longitude_extent(longitudes)
+    span = max(lon_span, max_lat - min_lat)
     return {
         "total_rows": int(total_rows),
         "individuals": individuals,
@@ -282,7 +287,7 @@ def _build_trajectory_summary_cached(path_str: str, _mtime_ns: int) -> dict:
         "coverage_by_individual": coverage_by_individual,
         "series_by_individual": series_by_individual,
         "initial_view": {
-            "longitude": float((min_lon + max_lon) / 2),
+            "longitude": float(center_lon),
             "latitude": float((min_lat + max_lat) / 2),
             "zoom": float(span_to_zoom(float(span))),
         },

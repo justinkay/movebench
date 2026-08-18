@@ -18,5 +18,5 @@ Keep imports at the top of the file. Do not lazy load imports. Do not include a 
 
 # Environment
 
-Use the movebench micromamba environment located in /data/vision/beery/scratch/justin/micromamba/envs.
+Use the movebench2 micromamba environment located in /data/vision/beery/scratch/justin/micromamba/envs.
 

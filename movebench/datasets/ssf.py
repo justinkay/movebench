@@ -17,9 +17,8 @@ from movebench.features.points import (
     load_point_store_manifest,
     resolve_sampler_hash,
 )
+from movebench.geometry import local_aeqd_proj4
 from movebench.layers.plan import Channel, LayerPlan
-
-TARGET_CRS = "EPSG:3857"
 
 
 def _compute_movement_stats(
@@ -195,13 +194,22 @@ class SSFDataset(Dataset):
             row_idxs=all_rows,
         )
         shared = self.reader.load_shared_rows(
-            keys=["step_length_m", "turn_angle_rad", "point_id_start", "timestamp_ns"],
+            keys=[
+                "step_length_m",
+                "turn_angle_rad",
+                "point_id_start",
+                "timestamp_ns",
+                "start_lon",
+                "start_lat",
+            ],
             row_idxs=all_rows,
         )
         self.step_length_m = shared["step_length_m"]
         self.turn_angle_rad = shared["turn_angle_rad"]
         self.point_id_start = shared["point_id_start"]
         self.timestamp_ns = shared["timestamp_ns"]
+        self.start_lon = shared["start_lon"]
+        self.start_lat = shared["start_lat"]
 
         if self.normalize:
             self._mean, self._std = load_points_normalization_mean_std(
@@ -231,7 +239,11 @@ class SSFDataset(Dataset):
         self, idx: int
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], str]:
         env, valid = self._get_env_valid(idx)
-        return env, valid, {}, TARGET_CRS
+        crs = local_aeqd_proj4(
+            float(self.start_lon[int(idx)].item()),
+            float(self.start_lat[int(idx)].item()),
+        )
+        return env, valid, {}, crs
 
 
 class iSSFDataset(Dataset):

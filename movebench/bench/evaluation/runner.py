@@ -6,15 +6,18 @@ import json
 import math
 from pathlib import Path
 from typing import Any
-from tqdm import tqdm
 
 import torch
-from pyproj import Transformer
-
-import movebench.paths as paths
+from tqdm import tqdm
 
 import movebench.bench.config as bench_config
 from movebench.bench.evaluation import energy
+import movebench.paths as paths
+from movebench.geometry import (
+    LOCAL_GEOMETRY,
+    centered_grid_coordinates_m,
+    local_xy_m_from_lonlat,
+)
 from movebench.trajectories import (
     SET_COL,
     canonicalize_split_key,
@@ -23,7 +26,6 @@ from movebench.trajectories import (
     select_step_starts_with_support,
 )
 
-_TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 def _load_json(path: Path) -> dict[str, object]:
     return dict(json.loads(path.read_text(encoding="utf-8")))
@@ -47,12 +49,13 @@ def _truth_xy_m_for_step(
     end_lon: float,
     end_lat: float,
 ) -> torch.Tensor:
-    start_x_m, start_y_m = _TO_3857.transform(float(start_lon), float(start_lat))
-    end_x_m, end_y_m = _TO_3857.transform(float(end_lon), float(end_lat))
-    return torch.tensor(
-        [float(end_x_m) - float(start_x_m), float(end_y_m) - float(start_y_m)],
-        dtype=torch.float64,
+    x_m, y_m = local_xy_m_from_lonlat(
+        start_lon,
+        start_lat,
+        end_lon,
+        end_lat,
     )
+    return torch.tensor([float(x_m), float(y_m)], dtype=torch.float64)
 
 
 def _support_pixel_size_m(*, output_hw: tuple[int, int], buffer_m: float) -> float:
@@ -245,17 +248,17 @@ def _discrete_contracts(pred_artifact: dict[str, object]) -> tuple[torch.Tensor,
     return point_ids, rows
 
 
-def _grid_coordinates(*, width: int, height: int, pixel_size_m: float) -> tuple[torch.Tensor, torch.Tensor]:
-    return (
-        torch.tensor(
-            [(col - (width // 2)) * float(pixel_size_m) for col in range(width)],
-            dtype=torch.float64,
-        ),
-        torch.tensor(
-            [((height // 2) - row) * float(pixel_size_m) for row in range(height)],
-            dtype=torch.float64,
-        ),
+def _grid_coordinates(
+    *,
+    width: int,
+    height: int,
+    pixel_size_m: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x_m, y_m = centered_grid_coordinates_m(
+        (height, width),
+        pixel_size_m,
     )
+    return torch.from_numpy(x_m), torch.from_numpy(y_m)
 
 
 def _grid_contracts(
@@ -339,6 +342,10 @@ def _score_split(
     pred_artifact: dict[str, object],
     run_payload: dict[str, object],
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if run_payload.get("geometry") != LOCAL_GEOMETRY:
+        raise ValueError("run payload geometry does not match the current contract")
+    if pred_artifact.get("geometry") != LOCAL_GEOMETRY:
+        raise ValueError("prediction artifact geometry does not match the current contract")
     ordered_rows, buffer_m = _support_rows_for_split(
         study_id=str(run_payload["study_id"]),
         split_key=str(split_key),
@@ -418,6 +425,7 @@ def _score_split(
     summary: dict[str, object] = {
         "split_key": str(split_key),
         "prediction_kind": pred_kind,
+        "geometry": LOCAL_GEOMETRY,
         "n_steps_total": int(len(ordered_rows)),
         "n_steps_scored": int(len(by_step_rows)),
         "n_steps_excluded_out_of_support": int(excluded),
@@ -464,14 +472,15 @@ def evaluate_run_dir(
     Prediction scorer contract at the evaluation boundary:
 
     `prediction_kind == "deterministic"`:
-        {"prediction_kind": "deterministic", "point_id_start": ..., "dx_m": ..., "dy_m": ...}
+        {"prediction_kind": "deterministic", "geometry": ..., "point_id_start": ..., "dx_m": ..., "dy_m": ...}
 
     `prediction_kind == "discrete"`:
-        {"prediction_kind": "discrete", "point_id_start": ..., "coords_m": ..., "probs": ...}
+        {"prediction_kind": "discrete", "geometry": ..., "point_id_start": ..., "coords_m": ..., "probs": ...}
 
     `prediction_kind == "grid"`:
         {
             "prediction_kind": "grid",
+            "geometry": ...,
             "point_id_start": ...,
             "scores": ...,
             "pixel_size_m": ...,

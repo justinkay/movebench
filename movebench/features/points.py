@@ -18,6 +18,13 @@ import torch
 import torch.nn.functional as F
 
 from movebench.features.config import SamplerConfig
+from movebench.geometry import (
+    LOCAL_GEOMETRY,
+    local_aeqd_crs,
+    local_bounds_to_wgs84_parts,
+    local_xy_m_from_lonlat,
+    lonlat_from_local_xy_m,
+)
 from movebench.features.manifest import (
     PointFeatureManifest,
     read_manifest,
@@ -38,17 +45,7 @@ from movebench.trajectories import (
 )
 from scipy import stats
 
-TARGET_CRS = "EPSG:3857"  # meters
 SamplerType = Literal["empirical", "parametric"]
-
-
-@lru_cache(maxsize=1)
-def _transformers():
-    from pyproj import Transformer
-
-    to_target = Transformer.from_crs(WGS84_CRS, TARGET_CRS, always_xy=True)
-    to_4326 = Transformer.from_crs(TARGET_CRS, WGS84_CRS, always_xy=True)
-    return to_target, to_4326
 
 
 @lru_cache(maxsize=1)
@@ -80,16 +77,19 @@ def _step_seed(random_seed: int, point_id_start: int) -> int:
 
 def _sampler_payload_dict(sampler: SamplerConfig | dict[str, Any]) -> dict[str, Any]:
     if isinstance(sampler, SamplerConfig):
-        return {
+        payload = {
             "type": str(sampler.type),
             "num_candidates": int(sampler.num_candidates),
             "random_seed": int(sampler.random_seed),
         }
-    return {
-        "type": str(sampler["type"]),
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-    }
+    else:
+        payload = {
+            "type": str(sampler["type"]),
+            "num_candidates": int(sampler["num_candidates"]),
+            "random_seed": int(sampler["random_seed"]),
+        }
+    payload["geometry"] = LOCAL_GEOMETRY
+    return payload
 
 
 def sampler_hash(sampler: SamplerConfig | dict[str, Any]) -> str:
@@ -99,6 +99,7 @@ def sampler_hash(sampler: SamplerConfig | dict[str, Any]) -> str:
         f"tp{'par' if payload_dict['type'] == 'parametric' else 'emp'}",
         f"nc{payload_dict['num_candidates']}",
         f"rs{payload_dict['random_seed']}",
+        "gmaeqd2",
     ]
     return _truncate_key("-".join(parts), payload=payload)
 
@@ -457,6 +458,8 @@ def _sample_from_raster(
     lats: np.ndarray,
     *,
     bilinear: bool,
+    xs: np.ndarray | None = None,
+    ys: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     arr = raster.array
     transform = raster.transform
@@ -464,11 +467,15 @@ def _sample_from_raster(
     nodata = raster.nodata
 
     c_channels, height, width = arr.shape
-    n_points = int(len(lons))
+    n_points = int(len(xs if xs is not None else lons))
 
-    _LayerIO, _Raster, Transformer = _extraction_runtime()
-    transformer = Transformer.from_crs(WGS84_CRS, src_crs, always_xy=True)
-    xs, ys = transformer.transform(lons, lats)
+    if xs is None or ys is None:
+        _LayerIO, _Raster, Transformer = _extraction_runtime()
+        transformer = Transformer.from_crs(WGS84_CRS, src_crs, always_xy=True)
+        xs, ys = transformer.transform(lons, lats)
+    else:
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
 
     inv_transform = ~transform
     cols, rows = inv_transform * (xs, ys)
@@ -547,6 +554,44 @@ def _sample_from_raster(
     valid_t = valid_t & torch.from_numpy(nodata_mask[:, rows_int, cols_int])
     return samples, valid_t
 
+def _sample_from_raster_parts(
+    rasters: list[Raster],
+    bounds_parts: tuple[tuple[float, float, float, float], ...],
+    lons: np.ndarray,
+    lats: np.ndarray,
+    *,
+    bilinear: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample multipart rasters while preserving the original candidate order."""
+    if len(rasters) == 1:
+        return _sample_from_raster(rasters[0], lons, lats, bilinear=bilinear)
+    if len(rasters) != len(bounds_parts):
+        raise ValueError("Multipart rasters and bounds must have matching lengths")
+
+    channels = int(rasters[0].array.shape[0])
+    values = torch.zeros((channels, len(lons)), dtype=torch.float32)
+    valid = torch.zeros((channels, len(lons)), dtype=torch.bool)
+    for raster, (left, bottom, right, top) in zip(rasters, bounds_parts):
+        indices = np.flatnonzero(
+            (lons >= left)
+            & (lons <= right)
+            & (lats >= bottom)
+            & (lats <= top)
+        )
+        if not len(indices):
+            continue
+        part_values, part_valid = _sample_from_raster(
+            raster,
+            lons[indices],
+            lats[indices],
+            bilinear=bilinear,
+        )
+        current_valid = valid[:, indices]
+        take = part_valid & ~current_valid
+        values[:, indices] = torch.where(take, part_values, values[:, indices])
+        valid[:, indices] = current_valid | part_valid
+    return values, valid
+
 
 def _apply_valid_range(
     values: torch.Tensor,
@@ -595,7 +640,9 @@ def _sample_pseudo_steps(
 class _CandidateSet:
     lons: np.ndarray
     lats: np.ndarray
-    bounds_4326: tuple[float, float, float, float]
+    x_m: np.ndarray
+    y_m: np.ndarray
+    bounds_4326_parts: tuple[tuple[float, float, float, float], ...]
     step_lengths_m: np.ndarray
     turn_angles_rad: np.ndarray
 
@@ -606,41 +653,50 @@ def _compute_candidates(
     sampler_state: dict[str, Any],
 ) -> _CandidateSet:
     pseudo_lens, pseudo_turns = _sample_pseudo_steps(sampler_state, req.point_id_start)
+    headings = (float(req.start_bearing) + pseudo_turns + np.pi) % (
+        2.0 * np.pi
+    ) - np.pi
+    pseudo_x_m = pseudo_lens * np.sin(headings)
+    pseudo_y_m = pseudo_lens * np.cos(headings)
+    true_x_m, true_y_m = local_xy_m_from_lonlat(
+        req.start_lon,
+        req.start_lat,
+        req.end_lon,
+        req.end_lat,
+    )
+    x_m = np.append(pseudo_x_m, true_x_m)
+    y_m = np.append(pseudo_y_m, true_y_m)
 
-    to_target, to_4326 = _transformers()
-    x0, y0 = to_target.transform(float(req.start_lon), float(req.start_lat))
-    x1, y1 = to_target.transform(float(req.end_lon), float(req.end_lat))
-
-    headings = float(req.start_bearing) + pseudo_turns
-    headings = (headings + np.pi) % (2.0 * np.pi) - np.pi
-
-    dx = pseudo_lens * np.sin(headings)
-    dy = pseudo_lens * np.cos(headings)
-    xs = np.append(x0 + dx, x1)
-    ys = np.append(y0 + dy, y1)
-
-    true_sl = float(np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2))
-    true_heading = float(np.arctan2(x1 - x0, y1 - y0))
-    true_ta = true_heading - float(req.start_bearing)
-    true_ta = float((true_ta + np.pi) % (2.0 * np.pi) - np.pi)
-
+    true_sl = float(np.hypot(true_x_m, true_y_m))
+    true_heading = float(np.arctan2(true_x_m, true_y_m))
+    true_ta = float(
+        (true_heading - float(req.start_bearing) + np.pi) % (2.0 * np.pi) - np.pi
+    )
     step_lengths = np.append(pseudo_lens, true_sl)
     turn_angles = np.append(pseudo_turns, true_ta)
 
-    lons, lats = to_4326.transform(xs, ys)
-    lons = np.asarray(lons, dtype=np.float64)
-    lats = np.asarray(lats, dtype=np.float64)
-    bounds_4326 = (
-        float(np.min(lons)),
-        float(np.min(lats)),
-        float(np.max(lons)),
-        float(np.max(lats)),
+    lons, lats = lonlat_from_local_xy_m(
+        req.start_lon,
+        req.start_lat,
+        x_m,
+        y_m,
     )
-
+    bounds_4326_parts = local_bounds_to_wgs84_parts(
+        req.start_lon,
+        req.start_lat,
+        (
+            float(np.min(x_m)),
+            float(np.min(y_m)),
+            float(np.max(x_m)),
+            float(np.max(y_m)),
+        ),
+    )
     return _CandidateSet(
         lons=lons,
         lats=lats,
-        bounds_4326=bounds_4326,
+        x_m=x_m.astype(np.float32, copy=False),
+        y_m=y_m.astype(np.float32, copy=False),
+        bounds_4326_parts=bounds_4326_parts,
         step_lengths_m=step_lengths.astype(np.float32, copy=False),
         turn_angles_rad=turn_angles.astype(np.float32, copy=False),
     )
@@ -668,6 +724,8 @@ def _extract_one_step(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
+    np.ndarray,
     int,
     int,
     int,
@@ -681,52 +739,112 @@ def _extract_one_step(
 
     env = torch.zeros((n_channels, points_per_step), dtype=torch.float32)
     valid = torch.zeros((n_channels, points_per_step), dtype=torch.bool)
-    cache: dict[str, Raster] = {}
+    _LayerIO, Raster, _Transformer = _extraction_runtime()
+    cache: dict[str, list[Raster]] = {}
+    metric_cache: dict[str, Raster] = {}
 
-    def get_raster(layer: str) -> Raster:
+    def get_raster_parts(layer: str) -> list[Raster]:
         cached = cache.get(layer)
         if cached is not None:
             return cached
 
-        _LayerIO, Raster, _Transformer = _extraction_runtime()
         spec = REGISTRY.get(layer)
+        if spec.metric_grid_derived:
+            if layer not in metric_cache:
+                requested = {
+                    name
+                    for name in plan.layers_in_order
+                    if REGISTRY.get(name).metric_grid_derived
+                }
+                era5_parts = (
+                    get_raster_parts("era5_land_hourly")
+                    if "orographic_uplift_hourly" in requested
+                    else None
+                )
+                metric_cache.update(
+                    _derived_module().derive_metric_terrain_layers(
+                        dem_parts=get_raster_parts("dem"),
+                        dst_crs=local_aeqd_crs(req.start_lon, req.start_lat),
+                        support_bounds_m=(
+                            float(np.min(cand.x_m)),
+                            float(np.min(cand.y_m)),
+                            float(np.max(cand.x_m)),
+                            float(np.max(cand.y_m)),
+                        ),
+                        requested_layers=requested,
+                        era5_land_hourly=era5_parts[0] if era5_parts else None,
+                    )
+                )
+            return [metric_cache[layer]]
+
         if spec.source == "derived":
             if not spec.derived_from:
                 raise ValueError(f"Derived layer {layer!r} must define derived_from")
-            parents = {p: get_raster(p) for p in spec.derived_from}
-            fn = getattr(_derived_module(), f"compute_{layer}", None)
-            if fn is None:
-                raise ValueError(
-                    f"Missing derived compute function compute_{layer} in movebench.layers.derived"
+            parent_parts = {
+                parent: get_raster_parts(parent) for parent in spec.derived_from
+            }
+            part_count = max(len(parts) for parts in parent_parts.values())
+            rasters = []
+            for part_index in range(part_count):
+                parents = {
+                    parent: parts[part_index] if len(parts) > 1 else parts[0]
+                    for parent, parts in parent_parts.items()
+                }
+                fn = getattr(_derived_module(), f"compute_{layer}", None)
+                if fn is None:
+                    raise ValueError(
+                        f"Missing derived compute function compute_{layer} in movebench.layers.derived"
+                    )
+                base = parents[spec.derived_from[0]]
+                rasters.append(
+                    Raster(
+                        array=fn(**parents),
+                        transform=base.transform,
+                        crs=base.crs,
+                        nodata=float("nan"),
+                        bounds=base.bounds,
+                        band_ids=[f"{layer}.{band}" for band in spec.bands],
+                    )
                 )
-            arr = fn(**parents)
-            base = parents[spec.derived_from[0]]
-            r = Raster(
-                array=arr,
-                transform=base.transform,
-                crs=base.crs,
-                nodata=float("nan"),
-                bounds=base.bounds,
-                band_ids=[f"{layer}.{b}" for b in spec.bands],
+        else:
+            bounds_parts = (
+                (None,) if spec.source == "gee_chip" else cand.bounds_4326_parts
             )
-            cache[layer] = r
-            return r
+            rasters = [
+                io.load_layer(
+                    layer,
+                    point_id=req.point_id_start,
+                    bounds_latlon=bounds,
+                    timestamp=req.timestamp,
+                )
+                for bounds in bounds_parts
+            ]
 
-        r = io.load_layer(
-            layer,
-            point_id=req.point_id_start,
-            bounds_latlon=cand.bounds_4326,
-            timestamp=req.timestamp,
-        )
-        cache[layer] = r
-        return r
+        cache[layer] = rasters
+        return rasters
 
     for layer in plan.layers_in_order:
         start, end = layer_slices[layer]
         spec = REGISTRY.get(layer)
         bilinear = not spec.categorical
-        r = get_raster(layer)
-        vals, vmask = _sample_from_raster(r, cand.lons, cand.lats, bilinear=bilinear)
+        rasters = get_raster_parts(layer)
+        if spec.metric_grid_derived:
+            vals, vmask = _sample_from_raster(
+                rasters[0],
+                cand.lons,
+                cand.lats,
+                bilinear=True,
+                xs=cand.x_m,
+                ys=cand.y_m,
+            )
+        else:
+            vals, vmask = _sample_from_raster_parts(
+                rasters,
+                cand.bounds_4326_parts,
+                cand.lons,
+                cand.lats,
+                bilinear=bilinear,
+            )
 
         if spec.categorical:
             class_vals = vals.squeeze(0).to(torch.int64)
@@ -740,13 +858,14 @@ def _extract_one_step(
         vals, vmask = _apply_valid_range(vals, vmask, spec.valid_range)
         env[start:end] = vals
         valid[start:end] = vmask
-
     env = torch.where(valid, env, torch.zeros_like(env))
     return (
         env.numpy(),
         valid.numpy(),
         cand.lons.astype(np.float32, copy=False),
         cand.lats.astype(np.float32, copy=False),
+        cand.x_m,
+        cand.y_m,
         cand.step_lengths_m,
         cand.turn_angles_rad,
         int(req.point_id_start),
@@ -777,6 +896,8 @@ def _worker_run(
     args: tuple[int, _StepRequest],
 ) -> tuple[
     int,
+    np.ndarray,
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -869,6 +990,8 @@ def _extract_env_block(
     shared = {
         "candidate_lon": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "candidate_lat": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "candidate_x_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
+        "candidate_y_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "step_length_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "turn_angle_rad": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
         "start_lon": torch.zeros((n_steps,), dtype=torch.float32),
@@ -893,6 +1016,8 @@ def _extract_env_block(
                 v,
                 lons,
                 lats,
+                x_m,
+                y_m,
                 sl,
                 ta,
                 pid_start,
@@ -912,6 +1037,8 @@ def _extract_env_block(
             valid[i] = torch.from_numpy(v)
             shared["candidate_lon"][i] = torch.from_numpy(lons)
             shared["candidate_lat"][i] = torch.from_numpy(lats)
+            shared["candidate_x_m"][i] = torch.from_numpy(x_m)
+            shared["candidate_y_m"][i] = torch.from_numpy(y_m)
             shared["step_length_m"][i] = torch.from_numpy(sl)
             shared["turn_angle_rad"][i] = torch.from_numpy(ta)
             shared["start_lon"][i] = float(req.start_lon)
@@ -944,6 +1071,8 @@ def _extract_env_block(
                 v,
                 lons,
                 lats,
+                x_m,
+                y_m,
                 sl,
                 ta,
                 pid_start,
@@ -959,6 +1088,8 @@ def _extract_env_block(
                 valid[idx] = torch.from_numpy(v)
                 shared["candidate_lon"][idx] = torch.from_numpy(lons)
                 shared["candidate_lat"][idx] = torch.from_numpy(lats)
+                shared["candidate_x_m"][idx] = torch.from_numpy(x_m)
+                shared["candidate_y_m"][idx] = torch.from_numpy(y_m)
                 shared["step_length_m"][idx] = torch.from_numpy(sl)
                 shared["turn_angle_rad"][idx] = torch.from_numpy(ta)
                 req = reqs[idx]
@@ -985,10 +1116,11 @@ def _manifest_matches_store_recipe(
     selected_splits: list[str],
 ) -> bool:
     return (
-        manifest.schema_version == "4"
+        manifest.schema_version == "6"
         and manifest.rasters_hash == str(plan.rasters_hash)
         and manifest.sampler_hash == str(sampler_hash_value)
         and manifest.extraction.get("step_selector") == "interval"
+        and manifest.extraction.get("geometry") == LOCAL_GEOMETRY
         and int(manifest.extraction.get("step_time_s", -1))
         == int(plan.step_spec.step_time_s)
         and float(manifest.extraction.get("gap_q", float("nan")))
@@ -1015,6 +1147,8 @@ def _shared_structured_array(
         [
             ("candidate_lon", np.float32, (points_per_step,)),
             ("candidate_lat", np.float32, (points_per_step,)),
+            ("candidate_x_m", np.float32, (points_per_step,)),
+            ("candidate_y_m", np.float32, (points_per_step,)),
             ("step_length_m", np.float32, (points_per_step,)),
             ("turn_angle_rad", np.float32, (points_per_step,)),
             ("start_lon", np.float32),
@@ -1232,7 +1366,7 @@ def extract_split_feature_store(
     )
 
     manifest = PointFeatureManifest(
-        schema_version="4",
+        schema_version="6",
         study_id=str(study_id),
         split=str(split),
         created_at=utc_now_iso(),
@@ -1247,7 +1381,7 @@ def extract_split_feature_store(
             "selected_splits": list(selected_splits),
             "points_per_step": int(points_per_step),
             "choice_policy": "last_is_true",
-            "target_crs": TARGET_CRS,
+            "geometry": LOCAL_GEOMETRY,
         },
         shared=shared_meta,
         layers=layers_meta,

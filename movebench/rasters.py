@@ -9,11 +9,15 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.merge import merge
-from rasterio.transform import from_bounds as transform_from_bounds
+from rasterio.transform import (
+    from_bounds as transform_from_bounds,
+    from_origin,
+)
 from rasterio.warp import calculate_default_transform, reproject, transform_bounds
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import bounds as window_bounds
 
+from movebench.geometry import validate_local_bounds_m
 from movebench.layers.constants import WGS84_CRS
 
 
@@ -225,40 +229,89 @@ def merge_hdf_window(
             ds.close()
 
 
-def reproject_to_meters(
-    layers: list[Raster],
-    dst_crs: str = "EPSG:3857",
+def _nodata_key(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return "nan"
+    return value
+
+
+def aeqd_work_grid(
+    rasters: list[Raster],
+    dst_crs: Any,
+    support_bounds_m: tuple[float, float, float, float],
     *,
-    resampling: Resampling = Resampling.nearest,
+    halo_pixels: int = 1,
+) -> tuple[Any, int, int, float, tuple[float, float, float, float]]:
+    """Return an origin-aligned square-pixel AEQD grid for fine derivation."""
+    if not rasters:
+        raise ValueError("aeqd_work_grid requires at least one Raster")
+
+    resolutions = []
+    for raster in rasters:
+        if raster.crs is None:
+            raise ValueError("Raster has no CRS; cannot calculate AEQD resolution")
+        _, height, width = raster.array.shape
+        transform, _width, _height = calculate_default_transform(
+            raster.crs,
+            dst_crs,
+            width,
+            height,
+            *raster.bounds,
+        )
+        resolutions.append(max(abs(float(transform.a)), abs(float(transform.e))))
+
+    resolution = max(resolutions)
+    left, bottom, right, top = (float(value) for value in support_bounds_m)
+    halo = max(0, int(halo_pixels)) * resolution
+
+    def lower_edge(value: float) -> float:
+        return (math.floor(value / resolution + 0.5) - 0.5) * resolution
+
+    def upper_edge(value: float) -> float:
+        return (math.ceil(value / resolution + 0.5) - 0.5) * resolution
+
+    left = lower_edge(left - halo)
+    bottom = lower_edge(bottom - halo)
+    right = upper_edge(right + halo)
+    top = upper_edge(top + halo)
+    width = max(1, int(round((right - left) / resolution)))
+    height = max(1, int(round((top - bottom) / resolution)))
+    transform = from_origin(left, top, resolution, resolution)
+    bounds = (left, bottom, right, top)
+    validate_local_bounds_m(bounds)
+    return transform, width, height, resolution, bounds
+
+
+def reproject_multipart_to_meters(
+    layers: list[list[Raster]],
+    dst_crs: Any,
+    *,
+    resampling: list[Resampling] | Resampling = Resampling.nearest,
     dst_width: int | None = None,
     dst_height: int | None = None,
     dst_transform: Any | None = None,
 ) -> tuple[list[np.ndarray], Any, str]:
-    """Reproject all layers to a metric CRS, aligned to the first layer's bounds.
+    """Group compatible rasters, reproject, and composite multipart inputs."""
+    if not layers or any(not parts for parts in layers):
+        raise ValueError("reproject_multipart_to_meters requires non-empty layers")
 
-    This mirrors the legacy behavior in movebench, but works with `Raster` objects.
+    if isinstance(resampling, Resampling):
+        methods = [resampling] * len(layers)
+    else:
+        methods = list(resampling)
+        if len(methods) != len(layers):
+            raise ValueError("resampling must provide one method per layer")
 
-    Args:
-        layers: Input rasters to align. All outputs share a common grid.
-        dst_crs: Destination CRS.
-        resampling: Rasterio resampling strategy used for reprojection.
-        dst_width: Optional fixed output width in pixels.
-        dst_height: Optional fixed output height in pixels.
-        dst_transform: Optional explicit destination transform (in `dst_crs`
-            coordinates). If provided, `calculate_default_transform` is skipped
-            and both `dst_width` and `dst_height` are required.
-    """
-    if not layers:
-        raise ValueError("reproject_to_meters requires at least one Raster")
-
-    ref = layers[0]
-    if ref.crs is None:
+    reference = layers[0][0]
+    if reference.crs is None:
         raise ValueError("Reference raster has no CRS; cannot reproject")
-
     if (dst_width is None) != (dst_height is None):
         raise ValueError("Pass both dst_width and dst_height, or neither")
     if dst_transform is not None and dst_width is None:
         raise ValueError("dst_transform requires dst_width and dst_height")
+
     if dst_width is not None:
         dst_width = int(dst_width)
         dst_height = int(dst_height)
@@ -267,66 +320,101 @@ def reproject_to_meters(
                 f"dst_width/dst_height must be positive, got {(dst_width, dst_height)}"
             )
 
-    _, H_ref, W_ref = ref.array.shape
-
+    _, ref_height, ref_width = reference.array.shape
     if dst_transform is None:
-        if dst_width is None:
-            dst_transform, dst_width, dst_height = calculate_default_transform(
-                ref.crs,
-                dst_crs,
-                W_ref,
-                H_ref,
-                *ref.bounds,
-            )
-        else:
-            dst_transform, out_w, out_h = calculate_default_transform(
-                ref.crs,
-                dst_crs,
-                W_ref,
-                H_ref,
-                *ref.bounds,
-                dst_width=int(dst_width),
-                dst_height=int(dst_height),
-            )
-            if int(out_w) != int(dst_width) or int(out_h) != int(dst_height):
-                raise RuntimeError(
-                    "rasterio.warp.calculate_default_transform did not respect requested output size "
-                    f"(dst_width={dst_width}, dst_height={dst_height}); got (width={out_w}, height={out_h}). "
-                    "Check rasterio version compatibility."
-                )
-            dst_width, dst_height = out_w, out_h
-
-    aligned: list[np.ndarray] = []
-    for layer in layers:
-        if layer.crs is None:
-            raise ValueError("Raster has no CRS; cannot reproject")
-
-        C = int(layer.array.shape[0])
-        src_nodata = layer.nodata
-
-        # Preserve categorical nodata values when possible; otherwise use NaN.
-        if src_nodata is not None and not (
-            isinstance(src_nodata, float) and np.isnan(src_nodata)
-        ):
-            dst_nodata = src_nodata
-        else:
-            dst_nodata = np.nan
-
-        dst = np.full(
-            (C, int(dst_height), int(dst_width)), dst_nodata, dtype=np.float32
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            reference.crs,
+            dst_crs,
+            ref_width,
+            ref_height,
+            *reference.bounds,
+            **(
+                {
+                    "dst_width": int(dst_width),
+                    "dst_height": int(dst_height),
+                }
+                if dst_width is not None
+                else {}
+            ),
         )
 
+    dst_width = int(dst_width)
+    dst_height = int(dst_height)
+    outputs = [
+        np.full(
+            (int(parts[0].array.shape[0]), dst_height, dst_width),
+            np.nan,
+            dtype=np.float32,
+        )
+        for parts in layers
+    ]
+    groups: dict[tuple[Any, ...], list[tuple[int, Raster]]] = {}
+    for layer_index, (parts, method) in enumerate(zip(layers, methods)):
+        band_count = int(parts[0].array.shape[0])
+        for raster in parts:
+            if raster.crs is None:
+                raise ValueError("Raster has no CRS; cannot reproject")
+            if int(raster.array.shape[0]) != band_count:
+                raise ValueError("Multipart raster band counts must match")
+            key = (
+                int(method),
+                str(raster.crs),
+                tuple(raster.transform),
+                tuple(raster.array.shape[1:]),
+                _nodata_key(raster.nodata),
+            )
+            groups.setdefault(key, []).append((layer_index, raster))
+
+    for key, entries in groups.items():
+        source = np.concatenate([raster.array for _, raster in entries], axis=0)
+        warped = np.full(
+            (int(source.shape[0]), dst_height, dst_width),
+            np.nan,
+            dtype=np.float32,
+        )
+        raster = entries[0][1]
         reproject(
-            source=layer.array,
-            destination=dst,
-            src_transform=layer.transform,
-            src_crs=layer.crs,
+            source=source,
+            destination=warped,
+            src_transform=raster.transform,
+            src_crs=raster.crs,
             dst_transform=dst_transform,
             dst_crs=dst_crs,
-            resampling=resampling,
-            src_nodata=src_nodata if src_nodata is not None else np.nan,
-            dst_nodata=dst_nodata,
+            resampling=Resampling(key[0]),
+            src_nodata=raster.nodata if raster.nodata is not None else np.nan,
+            dst_nodata=np.nan,
         )
-        aligned.append(dst)
 
-    return aligned, dst_transform, str(dst_crs)
+        offset = 0
+        for layer_index, raster in entries:
+            band_count = int(raster.array.shape[0])
+            candidate = warped[offset : offset + band_count]
+            current = outputs[layer_index]
+            np.copyto(
+                current,
+                candidate,
+                where=~np.isfinite(current) & np.isfinite(candidate),
+            )
+            offset += band_count
+
+    return outputs, dst_transform, str(dst_crs)
+
+
+def reproject_to_meters(
+    layers: list[Raster],
+    dst_crs: Any,
+    *,
+    resampling: Resampling = Resampling.nearest,
+    dst_width: int | None = None,
+    dst_height: int | None = None,
+    dst_transform: Any | None = None,
+) -> tuple[list[np.ndarray], Any, str]:
+    """Reproject aligned rasters, grouping compatible inputs into multiband warps."""
+    return reproject_multipart_to_meters(
+        [[layer] for layer in layers],
+        dst_crs,
+        resampling=resampling,
+        dst_width=dst_width,
+        dst_height=dst_height,
+        dst_transform=dst_transform,
+    )

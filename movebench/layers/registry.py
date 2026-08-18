@@ -43,6 +43,7 @@ class LayerSpec:
     normalize: bool = True
 
     derived_from: list[str] | None = None
+    metric_grid_derived: bool = False
 
     scale_factor: float = 1.0
     valid_range: tuple[float, float] | None = None
@@ -309,6 +310,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=30.0,
         temporal="static",
         derived_from=["dem"],
+        metric_grid_derived=True
     ),
     "aspect": LayerSpec(
         name="aspect",
@@ -317,6 +319,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=30.0,
         temporal="static",
         derived_from=["dem"],
+        metric_grid_derived=True
     ),
     "rugosity": LayerSpec(
         name="rugosity",
@@ -325,6 +328,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=30.0,
         temporal="static",
         derived_from=["dem"],
+        metric_grid_derived=True
     ),
     "orographic_uplift_hourly": LayerSpec(
         name="orographic_uplift_hourly",
@@ -333,6 +337,7 @@ LAYERS: dict[str, LayerSpec] = {
         native_scale_m=30.0,
         temporal="hourly",
         derived_from=["slope", "aspect", "era5_land_hourly"],
+        metric_grid_derived=True
     ),
     "thermal_uplift_hourly": LayerSpec(
         name="thermal_uplift_hourly",

@@ -166,6 +166,10 @@ class LayerIO:
         timestamp: Any | None = None,
     ) -> Raster:
         spec = self.registry.get(layer)
+        if spec.metric_grid_derived:
+            raise ValueError(
+                f"{layer} must be derived after reprojection to a local metric grid"
+            )
 
         if spec.source == "gee_chip":
             if point_id is None:
@@ -225,6 +229,10 @@ class LayerIO:
             return cached
 
         spec = self.registry.get(layer)
+        if spec.metric_grid_derived:
+            raise ValueError(
+                f"{layer} must be derived after reprojection to a local metric grid"
+            )
         if spec.source != "derived":
             r = self.load_layer(
                 layer,
