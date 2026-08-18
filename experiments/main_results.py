@@ -2,7 +2,7 @@ EXPERIMENT = {
     "name": "main_results",
     "studies": "all",
     "timescales": ["1h", "12h", "1d", "7d"],
-    "covariate_sets": ["all"],
+    "covariate_sets": ["alphaearth_only"],
     "methods": [
         "baseline_nomove",
         "baseline_constvel",
@@ -12,5 +12,6 @@ EXPERIMENT = {
         "deepssf",
         "moveformer",
     ],
+    "deepssf_data": "gpu",
     "seed": 0,
 }

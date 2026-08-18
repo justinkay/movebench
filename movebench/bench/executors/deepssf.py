@@ -8,6 +8,11 @@ import torch.nn.functional as F
 
 import movebench.bench.evaluation.runner as evaluation_runner
 from movebench.bench.train import TrainerConfig, run_training_loop
+from movebench.datasets.deepssf_gpu import (
+    AlphaEarthGPUCache,
+    build_deepssf_gpu_datasets,
+    make_deepssf_gpu_loader,
+)
 from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.models.deepssf import DeepSSF
@@ -175,6 +180,12 @@ def _make_loader(
     )
 
 
+def _device_for_backend(backend: str) -> torch.device:
+    if str(backend) == "gpu" and not torch.cuda.is_available():
+        raise RuntimeError("deepssf_data='gpu' requires a CUDA device")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class _DeepSSFRuntime:
     early_stop_metric = "nll"
 
@@ -279,42 +290,75 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
     eval_max_items = int(method_hparams["max_eval_items"])
-    for split_key in ["train", *list(run_payload["evaluation_split_keys"])]:
-        manifest = dict(resolved_artifacts["cache_manifests"][str(split_key)]["manifest"])
-        if str(manifest.get("sample_identity", "")) != "point_id_start":
-            raise ValueError(
-                "deepSSF cache manifest must declare sample_identity='point_id_start'; rebuild the cache"
+    backend = str(run_payload.get("deepssf_data", "wds"))
+    device = _device_for_backend(backend)
+    if backend == "gpu":
+        selected_splits = [str(split) for split in run_payload["selected_splits"]]
+        datasets = build_deepssf_gpu_datasets(
+            study_id=str(run_payload["study_id"]),
+            trajectories_path=resolved_artifacts["trajectories_path"],
+            plan=resolved_artifacts["plan"],
+            splits=selected_splits,
+            catalog=resolved_artifacts["catalog"],
+            output_hw=tuple(resolved_artifacts["output_hw"]),
+        )
+        output_hw = tuple(int(value) for value in resolved_artifacts["output_hw"])
+        pixel_size_m = float(datasets["train"].pixel_size_m)
+        cache = AlphaEarthGPUCache(resolved_artifacts["catalog"], device)
+
+        def loader_for_split(split_key: str, *, shuffle: bool):
+            return make_deepssf_gpu_loader(
+                datasets[str(split_key)],
+                cache=cache,
+                batch_size=batch_size,
+                num_workers=8,
+                seed=seed,
+                shuffle=shuffle,
             )
 
-    train_manifest = dict(resolved_artifacts["cache_manifests"]["train"]["manifest"])
-    output_hw = tuple(int(v) for v in train_manifest["output_hw"])
+    elif backend == "wds":
+        for split_key in ["train", *list(run_payload["evaluation_split_keys"])]:
+            manifest = dict(
+                resolved_artifacts["cache_manifests"][str(split_key)]["manifest"]
+            )
+            if str(manifest.get("sample_identity", "")) != "point_id_start":
+                raise ValueError(
+                    "deepSSF cache manifest must declare sample_identity='point_id_start'; rebuild the cache"
+                )
+        train_manifest = dict(
+            resolved_artifacts["cache_manifests"]["train"]["manifest"]
+        )
+        output_hw = tuple(int(value) for value in train_manifest["output_hw"])
+        pixel_size_m = float(train_manifest["pixel_size_m"])
+
+        def loader_for_split(split_key: str, *, shuffle: bool):
+            return _make_loader(
+                Path(
+                    resolved_artifacts["cache_manifests"][str(split_key)][
+                        "cache_dir"
+                    ]
+                ),
+                batch_size=batch_size,
+                seed=seed,
+                shuffle=shuffle,
+            )
+
+    else:
+        raise ValueError(f"Unsupported deepssf_data={backend!r}")
+
     if len(output_hw) != 2 or int(output_hw[0]) != int(output_hw[1]):
         raise ValueError(f"deepSSF expects square chips. Got output_hw={output_hw}.")
     image_dim = int(run_payload.get("method_model", {}).get("image_dim", output_hw[0]))
     if image_dim != int(output_hw[0]):
         raise ValueError(
-            f"deepSSF model.image_dim={image_dim} is incompatible with cache output_hw={list(output_hw)}"
+            f"deepSSF model.image_dim={image_dim} is incompatible with output_hw={list(output_hw)}"
         )
 
-    pixel_size_m = float(train_manifest["pixel_size_m"])
-
-    train_loader = _make_loader(
-        Path(resolved_artifacts["cache_manifests"]["train"]["cache_dir"]),
-        batch_size=batch_size,
-        seed=seed,
-        shuffle=True,
-    )
+    train_loader = loader_for_split("train", shuffle=True)
     eval_loaders = {
-        "train": _make_loader(
-            Path(resolved_artifacts["cache_manifests"]["train"]["cache_dir"]),
-            batch_size=batch_size,
-            seed=seed,
-            shuffle=False,
-        ),
-        early_stop_split_key: _make_loader(
-            Path(resolved_artifacts["cache_manifests"][early_stop_split_key]["cache_dir"]),
-            batch_size=batch_size,
-            seed=seed,
+        "train": loader_for_split("train", shuffle=False),
+        early_stop_split_key: loader_for_split(
+            early_stop_split_key,
             shuffle=False,
         ),
     }
@@ -329,14 +373,14 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         len(channel_indices),
         image_dim=image_dim,
         pixel_size_m=pixel_size_m,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        device=device,
     )
     runtime = _DeepSSFRuntime(
         model=model,
         train_loader=train_loader,
         eval_loaders=eval_loaders,
         early_stop_split_key=early_stop_split_key,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        device=device,
         lr_movement=float(method_hparams["lr_movement"]),
         lr_habitat=float(method_hparams["lr_habitat"]),
         weight_decay=float(method_hparams["weight_decay"]),
@@ -400,12 +444,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
                 continue
             except Exception:
                 pass
-        loader = _make_loader(
-            Path(resolved_artifacts["cache_manifests"][split_key]["cache_dir"]),
-            batch_size=batch_size,
-            seed=seed,
-            shuffle=False,
-        )
+        loader = loader_for_split(str(split_key), shuffle=False)
         torch.save(
             _prediction_payload(
                 runtime.model,

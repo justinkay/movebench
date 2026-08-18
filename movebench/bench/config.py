@@ -18,6 +18,7 @@ from movebench.study import MARINE_STUDIES, is_named_study_set
 EXPERIMENT_DEFAULTS: dict[str, object] = {
     "version": 1,
     "seed": 0,
+    "deepssf_data": "wds",
     "studies": "all",
     "timescales": ["1h", "12h", "1d", "7d"],
     "covariate_sets": ["all"],
@@ -29,6 +30,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "1h",
         "step_time_s": 3600,
         "layers_config": "configs/layers/all_ae_1h_1h.yaml",
+        "alphaearth_layers_config": "configs/layers/alphaearth_only_1h_1h.yaml",
         "marine_layers_config": "configs/layers/all_ae_plus_marine_1h_1h.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
@@ -42,6 +44,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "12h",
         "step_time_s": 43200,
         "layers_config": "configs/layers/all_ae_12h_12h.yaml",
+        "alphaearth_layers_config": "configs/layers/alphaearth_only_12h_12h.yaml",
         "marine_layers_config": "configs/layers/all_ae_plus_marine_12h_12h.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
@@ -55,6 +58,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "1d",
         "step_time_s": 86400,
         "layers_config": "configs/layers/all_ae_1d_1d.yaml",
+        "alphaearth_layers_config": "configs/layers/alphaearth_only_1d_1d.yaml",
         "marine_layers_config": "configs/layers/all_ae_plus_marine_1d_1d.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
@@ -68,6 +72,7 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "key": "7d",
         "step_time_s": 604800,
         "layers_config": "configs/layers/all_ae_7d_7d.yaml",
+        "alphaearth_layers_config": "configs/layers/alphaearth_only_7d_7d.yaml",
         "marine_layers_config": "configs/layers/all_ae_plus_marine_7d_7d.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
@@ -332,6 +337,10 @@ def normalize_experiment(
     methods = _dedupe_strings(methods, label="methods")
     _validate_registry_keys(methods, registry=METHODS, label="methods")
 
+    deepssf_data = str(merged.get("deepssf_data", "wds")).strip().lower()
+    if deepssf_data not in {"wds", "gpu"}:
+        raise ValueError("'deepssf_data' must be 'wds' or 'gpu'")
+
     normalized: dict[str, object] = {
         "version": 1,
         "name": name,
@@ -340,6 +349,7 @@ def normalize_experiment(
         "timescales": timescales,
         "covariate_sets": covariate_sets,
         "methods": methods,
+        "deepssf_data": deepssf_data,
     }
     if source_path is not None:
         normalized["source_path"] = str(Path(source_path).resolve())

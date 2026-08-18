@@ -173,21 +173,23 @@ def _selected_splits_for_split(
     run_payload: dict[str, object],
     split_key: str,
 ) -> list[str] | None:
-    manifest_path = (
-        paths.study_dir(str(run_payload["study_id"]))
-        / "features"
-        / "points"
-        / canonicalize_split_key(str(split_key))
-        / str(run_payload["rasters_hash"])
-        / str(run_payload["sampler_hash"])
-        / "manifest.json"
-    )
-    if not manifest_path.exists():
-        return None
-    extraction = _load_json(manifest_path).get("extraction", {})
-    if not isinstance(extraction, dict):
-        return None
-    raw_selected_splits = extraction.get("selected_splits")
+    raw_selected_splits = run_payload.get("selected_splits")
+    if str(run_payload.get("deepssf_data", "wds")) != "gpu":
+        manifest_path = (
+            paths.study_dir(str(run_payload["study_id"]))
+            / "features"
+            / "points"
+            / canonicalize_split_key(str(split_key))
+            / str(run_payload["rasters_hash"])
+            / str(run_payload["sampler_hash"])
+            / "manifest.json"
+        )
+        if not manifest_path.exists():
+            return None
+        extraction = _load_json(manifest_path).get("extraction", {})
+        if not isinstance(extraction, dict):
+            return None
+        raw_selected_splits = extraction.get("selected_splits")
     if not isinstance(raw_selected_splits, list) or not raw_selected_splits:
         return None
     selected_splits: list[str] = []

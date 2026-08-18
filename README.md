@@ -153,7 +153,8 @@ movebench extract \
 
 You can repeat `--layers-config` to prepare multiple layer sets.
 
-**Pack deepSSF shards (Optional):** This is only needed if you want to run deepSSF.
+**Prepare deepSSF data (Optional):** The default `wds` backend uses packed
+WebDataset shards:
 
 ```bash
 movebench pack --studies my_study --timescales 12h --layers-config configs/layers/my_layers.yaml

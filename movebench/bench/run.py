@@ -10,6 +10,10 @@ from pathlib import Path
 import signal
 import shutil
 
+from movebench.datasets.deepssf_gpu import (
+    ALPHAEARTH_LAYER,
+    AlphaEarthCatalog,
+)
 from movebench.datasets.deepssf_wds_cache import (
     list_deepssf_wds_shards,
     read_deepssf_wds_manifest,
@@ -177,6 +181,33 @@ def _deepssf_cache_state(study_id: str, timescale_key: str, split: str) -> dict[
     }
 
 
+def _alphaearth_tile_state(
+    study_id: str,
+    timescale_key: str,
+) -> dict[str, object]:
+    timescale = bench_config.resolve_timescale(timescale_key, study_id=study_id)
+    tile_dir = (
+        paths.study_dir(study_id)
+        / "rasters"
+        / str(timescale["rasters_hash"])
+        / "tiles"
+        / ALPHAEARTH_LAYER
+    )
+    try:
+        catalog = AlphaEarthCatalog.from_tile_directories([(study_id, tile_dir)])
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"invalid or missing AlphaEarth tiles: {exc}",
+            "tile_dir": tile_dir,
+        }
+    return {
+        "available": True,
+        "tile_dir": tile_dir,
+        "tile_count": catalog.tile_count,
+    }
+
+
 def _load_deepssf_cache_entry(
     cache_dir: Path,
     *,
@@ -277,24 +308,40 @@ def _dedupe_reasons(*reason_groups: list[str]) -> list[str]:
     return out
 
 
-def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, object]:
+def _study_timescale_readiness(
+    study_id: str,
+    timescale_key: str,
+    *,
+    deepssf_data: str = "wds",
+    needs_points: bool = True,
+) -> dict[str, object]:
     split_info = _study_split_keys(study_id)
     held_out_splits = list(split_info["held_out_splits"])
-    train_points = _point_store_state(study_id, timescale_key, "train")
-    held_out_point_states = {
-        split: _point_store_state(study_id, timescale_key, split)
-        for split in held_out_splits
-    }
+    if needs_points:
+        train_points = _point_store_state(study_id, timescale_key, "train")
+        held_out_point_states = {
+            split: _point_store_state(study_id, timescale_key, split)
+            for split in held_out_splits
+        }
+    else:
+        train_points = {"available": True}
+        held_out_point_states = {
+            split: {"available": True} for split in held_out_splits
+        }
     point_splits_available = [
-        split
-        for split, state in held_out_point_states.items()
-        if state["available"]
+        split for split, state in held_out_point_states.items() if state["available"]
     ]
-    train_cache = _deepssf_cache_state(study_id, timescale_key, "train")
-    held_out_raster_states = {
-        split: _deepssf_cache_state(study_id, timescale_key, split)
-        for split in held_out_splits
-    }
+    if str(deepssf_data) == "gpu":
+        train_cache = _alphaearth_tile_state(study_id, timescale_key)
+        held_out_raster_states = {
+            split: train_cache for split in held_out_splits
+        }
+    else:
+        train_cache = _deepssf_cache_state(study_id, timescale_key, "train")
+        held_out_raster_states = {
+            split: _deepssf_cache_state(study_id, timescale_key, split)
+            for split in held_out_splits
+        }
     raster_splits_available = [
         split
         for split, state in held_out_raster_states.items()
@@ -333,13 +380,18 @@ def _study_timescale_readiness(study_id: str, timescale_key: str) -> dict[str, o
                     for state in held_out_raster_states.values()
                     if not state["available"]
                 ),
-                "no held-out deepSSF caches available",
+                (
+                    "no held-out AlphaEarth data available"
+                    if str(deepssf_data) == "gpu"
+                    else "no held-out deepSSF caches available"
+                ),
             )
         )
 
     return {
         "study_id": study_id,
         "timescale": timescale_key,
+        "deepssf_data": str(deepssf_data),
         "has_train": bool(split_info["has_train"]),
         "held_out_splits": held_out_splits,
         "available_point_splits": point_splits_available,
@@ -362,9 +414,13 @@ def _blocked_reason(
     readiness: dict[str, object],
     *,
     method_key: str,
+    artifact_requirement: str | None = None,
 ) -> str:
-    requirement = str(bench_config.METHODS[method_key]["artifact_requirement"])
-    if requirement == "deepssf_cache":
+    requirement = str(
+        artifact_requirement
+        or bench_config.METHODS[method_key]["artifact_requirement"]
+    )
+    if requirement in {"deepssf_cache", "deepssf_gpu"}:
         reasons = list(readiness.get("raster_blocked_reasons", []))
     elif requirement == "points":
         reasons = list(readiness.get("point_blocked_reasons", []))
@@ -429,13 +485,27 @@ def expand_experiment(
     blocked: list[dict[str, object]] = []
     runs: list[dict[str, object]] = []
     local_readiness_map: dict[str, dict[str, object]] = {}
+    deepssf_data = str(experiment["deepssf_data"])
+    needs_points = deepssf_data != "gpu" or any(
+        str(bench_config.METHODS[str(method_key)]["artifact_requirement"]) == "points"
+        for method_key in experiment["methods"]
+    )
 
     for study_id in studies:
         for timescale_key in experiment["timescales"]:
             readiness_key = f"{study_id}:{timescale_key}"
+            if deepssf_data == "gpu":
+                readiness_key += ":gpu"
+                if needs_points:
+                    readiness_key += ":points"
             readiness = None if readiness_map is None else readiness_map.get(readiness_key)
             if readiness is None:
-                readiness = _study_timescale_readiness(study_id, str(timescale_key))
+                readiness = _study_timescale_readiness(
+                    study_id,
+                    str(timescale_key),
+                    deepssf_data=deepssf_data,
+                    needs_points=needs_points,
+                )
                 if readiness_map is not None:
                     readiness_map[readiness_key] = readiness
             local_readiness_map[readiness_key] = readiness
@@ -452,7 +522,35 @@ def expand_experiment(
                 for method_key in experiment["methods"]:
                     method = bench_config.METHODS[str(method_key)]
                     requirement = str(method["artifact_requirement"])
-                    if requirement == "deepssf_cache":
+                    if str(method_key) == "deepssf" and deepssf_data == "gpu":
+                        requirement = "deepssf_gpu"
+
+                    if requirement == "deepssf_gpu":
+                        band_to_layer = {
+                            channel.band_id: channel.layer
+                            for channel in timescale["plan"].channels
+                        }
+                        incompatible = [
+                            band_id
+                            for band_id in band_ids
+                            if band_to_layer.get(band_id) != ALPHAEARTH_LAYER
+                        ]
+                        if incompatible:
+                            blocked.append(
+                                {
+                                    "study_id": study_id,
+                                    "timescale": str(timescale_key),
+                                    "covariate_set": str(covariate_set_key),
+                                    "method": str(method_key),
+                                    "reason": (
+                                        "deepssf_data='gpu' only supports AlphaEarth "
+                                        "covariates"
+                                    ),
+                                }
+                            )
+                            continue
+
+                    if requirement in {"deepssf_cache", "deepssf_gpu"}:
                         evaluation_splits = list(readiness["held_out_splits"])
                         early_stop_split_key = _preferred_split(evaluation_splits)
                         runnable = bool(
@@ -474,7 +572,11 @@ def expand_experiment(
                                 "timescale": str(timescale_key),
                                 "covariate_set": str(covariate_set_key),
                                 "method": str(method_key),
-                                "reason": _blocked_reason(readiness, method_key=str(method_key)),
+                                "reason": _blocked_reason(
+                                    readiness,
+                                    method_key=str(method_key),
+                                    artifact_requirement=requirement,
+                                ),
                             }
                         )
                         continue
@@ -483,7 +585,11 @@ def expand_experiment(
                         "study_id": study_id,
                         "timescale": str(timescale_key),
                         "step_time_s": int(timescale["step_time_s"]),
-                        "layers_config": str(timescale["layers_config"]),
+                        "layers_config": str(
+                            timescale["alphaearth_layers_config"]
+                            if requirement == "deepssf_gpu"
+                            else timescale["layers_config"]
+                        ),
                         "rasters_hash": str(timescale["rasters_hash"]),
                         "sampler_config": str(timescale["sampler_config"]),
                         "sampler_hash": str(timescale["sampler_hash"]),
@@ -491,7 +597,7 @@ def expand_experiment(
                         "covariate_set": str(covariate_set_key),
                         "band_ids": band_ids,
                         "method": str(method_key),
-                        "artifact_requirement": str(method["artifact_requirement"]),
+                        "artifact_requirement": requirement,
                         "executor": str(method["executor"]),
                         "method_model": dict(method.get("model", {})),
                         "method_hparams": dict(method.get("hparams", {})),
@@ -499,6 +605,12 @@ def expand_experiment(
                         "early_stop_split_key": str(early_stop_split_key),
                         "evaluation_split_keys": evaluation_splits,
                     }
+                    if requirement == "deepssf_gpu":
+                        run_payload["deepssf_data"] = "gpu"
+                        run_payload["selected_splits"] = [
+                            "train",
+                            *evaluation_splits,
+                        ]
                     resolved = _resolve_artifacts_for_run(run_payload)
                     if resolved["status"] != "resolved":
                         blocked.append(
@@ -856,17 +968,98 @@ def _resolve_deepssf_cache_artifacts(
     }
 
 
+def _resolve_deepssf_gpu_artifacts(
+    run_payload: dict[str, object],
+    *,
+    timescale: dict[str, object],
+) -> dict[str, object]:
+    alphaearth_band_ids = [
+        channel.band_id
+        for channel in timescale["plan"].channels
+        if channel.layer == ALPHAEARTH_LAYER
+    ]
+    band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
+    incompatible = [
+        band_id for band_id in band_ids if band_id not in alphaearth_band_ids
+    ]
+    if incompatible:
+        return {
+            "status": "blocked",
+            "reason": "deepssf_data='gpu' only supports AlphaEarth covariates",
+        }
+
+    output_hw = tuple(int(value) for value in timescale["output_hw"])
+    if len(output_hw) != 2 or output_hw[0] != output_hw[1]:
+        return {
+            "status": "blocked",
+            "reason": f"deepSSF expects square chips; output_hw={list(output_hw)}",
+        }
+    image_dim = int(
+        run_payload.get("method_model", {}).get("image_dim", output_hw[0])
+    )
+    if image_dim != output_hw[0]:
+        return {
+            "status": "blocked",
+            "reason": (
+                f"deepSSF model.image_dim={image_dim} is incompatible with "
+                f"output_hw={list(output_hw)}"
+            ),
+        }
+
+    study_id = str(run_payload["study_id"])
+    study_dir = paths.study_dir(study_id)
+    trajectories_path = study_dir / "trajectories.csv"
+    if not trajectories_path.is_file():
+        return {
+            "status": "blocked",
+            "reason": f"missing trajectories: {trajectories_path}",
+        }
+    tile_dir = (
+        study_dir
+        / "rasters"
+        / str(timescale["rasters_hash"])
+        / "tiles"
+        / ALPHAEARTH_LAYER
+    )
+    try:
+        catalog = AlphaEarthCatalog.from_tile_directories([(study_id, tile_dir)])
+    except Exception as exc:
+        return {
+            "status": "blocked",
+            "reason": f"invalid or missing AlphaEarth tiles: {exc}",
+        }
+
+    return {
+        "status": "resolved",
+        "artifact_requirement": "deepssf_gpu",
+        "study_dir": study_dir,
+        "trajectories_path": trajectories_path,
+        "plan": _subset_layer_plan(timescale["plan"], alphaearth_band_ids),
+        "catalog": catalog,
+        "all_band_ids": alphaearth_band_ids,
+        "band_ids": band_ids,
+        "channel_indices": [
+            alphaearth_band_ids.index(band_id) for band_id in band_ids
+        ],
+        "output_hw": output_hw,
+    }
+
+
 def _resolve_artifacts_for_run(run_payload: dict[str, object]) -> dict[str, object]:
     method = bench_config.METHODS[str(run_payload["method"])]
     timescale = bench_config.resolve_timescale(
         str(run_payload["timescale"]),
         study_id=str(run_payload["study_id"]),
     )
-    requirement = str(method["artifact_requirement"])
+    requirement = str(
+        run_payload.get("artifact_requirement", method["artifact_requirement"])
+    )
     if requirement == "points":
         return _resolve_point_artifacts(run_payload, method=method, timescale=timescale)
     if requirement == "deepssf_cache":
         return _resolve_deepssf_cache_artifacts(run_payload, timescale=timescale)
+    if requirement == "deepssf_gpu":
+        return _resolve_deepssf_gpu_artifacts(run_payload, timescale=timescale)
     raise ValueError(f"Unsupported artifact requirement: {requirement!r}")
 
 

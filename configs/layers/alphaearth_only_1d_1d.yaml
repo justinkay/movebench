@@ -1,0 +1,17 @@
+raster_params:
+  buffer:
+    step_time: 1d
+    step_multiplier: 2.0
+    step_q: 0.95
+    max_step_q: 0.99
+    gap_q: 0.999
+  scale_clamp:
+    min_pixels: 3
+    max_pixels: 100
+  tiles:
+    px_per_side: 350
+
+layers:
+  - alphaearth_embeddings
+
+chip_groups: {}
