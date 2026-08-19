@@ -432,11 +432,14 @@ def _blocked_reason(
 def _run_key(run_payload: dict[str, object]) -> str:
     payload = bench_config.stable_payload(_canonical_run_payload(run_payload))
     payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    variant = run_payload.get("method_variant")
+    variant_key = f"__variant={variant}" if variant is not None else ""
     return (
         f"study={run_payload['study_id']}"
         f"__ts={run_payload['timescale']}"
         f"__cov={run_payload['covariate_set']}"
         f"__method={run_payload['method']}"
+        f"{variant_key}"
         f"__seed={run_payload['seed']}"
         f"__k={payload_hash}"
     )
@@ -466,6 +469,29 @@ def checked_in_experiment_module_paths() -> list[str]:
         for path in sorted(experiments_dir.glob("*.py"))
         if path.name != "__init__.py" and not path.name.startswith("_")
     ]
+
+
+def _expand_method_variants(
+    experiment: dict[str, object],
+    method_key: str,
+    method: dict[str, object],
+) -> list[dict[str, object]]:
+    configured = dict(experiment.get("method_variants", {})).get(method_key, [{}])
+    expanded: list[dict[str, object]] = []
+    for configured_variant in configured:
+        variant = dict(configured_variant)
+        model = dict(method.get("model", {}))
+        model.update(dict(variant.get("model", {})))
+        hparams = dict(method.get("hparams", {}))
+        hparams.update(dict(variant.get("hparams", {})))
+        expanded.append(
+            {
+                "key": variant.get("key"),
+                "model": model,
+                "hparams": hparams,
+            }
+        )
+    return expanded
 
 
 def expand_experiment(
@@ -521,6 +547,11 @@ def expand_experiment(
                 )
                 for method_key in experiment["methods"]:
                     method = bench_config.METHODS[str(method_key)]
+                    method_variants = _expand_method_variants(
+                        experiment,
+                        str(method_key),
+                        method,
+                    )
                     requirement = str(method["artifact_requirement"])
                     if str(method_key) == "deepssf" and deepssf_data == "gpu":
                         requirement = "deepssf_gpu"
@@ -536,8 +567,8 @@ def expand_experiment(
                             if band_to_layer.get(band_id) != ALPHAEARTH_LAYER
                         ]
                         if incompatible:
-                            blocked.append(
-                                {
+                            for variant in method_variants:
+                                blocked_run = {
                                     "study_id": study_id,
                                     "timescale": str(timescale_key),
                                     "covariate_set": str(covariate_set_key),
@@ -547,7 +578,9 @@ def expand_experiment(
                                         "covariates"
                                     ),
                                 }
-                            )
+                                if variant["key"] is not None:
+                                    blocked_run["method_variant"] = str(variant["key"])
+                                blocked.append(blocked_run)
                             continue
 
                     if requirement in {"deepssf_cache", "deepssf_gpu"}:
@@ -566,8 +599,8 @@ def expand_experiment(
                         )
 
                     if not runnable or early_stop_split_key is None:
-                        blocked.append(
-                            {
+                        for variant in method_variants:
+                            blocked_run = {
                                 "study_id": study_id,
                                 "timescale": str(timescale_key),
                                 "covariate_set": str(covariate_set_key),
@@ -578,10 +611,12 @@ def expand_experiment(
                                     artifact_requirement=requirement,
                                 ),
                             }
-                        )
+                            if variant["key"] is not None:
+                                blocked_run["method_variant"] = str(variant["key"])
+                            blocked.append(blocked_run)
                         continue
 
-                    run_payload = {
+                    base_run_payload = {
                         "study_id": study_id,
                         "timescale": str(timescale_key),
                         "step_time_s": int(timescale["step_time_s"]),
@@ -599,32 +634,43 @@ def expand_experiment(
                         "method": str(method_key),
                         "artifact_requirement": requirement,
                         "executor": str(method["executor"]),
-                        "method_model": dict(method.get("model", {})),
-                        "method_hparams": dict(method.get("hparams", {})),
                         "seed": int(experiment["seed"]),
                         "early_stop_split_key": str(early_stop_split_key),
                         "evaluation_split_keys": evaluation_splits,
                     }
                     if requirement == "deepssf_gpu":
-                        run_payload["deepssf_data"] = "gpu"
-                        run_payload["selected_splits"] = [
+                        base_run_payload["deepssf_data"] = "gpu"
+                        base_run_payload["selected_splits"] = [
                             "train",
                             *evaluation_splits,
                         ]
-                    resolved = _resolve_artifacts_for_run(run_payload)
-                    if resolved["status"] != "resolved":
-                        blocked.append(
-                            {
+
+                    for variant in method_variants:
+                        run_payload = {
+                            **base_run_payload,
+                            "method_model": dict(variant["model"]),
+                            "method_hparams": dict(variant["hparams"]),
+                        }
+                        if variant["key"] is not None:
+                            run_payload["method_variant"] = str(variant["key"])
+
+                        resolved = _resolve_artifacts_for_run(run_payload)
+                        if resolved["status"] != "resolved":
+                            blocked_run = {
                                 "study_id": study_id,
                                 "timescale": str(timescale_key),
                                 "covariate_set": str(covariate_set_key),
                                 "method": str(method_key),
                                 "reason": str(resolved["reason"]),
                             }
-                        )
-                        continue
-                    run_payload["run_key"] = _run_key(run_payload)
-                    runs.append(run_payload)
+                            if "method_variant" in run_payload:
+                                blocked_run["method_variant"] = run_payload[
+                                    "method_variant"
+                                ]
+                            blocked.append(blocked_run)
+                            continue
+                        run_payload["run_key"] = _run_key(run_payload)
+                        runs.append(run_payload)
 
     experiment["resolved_studies"] = studies
     experiment["blocked"] = blocked

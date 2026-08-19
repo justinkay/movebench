@@ -14,7 +14,14 @@ from movebench.lib.moveformer.geo_transformers.models.any_horizon_forecast_trans
 from x_transformers.x_transformers import AttentionLayers
 
 
-def build_moveformer_selection_model(*, cov_dim: int) -> AnyHorizonForecastTransformer:
+def build_moveformer_selection_model(
+    *,
+    cov_dim: int,
+    depth: int = 6,
+    heads: int = 8,
+    var_len_training_v2: bool = True,
+    max_len: int = 500,
+) -> AnyHorizonForecastTransformer:
     """Instantiate MoveFormer VarCtx-style selection model over generic covariates.
 
     This matches `movebench/lib/moveformer/config/forecast_mbk+ung_12h_sel_nofut.yaml`
@@ -71,8 +78,8 @@ def build_moveformer_selection_model(*, cov_dim: int) -> AnyHorizonForecastTrans
 
     encoder = AttentionLayers(
         dim=emb_dim,
-        depth=6,
-        heads=8,
+        depth=int(depth),
+        heads=int(heads),
         causal=True,
     )
 
@@ -104,8 +111,8 @@ def build_moveformer_selection_model(*, cov_dim: int) -> AnyHorizonForecastTrans
         learnable_nan=True,
         concat_enc_to_out=False,
         var_len_training=False,
-        var_len_training_v2=True,
-        max_len=500,
+        var_len_training_v2=bool(var_len_training_v2),
+        max_len=int(max_len),
         optimizer_init=None,
         lr_warmup_init=None,
         lr_decay_init=None,

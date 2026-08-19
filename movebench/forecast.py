@@ -957,6 +957,9 @@ def _load_moveformer_forecast_scorer(
     from movebench.datasets.moveformer import build_moveformer_forecast_seed
     from movebench.models.moveformer import build_moveformer_selection_model
 
+    method_model = dict(run_payload.get("method_model", {}))
+    method_hparams = dict(run_payload.get("method_hparams", {}))
+    max_len = int(method_hparams["max_len"])
     timescale = bench_config.resolve_timescale(str(run_payload["timescale"]))
     output_hw = tuple(int(v) for v in timescale["output_hw"])
     band_ids = [str(band_id) for band_id in run_payload["band_ids"]]
@@ -968,9 +971,14 @@ def _load_moveformer_forecast_scorer(
         point_id_start=int(seed_context.row.point_id_start),
         subset_band_ids=band_ids,
         normalize_env=bool(resolved_artifacts.get("normalization_stats_path") is not None),
+        max_len=max_len,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_moveformer_selection_model(cov_dim=int(seed.cov_dim))
+    model = build_moveformer_selection_model(
+        cov_dim=int(seed.cov_dim),
+        max_len=max_len,
+        **method_model,
+    )
     model.load_state_dict(_checkpoint_state_dict(run_dir))
     model = model.to(device)
     plan = _subset_layer_plan(resolved_artifacts["plan"], band_ids)

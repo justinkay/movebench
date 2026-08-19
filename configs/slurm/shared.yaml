@@ -2,7 +2,7 @@
 # Pass with: --slurm-config configs/slurm/beery.yaml
 
 defaults:
-  partition: vision-shared-a6000,vision-shared-rtx6000ada,vision-shared-a100,vision-shared-v100,vision-shared-rtx3090,vision-shared-rtx3080,vision-shared-l40s,vision-shared-h100,vision-shared-h200 #,vision-shared-rtx4090
+  partition: vision-shared-a6000,vision-shared-rtx6000ada,vision-shared-a100,vision-shared-v100,vision-shared-l40s,vision-shared-h100,vision-shared-h200 #,vision-shared-rtx4090,vision-shared-rtx3080,vision-shared-rtx3090,
   qos: shared-if-available
   account: vision-beery
   mem: 64GB

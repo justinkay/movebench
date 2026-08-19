@@ -196,11 +196,16 @@ METHODS: dict[str, dict[str, object]] = {
         "executor": "movebench.bench.executors.deepssf:run",
         "model": {
             "image_dim": 101,
+            "output_channels": 4,
+            "dense_dim_hidden": 128,
+            "dropout": 0.1,
         },
         "hparams": {
             "lr_movement": 0.00001,
             "lr_habitat": 0.0001,
             "weight_decay": 0.0,
+            "lr_scheduler_factor": 0.1,
+            "lr_scheduler_patience_epochs": 5,
             "batch_size": 32,
             "max_steps": 70000,
             "eval_every_steps": 350,
@@ -214,7 +219,11 @@ METHODS: dict[str, dict[str, object]] = {
         "artifact_requirement": "points",
         "requires_normalization_stats": True,
         "executor": "movebench.bench.executors.moveformer:run",
-        "model": {},
+        "model": {
+            "depth": 6,
+            "heads": 8,
+            "var_len_training_v2": True,
+        },
         "hparams": {
             "lr": 0.00005,
             "weight_decay": 0.0,
@@ -273,6 +282,77 @@ def _validate_registry_keys(
         raise ValueError(
             f"Unknown {label}: {unknown}. Allowed: {sorted(registry.keys())}"
         )
+
+
+def _normalize_method_variants(
+    value: object,
+) -> dict[str, list[dict[str, object]]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("'method_variants' must be a mapping")
+
+    normalized: dict[str, list[dict[str, object]]] = {}
+    for raw_method_key, variants in value.items():
+        method_key = str(raw_method_key).strip()
+        _validate_registry_keys(
+            [method_key],
+            registry=METHODS,
+            label="method_variants methods",
+        )
+        if not isinstance(variants, list) or not variants:
+            raise ValueError(
+                f"method_variants[{method_key!r}] must be a non-empty list"
+            )
+
+        allowed = {
+            "model": set(dict(METHODS[method_key].get("model", {}))),
+            "hparams": set(dict(METHODS[method_key].get("hparams", {}))),
+        }
+        seen: set[str] = set()
+        normalized_variants: list[dict[str, object]] = []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                raise ValueError(
+                    f"method_variants[{method_key!r}] entries must be mappings"
+                )
+            extra = set(variant) - {"key", "model", "hparams"}
+            if extra:
+                raise ValueError(
+                    "Unsupported method variant fields for "
+                    f"{method_key!r}: {sorted(extra)}"
+                )
+            key = str(variant.get("key", "")).strip()
+            if not key or not all(
+                character.isalnum() or character in "-_." for character in key
+            ):
+                raise ValueError(
+                    "Method variant keys must be non-empty and contain only "
+                    "letters, numbers, '-', '_', or '.'"
+                )
+            if key in seen:
+                raise ValueError(
+                    f"Duplicate method variant key for {method_key!r}: {key!r}"
+                )
+
+            normalized_variant: dict[str, object] = {"key": key}
+            for section in ("model", "hparams"):
+                overlay = variant.get(section, {})
+                if not isinstance(overlay, dict):
+                    raise ValueError(
+                        f"method variant {key!r} field {section!r} must be a mapping"
+                    )
+                unknown = set(overlay) - allowed[section]
+                if unknown:
+                    raise ValueError(
+                        f"Unknown {method_key} {section} overrides: {sorted(unknown)}"
+                    )
+                if overlay:
+                    normalized_variant[section] = copy.deepcopy(overlay)
+            normalized_variants.append(normalized_variant)
+            seen.add(key)
+        normalized[method_key] = normalized_variants
+    return normalized
 
 
 def normalize_experiment(
@@ -336,6 +416,7 @@ def normalize_experiment(
         raise ValueError("'methods' must be a non-empty list")
     methods = _dedupe_strings(methods, label="methods")
     _validate_registry_keys(methods, registry=METHODS, label="methods")
+    method_variants = _normalize_method_variants(merged.get("method_variants"))
 
     deepssf_data = str(merged.get("deepssf_data", "wds")).strip().lower()
     if deepssf_data not in {"wds", "gpu"}:
@@ -351,6 +432,8 @@ def normalize_experiment(
         "methods": methods,
         "deepssf_data": deepssf_data,
     }
+    if method_variants:
+        normalized["method_variants"] = method_variants
     if source_path is not None:
         normalized["source_path"] = str(Path(source_path).resolve())
     if "description" in merged:

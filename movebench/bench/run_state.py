@@ -178,6 +178,7 @@ def _payload_tags(run_key: str, run_payload: dict[str, object]) -> dict[str, str
         "covariate_set": str(run_payload.get("covariate_set", "")),
         "method": str(run_payload.get("method", "")),
         "early_stop_split": str(run_payload.get("early_stop_split_key", "")),
+        "method_variant": str(run_payload.get("method_variant", "")),
     }
     return {key: value for key, value in tags.items() if value}
 

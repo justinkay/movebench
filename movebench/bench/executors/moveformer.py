@@ -633,6 +633,7 @@ def _loader(dataset: Dataset, *, batch_size: int, shuffle: bool, seed: int):
 
 def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     run_dir = Path(run_dir)
+    method_model = dict(run_payload.get("method_model", {}))
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams["batch_size"])
     prediction_num_workers = int(method_hparams.get("prediction_num_workers", 4))
@@ -668,7 +669,11 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     print("Moveformer train dataset length", len(train_dataset))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_moveformer_selection_model(cov_dim=int(train_dataset.cov_dim))
+    model = build_moveformer_selection_model(
+        cov_dim=int(train_dataset.cov_dim),
+        max_len=max_len,
+        **method_model,
+    )
     train_loader = _loader(train_dataset, batch_size=batch_size, shuffle=True, seed=seed)
     train_eval_loader = _loader(
         train_dataset,

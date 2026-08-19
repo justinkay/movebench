@@ -13,7 +13,10 @@ from movebench.datasets.deepssf_gpu import (
     build_deepssf_gpu_datasets,
     make_deepssf_gpu_loader,
 )
-from movebench.datasets.deepssf_wds_cache import make_deepssf_wds_loader
+from movebench.datasets.deepssf_wds_cache import (
+    make_deepssf_wds_loader,
+    steps_per_epoch_from_manifest,
+)
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.models.deepssf import DeepSSF
 
@@ -39,20 +42,24 @@ def _slice_batch_items(
 def _grid_logits_and_targets(
     out: torch.Tensor,
     target: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
+) -> tuple[dict[str, torch.Tensor], torch.Tensor] | None:
     if out.ndim != 4 or int(out.shape[-1]) != 2:
         raise ValueError(
             f"Expected deepSSF output with shape (B,H,W,2); got {tuple(out.shape)}"
         )
-    scores = out[..., 0] + out[..., 1]
-    batch_size, height, width = scores.shape
-    logits = scores.view(int(batch_size), int(height) * int(width))
+    batch_size, height, width, _components = out.shape
     target_flat = target.view(int(batch_size), int(height) * int(width))
     target_mass = target_flat.sum(dim=1)
     valid = (target_mass > 0.5) & (target_mass < 1.5)
     if not valid.any().item():
         return None
-    return logits[valid], torch.argmax(target_flat[valid], dim=1)
+    habitat = out[..., 0].reshape(int(batch_size), int(height) * int(width))
+    movement = out[..., 1].reshape(int(batch_size), int(height) * int(width))
+    return {
+        "nll": (habitat + movement)[valid],
+        "nll_habitat": habitat[valid],
+        "nll_movement": movement[valid],
+    }, torch.argmax(target_flat[valid], dim=1)
 
 
 @torch.no_grad()
@@ -65,7 +72,11 @@ def _evaluate_loader(
     max_items: int | None = None,
 ) -> dict[str, float]:
     model.eval()
-    total_nll = 0.0
+    total_nll = {
+        "nll": 0.0,
+        "nll_habitat": 0.0,
+        "nll_movement": 0.0,
+    }
     total_valid = 0
     seen_items = 0
     item_limit = None if max_items is None else int(max_items)
@@ -95,16 +106,19 @@ def _evaluate_loader(
         if packed is None:
             continue
         logits, true_idx = packed
-        total_nll += float(
-            F.cross_entropy(logits, true_idx, reduction="sum").item()
-        )
+        for key, values in logits.items():
+            total_nll[key] += float(
+                F.cross_entropy(values, true_idx, reduction="sum").item()
+            )
         total_valid += int(true_idx.shape[0])
     if total_valid <= 0:
         raise ValueError(
             "No valid deepSSF targets were found in the loader (all targets were out-of-bounds)."
         )
     return {
-        "nll": float(total_nll / float(total_valid)),
+        key: float(value / float(total_valid))
+        for key, value in total_nll.items()
+    } | {
         "n_valid": float(total_valid),
     }
 
@@ -200,6 +214,9 @@ class _DeepSSFRuntime:
         lr_movement: float,
         lr_habitat: float,
         weight_decay: float,
+        steps_per_epoch: int,
+        lr_scheduler_factor: float,
+        lr_scheduler_patience_epochs: int,
         channel_indices: list[int],
         eval_max_items: int | None,
     ) -> None:
@@ -209,6 +226,7 @@ class _DeepSSFRuntime:
         self.early_stop_split_key = str(early_stop_split_key)
         self.device = device
         self.eval_max_items = eval_max_items
+        self.steps_per_epoch = int(steps_per_epoch)
         self._train_iter = iter(self.train_loader)
         self._channel_indices = None
         if channel_indices:
@@ -219,13 +237,26 @@ class _DeepSSFRuntime:
             )
 
         groups = self.model.parameter_groups()  # type: ignore[attr-defined]
-        self.optimizer = torch.optim.Adam(
-            [
-                {"params": list(groups["movement"]), "lr": float(lr_movement)},
-                {"params": list(groups["habitat"]), "lr": float(lr_habitat)},
-            ],
-            weight_decay=float(weight_decay),
-        )
+        self.optimizers = {
+            "movement": torch.optim.Adam(
+                list(groups["movement"]),
+                lr=float(lr_movement),
+                weight_decay=float(weight_decay),
+            ),
+            "habitat": torch.optim.Adam(
+                list(groups["habitat"]),
+                lr=float(lr_habitat),
+                weight_decay=float(weight_decay),
+            ),
+        }
+        self.lr_schedulers = {
+            key: torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                factor=float(lr_scheduler_factor),
+                patience=int(lr_scheduler_patience_epochs),
+            )
+            for key, optimizer in self.optimizers.items()
+        }
 
     def _next_train_batch(self):
         try:
@@ -250,13 +281,26 @@ class _DeepSSFRuntime:
             return {"loss/train_step": 0.0, "n_valid/train_step": 0.0}
 
         logits, true_idx = packed
-        self.optimizer.zero_grad(set_to_none=True)
-        loss = F.cross_entropy(logits, true_idx, reduction="mean")
+        for optimizer in self.optimizers.values():
+            optimizer.zero_grad(set_to_none=True)
+        loss = F.cross_entropy(logits["nll"], true_idx, reduction="mean")
         loss.backward()
-        self.optimizer.step()
+        for optimizer in self.optimizers.values():
+            optimizer.step()
         return {
             "loss/train_step": float(loss.item()),
             "n_valid/train_step": float(true_idx.shape[0]),
+        }
+
+    def lr_scheduler_due(self, step: int) -> bool:
+        return int(step) % self.steps_per_epoch == 0
+
+    def step_lr_schedulers(self, eval_metrics: dict[str, float]) -> dict[str, float]:
+        self.lr_schedulers["movement"].step(float(eval_metrics["nll_movement"]))
+        self.lr_schedulers["habitat"].step(float(eval_metrics["nll_habitat"]))
+        return {
+            f"lr_{key}": float(optimizer.param_groups[0]["lr"])
+            for key, optimizer in self.optimizers.items()
         }
 
     def evaluate(self, split_key: str) -> dict[str, float]:
@@ -275,12 +319,23 @@ class _DeepSSFRuntime:
                 key: value.detach().cpu().clone()
                 for key, value in self.model.state_dict().items()
             },
-            "optimizer": self.optimizer.state_dict(),
+            "optimizers": {
+                key: optimizer.state_dict()
+                for key, optimizer in self.optimizers.items()
+            },
+            "lr_schedulers": {
+                key: scheduler.state_dict()
+                for key, scheduler in self.lr_schedulers.items()
+            },
         }
 
     def load_state_dict(self, state: dict[str, object]) -> None:
         self.model.load_state_dict(dict(state["model"]))
-        self.optimizer.load_state_dict(dict(state["optimizer"]))
+        optimizer_states = dict(state["optimizers"])
+        scheduler_states = dict(state["lr_schedulers"])
+        for key, optimizer in self.optimizers.items():
+            optimizer.load_state_dict(dict(optimizer_states[key]))
+            self.lr_schedulers[key].load_state_dict(dict(scheduler_states[key]))
 
 
 def run(*, run_payload, resolved_artifacts, run_dir, tracker):
@@ -348,13 +403,19 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
 
     if len(output_hw) != 2 or int(output_hw[0]) != int(output_hw[1]):
         raise ValueError(f"deepSSF expects square chips. Got output_hw={output_hw}.")
-    image_dim = int(run_payload.get("method_model", {}).get("image_dim", output_hw[0]))
+    method_model = dict(run_payload.get("method_model", {}))
+    image_dim = int(method_model.get("image_dim", output_hw[0]))
     if image_dim != int(output_hw[0]):
         raise ValueError(
             f"deepSSF model.image_dim={image_dim} is incompatible with output_hw={list(output_hw)}"
         )
 
     train_loader = loader_for_split("train", shuffle=True)
+    steps_per_epoch = (
+        len(train_loader)
+        if backend == "gpu"
+        else steps_per_epoch_from_manifest(train_manifest, batch_size=batch_size)
+    )
     eval_loaders = {
         "train": loader_for_split("train", shuffle=False),
         early_stop_split_key: loader_for_split(
@@ -367,11 +428,19 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         "max_steps": int(method_hparams["max_steps"]),
         "eval_every_steps": int(method_hparams["eval_every_steps"]),
         "patience_evals": int(method_hparams["patience_evals"]),
+        "steps_per_epoch": int(steps_per_epoch),
+        "lr_scheduler_factor": float(method_hparams["lr_scheduler_factor"]),
+        "lr_scheduler_patience_epochs": int(
+            method_hparams["lr_scheduler_patience_epochs"]
+        ),
     }
     channel_indices = list(resolved_artifacts["channel_indices"])
     model = DeepSSF(
         len(channel_indices),
         image_dim=image_dim,
+        output_channels=int(method_model["output_channels"]),
+        dense_dim_hidden=int(method_model["dense_dim_hidden"]),
+        dropout=float(method_model["dropout"]),
         pixel_size_m=pixel_size_m,
         device=device,
     )
@@ -384,6 +453,11 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         lr_movement=float(method_hparams["lr_movement"]),
         lr_habitat=float(method_hparams["lr_habitat"]),
         weight_decay=float(method_hparams["weight_decay"]),
+        steps_per_epoch=int(schedule["steps_per_epoch"]),
+        lr_scheduler_factor=float(schedule["lr_scheduler_factor"]),
+        lr_scheduler_patience_epochs=int(
+            schedule["lr_scheduler_patience_epochs"]
+        ),
         channel_indices=channel_indices,
         eval_max_items=eval_max_items,
     )

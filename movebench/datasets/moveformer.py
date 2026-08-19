@@ -229,6 +229,7 @@ def build_moveformer_forecast_seed(
     point_id_start: int,
     subset_band_ids: list[str],
     normalize_env: bool,
+    max_len: int = 500,
 ) -> MoveFormerForecastSeed:
     dataset = MoveFormerPointStoreDataset(
         study_dir=study_dir,
@@ -237,7 +238,7 @@ def build_moveformer_forecast_seed(
         sampler_config=sampler_config,
         split=str(split_key),
         context_splits=["train", str(split_key)],
-        max_len=500,
+        max_len=int(max_len),
         min_len=1,
         normalize_env=bool(normalize_env),
         require_normalization_stats=False,

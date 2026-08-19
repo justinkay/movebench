@@ -58,6 +58,8 @@ def run_training_loop(
         getattr(runtime, "early_stop_split_key", "test_temporal")
     )
     early_stop_metric = str(getattr(runtime, "early_stop_metric", "nll"))
+    scheduler_due_fn = getattr(runtime, "lr_scheduler_due", None)
+    scheduler_step_fn = getattr(runtime, "step_lr_schedulers", None)
 
     best_state: dict[str, object] | None = None
     best_metric = float("inf")
@@ -78,19 +80,33 @@ def run_training_loop(
             _log_metrics(tracker, train_step_metrics, step=step)
 
             should_eval = step % int(config.eval_every_steps) == 0
-            if not should_eval and step != int(config.max_steps):
+            early_stop_due = should_eval or step == int(config.max_steps)
+            scheduler_due = callable(scheduler_due_fn) and bool(
+                scheduler_due_fn(step)
+            )
+            if not early_stop_due and not scheduler_due:
                 continue
 
-            train_metrics = {
-                str(key): float(value)
-                for key, value in dict(runtime.evaluate("train")).items()
-            }
+            train_metrics: dict[str, float] = {}
+            if early_stop_due:
+                train_metrics = {
+                    str(key): float(value)
+                    for key, value in dict(runtime.evaluate("train")).items()
+                }
             eval_metrics = {
                 str(key): float(value)
                 for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
             }
-            last_eval_step = int(step)
-            print("Train:", train_metrics)
+            scheduler_metrics: dict[str, float] = {}
+            if scheduler_due:
+                scheduler_metrics = {
+                    str(key): float(value)
+                    for key, value in dict(scheduler_step_fn(eval_metrics)).items()
+                }
+            if early_stop_due:
+                last_eval_step = int(step)
+            if early_stop_due:
+                print("Train:", train_metrics)
             print("Eval:", eval_metrics)
 
             history_entry: dict[str, float] = {"step": float(step)}
@@ -103,6 +119,7 @@ def run_training_loop(
                     for key, value in eval_metrics.items()
                 }
             )
+            history_entry.update(scheduler_metrics)
             history.append(history_entry)
             _log_metrics(
                 tracker,
@@ -112,9 +129,13 @@ def run_training_loop(
                         f"{early_stop_split_key}/{key}": value
                         for key, value in eval_metrics.items()
                     },
+                    **scheduler_metrics,
                 },
                 step=step,
             )
+
+            if not early_stop_due:
+                continue
 
             metric_value = float(eval_metrics[early_stop_metric])
             if metric_value < best_metric:
