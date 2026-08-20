@@ -139,13 +139,30 @@ def _subset_plan_env_channels(
             continue
         seen.add(channel.layer)
         layers_in_order.append(channel.layer)
+
+    required_layers = set(layers_in_order)
+    dependencies = list(layers_in_order)
+    for layer in dependencies:
+        for parent in plan.derived_dependencies.get(layer, []):
+            if parent not in required_layers:
+                required_layers.add(parent)
+                dependencies.append(parent)
+
     return indices, LayerPlan(
         rasters_hash=str(plan.rasters_hash),
         step=plan.step,
         layers_in_order=layers_in_order,
         channels=channels,
-        chip_groups={k: dict(v) for k, v in plan.chip_groups.items()},
-        derived_dependencies={k: list(v) for k, v in plan.derived_dependencies.items()},
+        chip_groups={
+            name: dict(group)
+            for name, group in plan.chip_groups.items()
+            if required_layers.intersection(group["layers"])
+        },
+        derived_dependencies={
+            layer: list(parents)
+            for layer, parents in plan.derived_dependencies.items()
+            if layer in required_layers
+        },
     )
 
 

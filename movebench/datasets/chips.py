@@ -279,7 +279,8 @@ class ChipDataset(Dataset):
 
     def _select_reference_layer(self) -> str:
         layers = list(self.plan.layers_in_order)
-        for parents in self.plan.derived_dependencies.values():
+        for layer in layers:
+            parents = self.plan.derived_dependencies.get(layer, [])
             layers.extend(parent for parent in parents if parent not in layers)
         for layer in layers:
             if self.registry.get(layer).source == "gee_chip":
