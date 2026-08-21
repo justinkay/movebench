@@ -155,9 +155,9 @@ METHODS: dict[str, dict[str, object]] = {
         "executor": "movebench.bench.executors.issf:run_linear",
         "model": {},
         "hparams": {
-            "lr": 0.01,
+            "lr": 0.03,
             "weight_decay": 0.001,
-            "batch_size": 1048,
+            "batch_size": 256,
             "num_workers": 0,
             "prediction_num_workers": 4,
             "max_steps": 2000,
@@ -173,13 +173,13 @@ METHODS: dict[str, dict[str, object]] = {
         "requires_normalization_stats": True,
         "executor": "movebench.bench.executors.issf:run_mlp",
         "model": {
-            "hidden_dims": [128],
+            "hidden_dims": [128, 128],
             "dropout": 0.6,
         },
         "hparams": {
-            "lr": 0.001,
+            "lr": 0.0003,
             "weight_decay": 0.0001,
-            "batch_size": 1048,
+            "batch_size": 256,
             "num_workers": 0,
             "prediction_num_workers": 4,
             "max_steps": 2000,
@@ -201,7 +201,7 @@ METHODS: dict[str, dict[str, object]] = {
             "dropout": 0.1,
         },
         "hparams": {
-            "lr_movement": 0.00001,
+            "lr_movement": 0.00003,
             "lr_habitat": 0.0001,
             "weight_decay": 0.0,
             "lr_scheduler_factor": 0.1,
@@ -230,7 +230,7 @@ METHODS: dict[str, dict[str, object]] = {
             "warmup_steps": 50,
             "lr_gamma": 1.0, # don't decay LR - causes issues with small studies
             "batch_size": 32,
-            "max_len": 500,
+            "max_len": 64,
             "min_len": 1,
             "max_steps": 2000,
             "eval_every_steps": 10, # effectively batch size is ~ batch_size*max_len
