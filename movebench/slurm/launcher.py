@@ -96,7 +96,6 @@ def register_common_slurm_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mem", type=str, default=None)
     parser.add_argument("--cpus-per-task", type=int, default=None)
     parser.add_argument("--gpus-per-node", type=int, default=None)
-    parser.add_argument("--max-concurrent-jobs", type=int, default=None)
     parser.add_argument("--polling-interval", type=float, default=None)
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -112,6 +111,8 @@ _SLURM_CONFIG_FIELDS = {
     "cpus_per_task": int,
     "gpus_per_node": int,
     "max_concurrent_jobs": int,
+    "max_cpu_jobs": int,
+    "max_gpu_jobs": int,
     "polling_interval": float,
     "log_dir": Path,
 }
@@ -302,7 +303,7 @@ def _slurm_array_status_counts(job_id: str) -> tuple[int, int, int] | None:
                 "-n",
                 "-P",
                 "-X",
-                "--format=State",
+                "--format=JobID,State",
             ],
             capture_output=True,
             check=False,
@@ -318,8 +319,11 @@ def _slurm_array_status_counts(job_id: str) -> tuple[int, int, int] | None:
     failed = 0
     saw_state = False
     for raw_line in str(result.stdout).splitlines():
-        state = raw_line.split("|", 1)[0].strip()
-        if not state:
+        fields = raw_line.split("|")
+        if len(fields) < 2:
+            continue
+        record_id, state = (field.strip() for field in fields[:2])
+        if "[" in record_id or not state:
             continue
         saw_state = True
         if state.startswith("COMPLETED"):
@@ -339,14 +343,10 @@ def run_sbatch_queue(
     requests: Sequence[ArrayRequest],
     polling_interval: float,
     dry_run: bool,
-    max_concurrent_jobs: int | None = None,
 ) -> int:
     request_list = list(requests)
     if dry_run:
-        summary = f"[{label}] Dry-run: would launch {len(request_list)} array jobs"
-        if max_concurrent_jobs is not None:
-            summary += f" (max_concurrent={int(max_concurrent_jobs)})"
-        print(summary + ".")
+        print(f"[{label}] Dry-run: would launch {len(request_list)} array jobs.")
         for index, request in enumerate(request_list):
             request_name = _request_name(request, index)
             print(

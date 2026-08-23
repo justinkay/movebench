@@ -6,7 +6,6 @@ defaults:
   qos: shared-if-available
   account: vision-beery
   mem: 64GB
-  max_concurrent_jobs: 10000
   polling_interval: 30
 
 commands:
@@ -14,18 +13,22 @@ commands:
     time: 1-00:00:00
     cpus_per_task: 16
     gpus_per_node: 0
+    max_concurrent_jobs: 10000
     log_dir: results/slurm/extract_points
 
   bench:
     time: 1-00:00:00
     cpus_per_task: 16
     # gpus_per_node set by methods
+    max_cpu_jobs: 10000
+    max_gpu_jobs: 10000
     log_dir: results/slurm/bench
 
   pack:
     time: 1-00:00:00
     cpus_per_task: 16
     gpus_per_node: 0
+    max_concurrent_jobs: 10000
     log_dir: results/slurm/pack
 
   zip_rasters:

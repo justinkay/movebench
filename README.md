@@ -208,5 +208,7 @@ movebench slurm pack \
 movebench slurm bench run \
   experiments/main_results.py \
   --studies mini \
+  --max-cpu-jobs 32 \
+  --max-gpu-jobs 32 \
   --slurm-config path/to/slurm.yaml
 ```

@@ -197,7 +197,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
         requests=requests,
         polling_interval=float(args.polling_interval),
         dry_run=bool(args.dry_run),
-        max_concurrent_jobs=int(args.max_concurrent_jobs),
     )
     return 2 if blocked else rc
 
@@ -279,5 +278,6 @@ def _register_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--worker-study", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--worker-layers-config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--worker-sampler-config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--max-concurrent-jobs", type=int, default=None)
     register_common_slurm_arguments(parser)
     parser.set_defaults(func=_run)

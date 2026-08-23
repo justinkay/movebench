@@ -16,7 +16,8 @@ from movebench.slurm.launcher import (
 
 _SLURM_DEFAULTS = {
     "cpus_per_task": 1,
-    "max_concurrent_jobs": 32,
+    "max_cpu_jobs": 32,
+    "max_gpu_jobs": 32,
     "polling_interval": 5.0,
     "log_dir": Path("results/slurm/bench"),
 }
@@ -116,40 +117,6 @@ def _bucket_pending_runs(
     return list(buckets.items())
 
 
-def _allocate_bucket_caps(task_counts: list[int], requested_cap: int) -> list[int]:
-    if int(requested_cap) <= 0:
-        raise ValueError("--max-concurrent-jobs must be > 0")
-
-    non_empty = [index for index, count in enumerate(task_counts) if int(count) > 0]
-    caps = [0 for _ in task_counts]
-    if not non_empty:
-        return caps
-    if len(non_empty) == 1:
-        index = non_empty[0]
-        caps[index] = min(int(task_counts[index]), int(requested_cap))
-        return caps
-    if len(non_empty) > int(requested_cap):
-        raise ValueError("bench resource buckets exceed --max-concurrent-jobs")
-
-    for index in non_empty:
-        caps[index] = 1
-
-    remaining = int(requested_cap) - len(non_empty)
-    while remaining > 0:
-        candidates = [
-            index for index in non_empty if int(task_counts[index]) > int(caps[index])
-        ]
-        if not candidates:
-            break
-        next_index = max(
-            candidates,
-            key=lambda index: (int(task_counts[index]) - int(caps[index]), -index),
-        )
-        caps[next_index] += 1
-        remaining -= 1
-    return caps
-
-
 def _run_worker(args: argparse.Namespace) -> int:
     if not args.manifest_path or not args.run_key:
         raise ValueError("Worker mode requires --manifest-path and --run-key")
@@ -165,6 +132,9 @@ def _run_worker(args: argparse.Namespace) -> int:
 def _run_launcher(args: argparse.Namespace) -> int:
     if not args.experiment_module:
         raise ValueError("Launcher mode requires an experiment module")
+    for name in ("max_cpu_jobs", "max_gpu_jobs"):
+        if int(getattr(args, name)) <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be > 0")
 
     bench_run = _bench_run_module()
     resolved = bench_run.resolve_pending_runs(
@@ -190,18 +160,13 @@ def _run_launcher(args: argparse.Namespace) -> int:
         _write_manifest(manifest_path, dict(resolved["manifest_payload"]))
 
     buckets = _bucket_pending_runs(args, pending_runs)
-    caps = _allocate_bucket_caps(
-        [len(bucket_runs) for _, bucket_runs in buckets],
-        int(args.max_concurrent_jobs),
-    )
     requests: list[ArrayRequest] = []
-    for bucket_index, ((resources, bucket_runs), bucket_cap) in enumerate(
-        zip(buckets, caps)
-    ):
+    for bucket_index, (resources, bucket_runs) in enumerate(buckets):
+        max_jobs = args.max_gpu_jobs if resources.gpus_per_node else args.max_cpu_jobs
         requests.append(
             ArrayRequest(
                 resources=resources,
-                array_concurrency=int(bucket_cap),
+                array_concurrency=min(len(bucket_runs), int(max_jobs)),
                 log_path=Path(args.log_dir) / f"bucket-{bucket_index}.%A_%a.log",
                 worker_args_list=tuple(
                     tuple(
@@ -224,7 +189,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
         requests=requests,
         polling_interval=float(args.polling_interval),
         dry_run=bool(args.dry_run),
-        max_concurrent_jobs=int(args.max_concurrent_jobs),
     )
 
 
@@ -256,6 +220,8 @@ def register(subparsers) -> None:
     )
     run_parser.add_argument("--methods", nargs="+", default=None)
     run_parser.add_argument("--max-runs", type=int, default=None)
+    run_parser.add_argument("--max-cpu-jobs", type=int, default=None)
+    run_parser.add_argument("--max-gpu-jobs", type=int, default=None)
     run_parser.add_argument("--rerun", action="store_true")
     run_parser.add_argument("--manifest-path", type=Path, default=None, help=argparse.SUPPRESS)
     run_parser.add_argument("--run-key", default=None, help=argparse.SUPPRESS)
