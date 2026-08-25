@@ -582,10 +582,7 @@ class AlphaEarthGPUCache:
                         matches.append((tile_index, shift))
                         break
             if not matches:
-                raise FileNotFoundError(
-                    "No AlphaEarth tile intersects query bounds "
-                    f"{query_bounds} for group_id={group_id}"
-                )
+                continue
             for tile_index, shift in matches:
                 candidates.setdefault(tile_index, []).append(
                     (
