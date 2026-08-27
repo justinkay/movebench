@@ -12,11 +12,11 @@ import pandas as pd
 import movebench.paths as paths
 
 import movebench.bench.config as bench_config
-import movebench.bench.run as bench_run
+import movebench.bench.results as bench_results
 import movebench.bench.run_state as bench_run_state
 
 EXPECTED_HELD_OUT_SPLITS = ["test_temporal", "test_individual"]
-TIMESCALE_ORDER = ["1h", "12h", "1d", "7d"]
+TIMESCALE_ORDER = bench_results.TIMESCALE_ORDER
 METHOD_ORDER = list(bench_config.METHODS.keys())
 COVARIATE_ORDER = list(bench_config.COVARIATE_SETS.keys())
 METHOD_COLORS = {
@@ -52,27 +52,8 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     )
 
 
-def _metric_split_key(split_key: str) -> str:
-    return str(split_key).replace("-", "_")
-
-
 def _empty_results_df() -> pd.DataFrame:
-    return pd.DataFrame.from_records(
-        [],
-        columns=[
-            "experiment_name",
-            "run_key",
-            "run_id",
-            "run_status",
-            "study_id",
-            "timescale",
-            "method",
-            "covariate_set",
-            "seed",
-            "split_key",
-            "energy_score",
-        ],
-    )
+    return bench_results.empty_results_df()
 
 
 def _ordered(values: list[str], *, preferred: list[str]) -> list[str]:
@@ -96,107 +77,13 @@ def _split_label(split_key: str) -> str:
 
 
 def _expanded_checked_in_experiments() -> list[dict[str, object]]:
-    return bench_run.expanded_checked_in_experiments()
+    return bench_results.expanded_checked_in_experiments()
 
 
 def _planned_run_index(
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
-    expanded_experiments = (
-        _expanded_checked_in_experiments()
-        if expanded_experiments is None
-        else expanded_experiments
-    )
-    planned: dict[str, dict[str, object]] = {}
-    for entry in expanded_experiments:
-        experiment = dict(entry.get("experiment", {}))
-        experiment_name = str(experiment.get("name", ""))
-        for run in entry.get("runs", []):
-            run_payload = dict(run)
-            run_key = str(run_payload["run_key"])
-            if run_key not in planned:
-                planned[run_key] = {
-                    **run_payload,
-                    "experiment_names": [experiment_name],
-                }
-                continue
-            if experiment_name not in planned[run_key]["experiment_names"]:
-                planned[run_key]["experiment_names"].append(experiment_name)
-    return planned
-
-
-def _planned_runs_for_experiment(
-    experiment_name: str,
-    *,
-    expanded_experiments: list[dict[str, object]] | None = None,
-) -> dict[str, dict[str, object]]:
-    planned = _planned_run_index(expanded_experiments)
-    return {
-        run_key: run
-        for run_key, run in planned.items()
-        if str(experiment_name) in list(run["experiment_names"])
-    }
-
-
-def _sort_results_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    order = {value: idx for idx, value in enumerate(TIMESCALE_ORDER)}
-    df = df.copy()
-    df["timescale_order"] = df["timescale"].map(
-        lambda value: order.get(str(value), len(order))
-    )
-    df = df.sort_values(
-        ["study_id", "split_key", "timescale_order", "method", "covariate_set", "run_key"]
-    ).drop(columns=["timescale_order"])
-    return df.reset_index(drop=True)
-
-
-def _result_rows_for_experiment(
-    experiment_name: str,
-    *,
-    latest_run_records: dict[str, dict[str, object]] | None = None,
-    expanded_experiments: list[dict[str, object]] | None = None,
-) -> pd.DataFrame:
-    planned_runs = _planned_runs_for_experiment(
-        experiment_name,
-        expanded_experiments=expanded_experiments,
-    )
-    if not planned_runs:
-        return _empty_results_df()
-    if latest_run_records is None:
-        latest_run_records = bench_run_state.search_latest_run_records_by_key(
-            list(planned_runs.keys())
-        )
-
-    rows: list[dict[str, object]] = []
-    for run_key, planned_run in planned_runs.items():
-        latest = dict(latest_run_records.get(run_key, {}))
-        if str(latest.get("status", "")) != "completed":
-            continue
-        metrics = dict(latest.get("metrics", {}))
-        for split_key in list(planned_run.get("evaluation_split_keys", [])):
-            metric_key = f"energy_score.{_metric_split_key(str(split_key))}"
-            if metric_key not in metrics:
-                continue
-            rows.append(
-                {
-                    "experiment_name": experiment_name,
-                    "run_key": run_key,
-                    "run_id": str(latest.get("run_id", "")),
-                    "run_status": "completed",
-                    "study_id": str(planned_run["study_id"]),
-                    "timescale": str(planned_run["timescale"]),
-                    "method": str(planned_run["method"]),
-                    "covariate_set": str(planned_run["covariate_set"]),
-                    "seed": int(planned_run.get("seed", 0)),
-                    "split_key": str(split_key),
-                    "energy_score": float(metrics[metric_key]),
-                }
-            )
-    if not rows:
-        return _empty_results_df()
-    return _sort_results_df(pd.DataFrame.from_records(rows))
+    return bench_results.planned_run_index(expanded_experiments)
 
 
 def load_main_results(
@@ -204,7 +91,7 @@ def load_main_results(
     latest_run_records: dict[str, dict[str, object]] | None = None,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    return _result_rows_for_experiment(
+    return bench_results.load_results(
         "main_results",
         latest_run_records=latest_run_records,
         expanded_experiments=expanded_experiments,
@@ -216,7 +103,7 @@ def load_covariate_results(
     latest_run_records: dict[str, dict[str, object]] | None = None,
     expanded_experiments: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
-    return _result_rows_for_experiment(
+    return bench_results.load_results(
         "covariate_comparison",
         latest_run_records=latest_run_records,
         expanded_experiments=expanded_experiments,
