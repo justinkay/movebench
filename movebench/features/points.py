@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from movebench.features.config import SamplerConfig
 from movebench.geometry import (
     LOCAL_GEOMETRY,
+    MAX_LOCAL_RADIUS_M,
     local_aeqd_crs,
     local_bounds_to_wgs84_parts,
     local_xy_m_from_lonlat,
@@ -70,8 +71,10 @@ def _stable_payload(d: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _step_seed(random_seed: int, point_id_start: int) -> int:
+def _step_seed(random_seed: int, point_id_start: int, attempt: int = 0) -> int:
     s = f"{int(random_seed)}|{int(point_id_start)}".encode("utf-8")
+    if attempt:
+        s += f"|retry={int(attempt)}".encode("utf-8")
     return int(hashlib.sha256(s).hexdigest()[:8], 16)
 
 
@@ -608,9 +611,9 @@ def _apply_valid_range(
 
 
 def _sample_pseudo_steps(
-    state: dict[str, Any], point_id_start: int
+    state: dict[str, Any], point_id_start: int, attempt: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
-    seed = _step_seed(int(state["random_seed"]), int(point_id_start))
+    seed = _step_seed(int(state["random_seed"]), int(point_id_start), attempt)
     rng = np.random.default_rng(seed)
     valid_lengths = state["valid_lengths"]
     valid_turns = state["valid_turns"]
@@ -652,20 +655,40 @@ def _compute_candidates(
     *,
     sampler_state: dict[str, Any],
 ) -> _CandidateSet:
-    pseudo_lens, pseudo_turns = _sample_pseudo_steps(sampler_state, req.point_id_start)
-    headings = (float(req.start_bearing) + pseudo_turns + np.pi) % (
-        2.0 * np.pi
-    ) - np.pi
-    pseudo_x_m = pseudo_lens * np.sin(headings)
-    pseudo_y_m = pseudo_lens * np.cos(headings)
     true_x_m, true_y_m = local_xy_m_from_lonlat(
         req.start_lon,
         req.start_lat,
         req.end_lon,
         req.end_lat,
     )
-    x_m = np.append(pseudo_x_m, true_x_m)
-    y_m = np.append(pseudo_y_m, true_y_m)
+    if float(np.hypot(true_x_m, true_y_m)) > MAX_LOCAL_RADIUS_M:
+        raise ValueError("True step exceeds the supported local AEQD radius")
+
+    attempt = 0
+    while True:
+        pseudo_lens, pseudo_turns = _sample_pseudo_steps(
+            sampler_state, req.point_id_start, attempt
+        )
+        headings = (float(req.start_bearing) + pseudo_turns + np.pi) % (
+            2.0 * np.pi
+        ) - np.pi
+        pseudo_x_m = pseudo_lens * np.sin(headings)
+        pseudo_y_m = pseudo_lens * np.cos(headings)
+        x_m = np.append(pseudo_x_m, true_x_m)
+        y_m = np.append(pseudo_y_m, true_y_m)
+        bounds_m = (
+            float(np.min(x_m)),
+            float(np.min(y_m)),
+            float(np.max(x_m)),
+            float(np.max(y_m)),
+        )
+        if max(
+            np.hypot(x, y)
+            for x in (bounds_m[0], bounds_m[2])
+            for y in (bounds_m[1], bounds_m[3])
+        ) <= MAX_LOCAL_RADIUS_M:
+            break
+        attempt += 1
 
     true_sl = float(np.hypot(true_x_m, true_y_m))
     true_heading = float(np.arctan2(true_x_m, true_y_m))
@@ -684,12 +707,7 @@ def _compute_candidates(
     bounds_4326_parts = local_bounds_to_wgs84_parts(
         req.start_lon,
         req.start_lat,
-        (
-            float(np.min(x_m)),
-            float(np.min(y_m)),
-            float(np.max(x_m)),
-            float(np.max(y_m)),
-        ),
+        bounds_m,
     )
     return _CandidateSet(
         lons=lons,

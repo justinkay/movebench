@@ -17,6 +17,7 @@ from movebench.extract import (
     resolve_requested_studies,
     run_extract_job,
     split_cli_values,
+    uses_chip_downloads,
     uses_gee_layers,
 )
 from movebench.slurm.launcher import (
@@ -130,10 +131,14 @@ def _run_launcher(args: argparse.Namespace) -> int:
                 )
                 continue
             try:
-                request_status = load_chip_request_status_for_extract(
-                    study=study,
-                    plan=run.plan,
-                    splits=resolved_splits,
+                request_status = (
+                    load_chip_request_status_for_extract(
+                        study=study,
+                        plan=run.plan,
+                        splits=resolved_splits,
+                    )
+                    if uses_chip_downloads(run.plan)
+                    else None
                 )
             except ValueError as exc:
                 blocked.append(

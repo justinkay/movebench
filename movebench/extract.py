@@ -108,6 +108,10 @@ def uses_gee_layers(plan: Any) -> bool:
     return False
 
 
+def uses_chip_downloads(plan: Any) -> bool:
+    return bool(getattr(plan, "chip_groups", {}))
+
+
 def is_extract_complete(
     *,
     study_dir: Path,
@@ -204,10 +208,14 @@ def run_extract_job(
                     file=sys.stderr,
                 )
                 return 2
-            request_status = load_chip_request_status_for_extract(
-                study=study,
-                plan=run.plan,
-                splits=resolved_splits,
+            request_status = (
+                load_chip_request_status_for_extract(
+                    study=study,
+                    plan=run.plan,
+                    splits=resolved_splits,
+                )
+                if uses_chip_downloads(run.plan)
+                else None
             )
             if (
                 isinstance(request_status, dict)
@@ -267,7 +275,7 @@ def run_extract_job(
         layers_config=str(run.layers_config_path),
         sampler_config=run.sampler,
         split="train",
-        skip_existing=True,
+        skip_existing=bool(skip_existing),
     )
     print(
         f"[extract] OK study_id={study_id} layers={run.layers_config_path} "

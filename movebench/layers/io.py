@@ -475,12 +475,35 @@ class LayerIO:
                         nodata=GEE_NODATA_SENTINEL,
                         method=_copy_first_valid_gee_tile,
                     )
+                    mosaic_bounds = bounds_latlon
+                    if 0 in mosaic.shape[-2:]:
+                        min_lon, min_lat, max_lon, max_lat = bounds_latlon
+                        center_lon = (min_lon + max_lon) / 2.0
+                        center_lat = (min_lat + max_lat) / 2.0
+                        width = max(
+                            max_lon - min_lon, 2.0 * abs(datasets[0].res[0])
+                        )
+                        height = max(
+                            max_lat - min_lat, 2.0 * abs(datasets[0].res[1])
+                        )
+                        mosaic_bounds = (
+                            center_lon - width / 2.0,
+                            center_lat - height / 2.0,
+                            center_lon + width / 2.0,
+                            center_lat + height / 2.0,
+                        )
+                        mosaic, out_transform = merge(
+                            datasets,
+                            bounds=mosaic_bounds,
+                            nodata=GEE_NODATA_SENTINEL,
+                            method=_copy_first_valid_gee_tile,
+                        )
                     base = Raster(
                         array=mosaic,
                         transform=out_transform,
                         crs=datasets[0].crs,
                         nodata=GEE_NODATA_SENTINEL,
-                        bounds=bounds_latlon,
+                        bounds=mosaic_bounds,
                         band_ids=[f"band_{i + 1}" for i in range(mosaic.shape[0])],
                     )
                 finally:

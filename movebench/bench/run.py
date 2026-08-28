@@ -140,9 +140,17 @@ def _point_store_state(study_id: str, timescale_key: str, split: str) -> dict[st
             "reason": f"invalid point store manifest for {split}: {exc}",
             "manifest_path": manifest_path,
         }
+    if manifest.n_rows == 0:
+        return {
+            "available": False,
+            "reason": f"point store for {split} has zero valid steps",
+            "manifest_path": manifest_path,
+            "n_rows": 0,
+        }
     return {
         "available": True,
         "manifest_path": manifest_path,
+        "n_rows": manifest.n_rows,
     }
 
 
@@ -348,7 +356,12 @@ def _study_timescale_readiness(
         if state["available"]
     ]
 
-    point_ready = bool(train_points["available"]) and bool(point_splits_available)
+    point_ready = bool(
+        split_info["has_train"]
+        and train_points["available"]
+        and held_out_splits
+        and len(point_splits_available) == len(held_out_splits)
+    )
     raster_ready = bool(train_cache["available"]) and bool(raster_splits_available)
     fully_runnable = point_ready and raster_ready
 
@@ -359,7 +372,7 @@ def _study_timescale_readiness(
         raster_blocked_reasons.append("study has no train split")
     if not train_points["available"]:
         point_blocked_reasons.append(str(train_points["reason"]))
-    if not point_splits_available:
+    if len(point_splits_available) != len(held_out_splits):
         point_blocked_reasons.append(
             next(
                 (
@@ -421,7 +434,10 @@ def _blocked_reason(
         or bench_config.METHODS[method_key]["artifact_requirement"]
     )
     if requirement in {"deepssf_cache", "deepssf_gpu"}:
-        reasons = list(readiness.get("raster_blocked_reasons", []))
+        reasons = _dedupe_reasons(
+            list(readiness.get("point_blocked_reasons", [])),
+            list(readiness.get("raster_blocked_reasons", [])),
+        )
     elif requirement == "points":
         reasons = list(readiness.get("point_blocked_reasons", []))
     else:
@@ -512,10 +528,7 @@ def expand_experiment(
     runs: list[dict[str, object]] = []
     local_readiness_map: dict[str, dict[str, object]] = {}
     deepssf_data = str(experiment["deepssf_data"])
-    needs_points = deepssf_data != "gpu" or any(
-        str(bench_config.METHODS[str(method_key)]["artifact_requirement"]) == "points"
-        for method_key in experiment["methods"]
-    )
+    needs_points = True
 
     for study_id in studies:
         for timescale_key in experiment["timescales"]:
@@ -587,7 +600,7 @@ def expand_experiment(
                         evaluation_splits = list(readiness["held_out_splits"])
                         early_stop_split_key = _preferred_split(evaluation_splits)
                         runnable = bool(
-                            readiness["has_train"] and evaluation_splits
+                            readiness["point_ready"] and evaluation_splits
                         )
                     elif requirement == "points":
                         evaluation_splits = list(readiness["available_point_splits"])
