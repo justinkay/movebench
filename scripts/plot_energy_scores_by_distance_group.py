@@ -518,7 +518,7 @@ def write_outputs(
             # else:
             #     ax.set_ylim(0.7, 2)
 
-            ax.set_ylim(0.65, 1.2)
+            ax.set_ylim(0.65, 1.25)
 
             ax.set_yscale("log")
             ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4]))
