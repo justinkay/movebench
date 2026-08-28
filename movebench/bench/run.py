@@ -359,8 +359,7 @@ def _study_timescale_readiness(
     point_ready = bool(
         split_info["has_train"]
         and train_points["available"]
-        and held_out_splits
-        and len(point_splits_available) == len(held_out_splits)
+        and point_splits_available
     )
     raster_ready = bool(train_cache["available"]) and bool(raster_splits_available)
     fully_runnable = point_ready and raster_ready
@@ -372,7 +371,7 @@ def _study_timescale_readiness(
         raster_blocked_reasons.append("study has no train split")
     if not train_points["available"]:
         point_blocked_reasons.append(str(train_points["reason"]))
-    if len(point_splits_available) != len(held_out_splits):
+    if not point_splits_available:
         point_blocked_reasons.append(
             next(
                 (
@@ -597,7 +596,7 @@ def expand_experiment(
                             continue
 
                     if requirement in {"deepssf_cache", "deepssf_gpu"}:
-                        evaluation_splits = list(readiness["held_out_splits"])
+                        evaluation_splits = list(readiness["available_point_splits"])
                         early_stop_split_key = _preferred_split(evaluation_splits)
                         runnable = bool(
                             readiness["point_ready"] and evaluation_splits
