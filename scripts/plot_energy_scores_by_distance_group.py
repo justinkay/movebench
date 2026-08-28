@@ -419,6 +419,36 @@ def aggregate_plot_results(
     )
 
 
+def load_or_build_plot_data(
+    studies_csv: Path,
+    traits_csv: Path,
+    cache_path: Path,
+    refresh_cache: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if cache_path.exists() and not refresh_cache:
+        cached = pd.read_pickle(cache_path)
+        print(f"Loaded cached plot data from {cache_path}")
+        return cached["aggregate"], cached["individual_counts"]
+
+    study_groups = build_study_groups(studies_csv, traits_csv)
+    raw_results = load_plot_results()
+    aggregate = aggregate_plot_results(raw_results, study_groups)
+    individual_counts = count_plot_individuals(
+        load_individual_results(raw_results),
+        study_groups,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.to_pickle(
+        {
+            "aggregate": aggregate,
+            "individual_counts": individual_counts,
+        },
+        cache_path,
+    )
+    print(f"Cached plot data at {cache_path}")
+    return aggregate, individual_counts
+
+
 def write_outputs(
     aggregate: pd.DataFrame,
     individual_counts: pd.DataFrame,
@@ -483,10 +513,13 @@ def write_outputs(
                 )
 
             ax.set_xticks(range(len(TIMESCALE_ORDER)), TIMESCALE_ORDER)
-            if split_key == "test_temporal":
-                ax.set_ylim(0.65, 1.1)
-            else:
-                ax.set_ylim(0.7, 2)
+            # if split_key == "test_temporal":
+            #     ax.set_ylim(0.65, 1.1)
+            # else:
+            #     ax.set_ylim(0.7, 2)
+
+            ax.set_ylim(0.65, 1.2)
+
             ax.set_yscale("log")
             ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4]))
             ax.yaxis.set_major_formatter(
@@ -571,18 +604,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--studies-csv", type=Path, default=DEFAULT_STUDIES_CSV)
     parser.add_argument("--traits-csv", type=Path, default=DEFAULT_TRAITS_CSV)
     parser.add_argument("--output-stem", type=Path, default=DEFAULT_OUTPUT_STEM)
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Recompute the cached plot data from the raw results.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     warnings.filterwarnings("ignore", category=pd.errors.DtypeWarning)
     args = parse_args()
-    study_groups = build_study_groups(args.studies_csv, args.traits_csv)
-    raw_results = load_plot_results()
-    aggregate = aggregate_plot_results(raw_results, study_groups)
-    individual_counts = count_plot_individuals(
-        load_individual_results(raw_results),
-        study_groups,
+    aggregate, individual_counts = load_or_build_plot_data(
+        args.studies_csv,
+        args.traits_csv,
+        args.output_stem.with_suffix(".cache.pkl"),
+        args.refresh_cache,
     )
     write_outputs(aggregate, individual_counts, args.output_stem)
     print(args.output_stem.with_suffix(".png"))
