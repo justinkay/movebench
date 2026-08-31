@@ -44,6 +44,7 @@ METHOD_ORDER = [
     "issf_mlp",
     "deepssf",
     "moveformer",
+    "moveformer-full",
 ]
 TOP_BLOCKER_LIMIT = 5
 SMALL_FAILED_DOWNLOAD_THRESHOLD = 25

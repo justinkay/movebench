@@ -174,6 +174,15 @@ movebench bench run experiments/main_results.py --studies mini
 
 Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer.py`.
 
+MoveFormer Full uses an explicit two-stage workflow. Train the shared checkpoint first, then run the per-study scoring experiment with the same study selection:
+
+```bash
+movebench bench run experiments/moveformer_full_trainonly.py --studies mini
+movebench bench run experiments/moveformer_full.py --studies mini
+```
+
+On the training experiment, `--studies all` trains on all resolved studies and `--studies mini` trains only on the mini cohort. A scoring experiment may set `shared_training_studies` when its scoring cohort should use a checkpoint trained on a different cohort.
+
 **Inspect benchmark state (Optional):**
 
 ```bash

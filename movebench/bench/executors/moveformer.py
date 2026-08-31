@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -10,12 +11,13 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 from tqdm import tqdm
 
 import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.bench.executors.ssf_grid as ssf_grid
+from movebench.bench.moveformer_taxa import moveformer_taxon_for_study
 from movebench.bench.train import TrainerConfig, run_training_loop
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 from movebench.features.points import PointStoreReader
@@ -50,7 +52,6 @@ def _eval_metrics(
         "nce": float(metrics["nce"]),
         "num_tokens": float(metrics["num_tokens"]),
     }
-
 
 
 @lru_cache(maxsize=32)
@@ -138,20 +139,23 @@ def _train_sampler_state_from_point_store(
     train_store_dir: str | Path,
     train_manifest,
 ) -> dict[str, Any]:
-    reader = PointStoreReader(store_dir=Path(train_store_dir), manifest=train_manifest)
     length_chunks: list[np.ndarray] = []
     turn_chunks: list[np.ndarray] = []
-    for block in reader.iter_row_blocks(
-        band_ids=None,
-        shared_keys=["step_length_m", "turn_angle_rad"],
-        block_size=2048,
-    ):
-        length_chunks.append(
-            block["step_length_m"][:, -1].to(dtype=torch.float64).cpu().numpy()
-        )
-        turn_chunks.append(
-            block["turn_angle_rad"][:, -1].to(dtype=torch.float64).cpu().numpy()
-        )
+    with PointStoreReader(
+        store_dir=Path(train_store_dir),
+        manifest=train_manifest,
+    ) as reader:
+        for block in reader.iter_row_blocks(
+            band_ids=None,
+            shared_keys=["step_length_m", "turn_angle_rad"],
+            block_size=2048,
+        ):
+            length_chunks.append(
+                block["step_length_m"][:, -1].to(dtype=torch.float64).cpu().numpy()
+            )
+            turn_chunks.append(
+                block["turn_angle_rad"][:, -1].to(dtype=torch.float64).cpu().numpy()
+            )
     if not length_chunks or not turn_chunks:
         raise ValueError("MoveFormer grid prediction requires non-empty train point store")
 
@@ -616,12 +620,19 @@ class _MoveFormerRuntime:
         self._set_lr()
 
 
-def _loader(dataset: Dataset, *, batch_size: int, shuffle: bool, seed: int):
+def _loader(
+    dataset: Dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
+    num_workers: int = 4,
+):
     kwargs = {
         "dataset": dataset,
         "batch_size": int(batch_size),
         "shuffle": bool(shuffle),
-        "num_workers": 4, #0,
+        "num_workers": int(num_workers),
         "collate_fn": _collate_moveformer,
     }
     if shuffle:
@@ -631,30 +642,146 @@ def _loader(dataset: Dataset, *, batch_size: int, shuffle: bool, seed: int):
     return DataLoader(**kwargs)
 
 
+def _dataset_kwargs(
+    *,
+    run_payload,
+    resolved_artifacts,
+    taxon_embedding: np.ndarray | None = None,
+    lazy_rows: bool = False,
+) -> dict[str, object]:
+    hparams = dict(run_payload["method_hparams"])
+    return {
+        "study_dir": resolved_artifacts["study_dir"],
+        "trajectories_path": resolved_artifacts["trajectories_path"],
+        "plan": resolved_artifacts["plan"],
+        "sampler_config": resolved_artifacts["sampler"],
+        "max_len": int(hparams["max_len"]),
+        "min_len": int(hparams["min_len"]),
+        "normalize_env": resolved_artifacts.get("normalization_stats_path") is not None,
+        "require_normalization_stats": False,
+        "subset_band_ids": [str(band_id) for band_id in run_payload["band_ids"]],
+        "taxon_embedding": taxon_embedding,
+        "lazy_rows": bool(lazy_rows),
+    }
+
+
+def _write_grid_predictions(
+    *,
+    run_payload,
+    resolved_artifacts,
+    run_dir: Path,
+    model: torch.nn.Module,
+    train_dataset: MoveFormerPointStoreDataset,
+    dataset_kwargs: dict[str, object],
+    device: torch.device,
+) -> None:
+    hparams = dict(run_payload["method_hparams"])
+    batch_size = int(hparams["batch_size"])
+    seed = int(run_payload["seed"])
+    point_stores = dict(resolved_artifacts["point_stores"])
+    pred_dir = Path(run_dir) / "predictions"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    timescale = bench_config.resolve_timescale(
+        str(run_payload["timescale"]),
+        study_id=str(run_payload["study_id"]),
+    )
+    output_hw = tuple(int(value) for value in timescale["output_hw"])
+    prediction_dataset_kwargs = {
+        **dataset_kwargs,
+        "min_len": 1,
+        "allow_prediction_only_segments": True,
+        "lazy_rows": False,
+    }
+    for split_key in run_payload["evaluation_split_keys"]:
+        split_key = str(split_key)
+        prediction_dataset = MoveFormerPointStoreDataset(
+            split=split_key,
+            context_splits=["train", split_key],
+            **prediction_dataset_kwargs,
+        )
+        pred_path = pred_dir / f"{split_key}.pt"
+        if pred_path.exists():
+            try:
+                pred_artifact = dict(torch.load(pred_path, map_location="cpu"))
+                if str(pred_artifact.get("prediction_kind")) == "grid":
+                    evaluation_runner._score_split(
+                        split_key=split_key,
+                        pred_artifact=pred_artifact,
+                        run_payload=run_payload,
+                    )
+                    continue
+            except Exception:
+                pass
+        selected_splits = ssf_grid.selected_splits_from_manifest(
+            point_stores[split_key]["manifest"]
+        )
+        grid_dataset = ssf_grid.make_grid_step_dataset(
+            study_dir=resolved_artifacts["study_dir"],
+            trajectories_path=resolved_artifacts["trajectories_path"],
+            split_key=split_key,
+            plan=prediction_dataset.plan,
+            sampler_config=resolved_artifacts["sampler"],
+            output_hw=output_hw,
+            selected_splits=selected_splits,
+            include_env=True,
+        )
+        step_batch_size = ssf_grid.scaled_step_batch_size(
+            batch_size=batch_size,
+            train_points_per_step=max(
+                1,
+                int(prediction_dataset.num_candidates_total),
+            ),
+            output_hw=output_hw,
+        )
+        torch.save(
+            _grid_prediction_payload(
+                model,
+                _loader(
+                    prediction_dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    seed=seed,
+                ),
+                split_key=split_key,
+                grid_dataset=grid_dataset,
+                mov_vec_scale=float(train_dataset._mov_vec_scale),
+                step_batch_size=step_batch_size,
+                train_store_dir=point_stores["train"]["store_dir"],
+                train_manifest=point_stores["train"]["manifest"],
+                num_workers=int(hparams.get("prediction_num_workers", 4)),
+                device=device,
+            ),
+            pred_path,
+        )
+
+
+def _limited_subset(
+    dataset: Dataset,
+    *,
+    max_items: int,
+    seed: int,
+    key: str,
+) -> Dataset:
+    if len(dataset) <= int(max_items):
+        return dataset
+    key_seed = int(hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:8], 16)
+    rng = np.random.default_rng(int(seed) + key_seed)
+    indices = rng.choice(len(dataset), size=int(max_items), replace=False)
+    return Subset(dataset, [int(index) for index in indices])
+
+
 def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     run_dir = Path(run_dir)
     method_model = dict(run_payload.get("method_model", {}))
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams["batch_size"])
-    prediction_num_workers = int(method_hparams.get("prediction_num_workers", 4))
     max_len = int(method_hparams["max_len"])
-    min_len = int(method_hparams["min_len"])
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
-    normalize_env = resolved_artifacts.get("normalization_stats_path") is not None
-    point_stores = dict(resolved_artifacts["point_stores"])
-
-    dataset_kwargs = {
-        "study_dir": resolved_artifacts["study_dir"],
-        "trajectories_path": resolved_artifacts["trajectories_path"],
-        "plan": resolved_artifacts["plan"],
-        "sampler_config": resolved_artifacts["sampler"],
-        "max_len": max_len,
-        "min_len": min_len,
-        "normalize_env": bool(normalize_env),
-        "require_normalization_stats": False,
-        "subset_band_ids": [str(band_id) for band_id in run_payload["band_ids"]],
-    }
+    dataset_kwargs = _dataset_kwargs(
+        run_payload=run_payload,
+        resolved_artifacts=resolved_artifacts,
+    )
     train_dataset = MoveFormerPointStoreDataset(
         split="train",
         context_splits=None,
@@ -746,74 +873,15 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
             checkpoint_path,
         )
 
-    pred_dir = run_dir / "predictions"
-    pred_dir.mkdir(parents=True, exist_ok=True)
-    timescale = bench_config.resolve_timescale(
-        str(run_payload["timescale"]),
-        study_id=str(run_payload["study_id"]),
+    _write_grid_predictions(
+        run_payload=run_payload,
+        resolved_artifacts=resolved_artifacts,
+        run_dir=run_dir,
+        model=runtime.model,
+        train_dataset=train_dataset,
+        dataset_kwargs=dataset_kwargs,
+        device=device,
     )
-    output_hw = tuple(int(v) for v in timescale["output_hw"])
-    prediction_dataset_kwargs = dict(dataset_kwargs)
-    prediction_dataset_kwargs["min_len"] = 1
-    prediction_dataset_kwargs["allow_prediction_only_segments"] = True
-    for split_key in run_payload["evaluation_split_keys"]:
-        split_key = str(split_key)
-        prediction_dataset = MoveFormerPointStoreDataset(
-            split=split_key,
-            context_splits=["train", split_key],
-            **prediction_dataset_kwargs,
-        )
-        pred_path = pred_dir / f"{split_key}.pt"
-        if pred_path.exists():
-            try:
-                pred_artifact = dict(torch.load(pred_path, map_location="cpu"))
-                if str(pred_artifact.get("prediction_kind")) == "grid":
-                    evaluation_runner._score_split(
-                        split_key=str(split_key),
-                        pred_artifact=pred_artifact,
-                        run_payload=run_payload,
-                    )
-                    continue
-            except Exception:
-                pass
-        selected_splits = ssf_grid.selected_splits_from_manifest(
-            point_stores[str(split_key)]["manifest"]
-        )
-        grid_dataset = ssf_grid.make_grid_step_dataset(
-            study_dir=resolved_artifacts["study_dir"],
-            trajectories_path=resolved_artifacts["trajectories_path"],
-            split_key=str(split_key),
-            plan=prediction_dataset.plan,
-            sampler_config=resolved_artifacts["sampler"],
-            output_hw=output_hw,
-            selected_splits=selected_splits,
-            include_env=True,
-        )
-        step_batch_size = ssf_grid.scaled_step_batch_size(
-            batch_size=batch_size,
-            train_points_per_step=max(1, int(prediction_dataset.num_candidates_total)),
-            output_hw=output_hw,
-        )
-        torch.save(
-            _grid_prediction_payload(
-                runtime.model,
-                _loader(
-                    prediction_dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    seed=seed,
-                ),
-                split_key=str(split_key),
-                grid_dataset=grid_dataset,
-                mov_vec_scale=float(train_dataset._mov_vec_scale),
-                step_batch_size=step_batch_size,
-                train_store_dir=point_stores["train"]["store_dir"],
-                train_manifest=point_stores["train"]["manifest"],
-                num_workers=prediction_num_workers,
-                device=device,
-            ),
-            pred_path,
-        )
 
     return {
         "status": "completed",
@@ -832,4 +900,323 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
             device=device,
         ),
         "schedule": dict(schedule),
+    }
+
+
+def _full_eval_dataset(
+    *,
+    study_run: dict[str, object],
+    artifacts: dict[str, object],
+    dataset_kwargs: dict[str, object],
+) -> MoveFormerPointStoreDataset | None:
+    split_candidates = list(
+        dict.fromkeys(
+            [
+                str(study_run["early_stop_split_key"]),
+                *[
+                    str(split_key)
+                    for split_key in study_run["evaluation_split_keys"]
+                ],
+                "test_temporal",
+                "test_individual",
+            ]
+        )
+    )
+    point_stores = dict(artifacts["point_stores"])
+    for split_key in split_candidates:
+        if split_key not in point_stores:
+            continue
+        try:
+            return MoveFormerPointStoreDataset(
+                split=split_key,
+                context_splits=["train", split_key],
+                **dataset_kwargs,
+            )
+        except FileNotFoundError:
+            continue
+        except ValueError as exc:
+            if not str(exc).startswith("No segments found for split="):
+                raise
+    return None
+
+
+def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
+    run_dir = Path(run_dir)
+    hparams = dict(run_payload["method_hparams"])
+    seed = int(run_payload["seed"])
+    max_eval_items = int(hparams["max_eval_items_per_study"])
+    candidate_subset_size = int(hparams["candidate_subset_size"])
+
+    train_datasets: list[MoveFormerPointStoreDataset] = []
+    train_eval_datasets: list[Dataset] = []
+    eval_datasets: list[Dataset] = []
+    taxon_rows: list[dict[str, str]] = []
+    eval_split_by_study: dict[str, str] = {}
+    skipped_eval_study_ids: list[str] = []
+    cov_dim: int | None = None
+    taxon_dim: int | None = None
+    for study_bundle in resolved_artifacts["studies"]:
+        study_run = dict(study_bundle["run_payload"])
+        artifacts = dict(study_bundle["artifacts"])
+        study_id = str(study_run["study_id"])
+        taxon, taxon_meta = moveformer_taxon_for_study(study_id)
+        dataset_kwargs = _dataset_kwargs(
+            run_payload=study_run,
+            resolved_artifacts=artifacts,
+            taxon_embedding=taxon,
+            lazy_rows=True,
+        )
+        train_dataset = MoveFormerPointStoreDataset(
+            split="train",
+            context_splits=None,
+            candidate_subset_size=candidate_subset_size,
+            **dataset_kwargs,
+        )
+        eval_dataset = _full_eval_dataset(
+            study_run=study_run,
+            artifacts=artifacts,
+            dataset_kwargs=dataset_kwargs,
+        )
+        train_datasets.append(train_dataset)
+        train_eval_datasets.append(
+            _limited_subset(
+                train_dataset,
+                max_items=max_eval_items,
+                seed=seed,
+                key=f"{study_id}:train",
+            )
+        )
+        if eval_dataset is None:
+            skipped_eval_study_ids.append(study_id)
+        else:
+            eval_split_by_study[study_id] = str(eval_dataset.split)
+            eval_datasets.append(
+                _limited_subset(
+                    eval_dataset,
+                    max_items=max_eval_items,
+                    seed=seed,
+                    key=f"{study_id}:eval",
+                )
+            )
+        taxon_rows.append({"study_id": study_id, **taxon_meta})
+        cov_dim = int(train_dataset.cov_dim) if cov_dim is None else cov_dim
+        taxon_dim = int(taxon.shape[0]) if taxon_dim is None else taxon_dim
+        if (
+            int(train_dataset.cov_dim) != cov_dim
+            or int(taxon.shape[0]) != taxon_dim
+        ):
+            raise ValueError("Incompatible MoveFormer dimensions in shared training group")
+
+    train_dataset = ConcatDataset(train_datasets)
+    train_eval_dataset = ConcatDataset(train_eval_datasets)
+    if not eval_datasets:
+        raise ValueError("No usable validation split for shared MoveFormer training")
+    eval_dataset = ConcatDataset(eval_datasets)
+    batch_size = int(hparams["batch_size"])
+    train_loader = _loader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        seed=seed,
+        num_workers=0,
+    )
+    train_eval_loader = _loader(
+        train_eval_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        seed=seed,
+        num_workers=0,
+    )
+    eval_loader = _loader(
+        eval_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        seed=seed,
+        num_workers=0,
+    )
+    steps_per_epoch = max(1, len(train_loader))
+    schedule = {
+        "max_epochs": int(hparams["max_epochs"]),
+        "evals_per_epoch": int(hparams["evals_per_epoch"]),
+        "max_steps": int(hparams["max_epochs"]) * steps_per_epoch,
+        "eval_every_steps": max(
+            1,
+            math.ceil(steps_per_epoch / int(hparams["evals_per_epoch"])),
+        ),
+        "patience_evals": int(hparams["patience_evals"]),
+        "train_steps_per_epoch": steps_per_epoch,
+    }
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_moveformer_selection_model(
+        cov_dim=int(cov_dim),
+        taxon_dim=int(taxon_dim),
+        max_len=int(hparams["max_len"]),
+        **dict(run_payload["method_model"]),
+    )
+    runtime = _MoveFormerRuntime(
+        model=model,
+        train_loader=train_loader,
+        eval_loaders={
+            "train": train_eval_loader,
+            "shared_eval": eval_loader,
+        },
+        early_stop_split_key="shared_eval",
+        device=device,
+        lr=float(hparams["lr"]),
+        weight_decay=float(hparams["weight_decay"]),
+        warmup_steps=int(hparams["warmup_steps"]),
+        lr_gamma=float(hparams["lr_gamma"]),
+    )
+    checkpoint_path = run_dir / "checkpoint_best.pt"
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if dict(checkpoint["meta"]).get("shared_training_signature") != run_payload.get(
+            "shared_training_signature"
+        ):
+            raise ValueError("Shared MoveFormer checkpoint signature mismatch")
+        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
+        best_step = int(dict(checkpoint["meta"]).get("best_step", 0))
+        fit = {
+            "completed_steps": _completed_steps_from_history(
+                run_dir,
+                fallback=best_step,
+            ),
+            "best_step": best_step,
+        }
+    else:
+        fit = run_training_loop(
+            runtime,
+            TrainerConfig(
+                max_steps=int(schedule["max_steps"]),
+                eval_every_steps=int(schedule["eval_every_steps"]),
+                patience_evals=int(schedule["patience_evals"]),
+                seed=seed,
+            ),
+            tracker,
+        )
+        torch.save(
+            {
+                "state_dict": {
+                    key: value.detach().cpu()
+                    for key, value in runtime.model.state_dict().items()
+                },
+                "meta": {
+                    "method": str(run_payload["method"]),
+                    "best_step": int(fit["best_step"]),
+                    "covariate_set": str(run_payload["covariate_set"]),
+                    "cov_dim": int(cov_dim),
+                    "taxon_dim": int(taxon_dim),
+                    "num_candidates_total": candidate_subset_size,
+                    "shared_training_signature": str(
+                        run_payload["shared_training_signature"]
+                    ),
+                    "shared_study_ids": list(run_payload["shared_study_ids"]),
+                    "shared_data_study_ids": list(
+                        run_payload.get(
+                            "shared_data_study_ids",
+                            run_payload["shared_study_ids"],
+                        )
+                    ),
+                    "shared_zero_step_studies": list(
+                        run_payload.get("shared_zero_step_studies", [])
+                    ),
+                    "taxa": taxon_rows,
+                    "eval_split_by_study": eval_split_by_study,
+                    "skipped_eval_study_ids": skipped_eval_study_ids,
+                },
+            },
+            checkpoint_path,
+        )
+
+    return {
+        "status": "completed",
+        "train_steps": int(fit["completed_steps"]),
+        "best_step": int(fit["best_step"]),
+        "early_stop_split_key": "shared_eval",
+        "train_metrics": _eval_metrics(
+            runtime.model,
+            train_eval_loader,
+            device=device,
+        ),
+        "eval_metrics": _eval_metrics(
+            runtime.model,
+            eval_loader,
+            device=device,
+        ),
+        "shared_training_signature": str(
+            run_payload["shared_training_signature"]
+        ),
+        "shared_study_ids": list(run_payload["shared_study_ids"]),
+        "shared_data_study_ids": list(
+            run_payload.get(
+                "shared_data_study_ids",
+                run_payload["shared_study_ids"],
+            )
+        ),
+        "shared_zero_step_studies": list(
+            run_payload.get("shared_zero_step_studies", [])
+        ),
+        "eval_split_by_study": eval_split_by_study,
+        "skipped_eval_study_ids": skipped_eval_study_ids,
+        "schedule": schedule,
+    }
+
+
+def score_full(*, run_payload, resolved_artifacts, run_dir, tracker):
+    del tracker
+    run_dir = Path(run_dir)
+    study_id = str(run_payload["study_id"])
+    taxon, taxon_meta = moveformer_taxon_for_study(study_id)
+    dataset_kwargs = _dataset_kwargs(
+        run_payload=run_payload,
+        resolved_artifacts=resolved_artifacts,
+        taxon_embedding=taxon,
+        lazy_rows=True,
+    )
+    train_dataset = MoveFormerPointStoreDataset(
+        split="train",
+        context_splits=None,
+        candidate_subset_size=int(
+            run_payload["method_hparams"]["candidate_subset_size"]
+        ),
+        **dataset_kwargs,
+    )
+
+    checkpoint = torch.load(
+        resolved_artifacts["shared_checkpoint_path"],
+        map_location="cpu",
+    )
+    checkpoint_meta = dict(checkpoint["meta"])
+    if checkpoint_meta.get("shared_training_signature") != run_payload.get(
+        "shared_training_signature"
+    ):
+        raise ValueError("Shared MoveFormer checkpoint signature mismatch")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_moveformer_selection_model(
+        cov_dim=int(train_dataset.cov_dim),
+        taxon_dim=int(taxon.shape[0]),
+        max_len=int(run_payload["method_hparams"]["max_len"]),
+        **dict(run_payload["method_model"]),
+    ).to(device)
+    model.load_state_dict(dict(checkpoint["state_dict"]))
+    _write_grid_predictions(
+        run_payload=run_payload,
+        resolved_artifacts=resolved_artifacts,
+        run_dir=run_dir,
+        model=model,
+        train_dataset=train_dataset,
+        dataset_kwargs=dataset_kwargs,
+        device=device,
+    )
+    shared_summary = dict(resolved_artifacts["shared_training_summary"])
+    return {
+        "status": "completed",
+        "train_steps": int(shared_summary.get("train_steps", 0)),
+        "best_step": int(checkpoint_meta.get("best_step", 0)),
+        "early_stop_split_key": str(run_payload["early_stop_split_key"]),
+        "shared_checkpoint_run_key": str(
+            run_payload["shared_checkpoint_run_key"]
+        ),
+        "taxon": taxon_meta,
     }

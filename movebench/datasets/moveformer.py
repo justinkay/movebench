@@ -32,18 +32,19 @@ from movebench.lib.moveformer.geo_transformers.trajectory import (
 @dataclass(frozen=True)
 class _StepRecord:
     split_key: str
+    row_idx: int
     point_id_start: int
     point_id_end: int
     timestamp_ns: int
     timestamp_end_ns: int
     start_lon: float
     start_lat: float
-    env: torch.Tensor
-    valid: torch.Tensor
-    candidate_lon: torch.Tensor
-    candidate_lat: torch.Tensor
-    candidate_x_m: torch.Tensor
-    candidate_y_m: torch.Tensor
+    env: torch.Tensor | None = None
+    valid: torch.Tensor | None = None
+    candidate_lon: torch.Tensor | None = None
+    candidate_lat: torch.Tensor | None = None
+    candidate_x_m: torch.Tensor | None = None
+    candidate_y_m: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +285,8 @@ class MoveFormerPointStoreDataset(Dataset):
         subset_band_ids: list[str] | None = None,
         candidate_subset_size: int | None = None,
         allow_prediction_only_segments: bool = False,
+        taxon_embedding: np.ndarray | torch.Tensor | list[float] | None = None,
+        lazy_rows: bool = False,
     ) -> None:
         del trajectories_path
         super().__init__()
@@ -311,6 +314,15 @@ class MoveFormerPointStoreDataset(Dataset):
             None if candidate_subset_size is None else int(candidate_subset_size)
         )
         self.allow_prediction_only_segments = bool(allow_prediction_only_segments)
+        self.lazy_rows = bool(lazy_rows)
+        self._taxon_embedding = np.asarray(
+            np.zeros(100, dtype=np.float32)
+            if taxon_embedding is None
+            else taxon_embedding,
+            dtype=np.float32,
+        )
+        if self._taxon_embedding.ndim != 1:
+            raise ValueError("taxon_embedding must be one-dimensional")
 
         _indices, self.plan = _subset_plan_env_channels(
             plan,
@@ -338,8 +350,10 @@ class MoveFormerPointStoreDataset(Dataset):
             rasters_hash=str(self.plan.rasters_hash),
             sampler_hash=str(sampler_hash),
         )
-        train_reader = PointStoreReader(store_dir=train_store_dir, manifest=train_manifest)
-        train_stats = _movement_stats_from_reader(train_reader)
+        with PointStoreReader(
+            store_dir=train_store_dir, manifest=train_manifest
+        ) as train_reader:
+            train_stats = _movement_stats_from_reader(train_reader)
         self._mov_vec_scale = 1.0 / float(train_stats["sl_std"])
 
         self._mean: torch.Tensor | None = None
@@ -378,6 +392,7 @@ class MoveFormerPointStoreDataset(Dataset):
         )
 
         self.num_candidates_total = 0
+        self._reader_spec_by_split: dict[str, tuple[Path, Any]] = {}
         chains_by_key: dict[tuple[str, int], list[_StepRecord]] = {}
         for split_key in self.context_splits:
             store_dir, manifest = load_point_store_manifest(
@@ -395,33 +410,9 @@ class MoveFormerPointStoreDataset(Dataset):
                     f"{selected_splits} for context split {split_key!r}."
                 )
 
-            reader = PointStoreReader(store_dir=store_dir, manifest=manifest)
-            for block in reader.iter_row_blocks(
-                band_ids=self._band_ids,
-                shared_keys=[
-                    "candidate_lon",
-                    "candidate_lat",
-                    "candidate_x_m",
-                    "candidate_y_m",
-                    "start_lon",
-                    "start_lat",
-                    "individual_id",
-                    "burst_id",
-                    "point_id_start",
-                    "point_id_end",
-                    "timestamp_ns",
-                    "timestamp_end_ns",
-                ],
-                block_size=2048,
-            ):
-                env = block["env"]
-                valid = block["valid"]
-                if self.normalize_env:
-                    assert self._mean is not None
-                    assert self._std is not None
-                    env = (env - self._mean.view(1, -1, 1)) / self._std.view(1, -1, 1)
-
-                num_candidates = int(env.shape[2])
+            self._reader_spec_by_split[str(split_key)] = (store_dir, manifest)
+            with PointStoreReader(store_dir=store_dir, manifest=manifest) as reader:
+                num_candidates = int(reader.points_per_step)
                 if self.num_candidates_total == 0:
                     self.num_candidates_total = num_candidates
                     self._cand_perm = torch.tensor(
@@ -434,34 +425,99 @@ class MoveFormerPointStoreDataset(Dataset):
                         f"got {self.num_candidates_total} and {num_candidates}."
                     )
 
-                candidate_lon = block["candidate_lon"].index_select(1, self._cand_perm)
-                candidate_lat = block["candidate_lat"].index_select(1, self._cand_perm)
-                candidate_x_m = block["candidate_x_m"].index_select(1, self._cand_perm)
-                candidate_y_m = block["candidate_y_m"].index_select(1, self._cand_perm)
-                env = env.index_select(2, self._cand_perm)
-                valid = valid.index_select(2, self._cand_perm)
-                individual_ids = [str(x) for x in block["individual_id"].tolist()]
-                burst_ids = block["burst_id"].to(dtype=torch.int64)
-
-                for idx in range(int(env.shape[0])):
-                    chain_key = (individual_ids[idx], int(burst_ids[idx].item()))
-                    chains_by_key.setdefault(chain_key, []).append(
-                        _StepRecord(
-                            split_key=str(split_key),
-                            point_id_start=int(block["point_id_start"][idx].item()),
-                            point_id_end=int(block["point_id_end"][idx].item()),
-                            timestamp_ns=int(block["timestamp_ns"][idx].item()),
-                            timestamp_end_ns=int(block["timestamp_end_ns"][idx].item()),
-                            start_lon=float(block["start_lon"][idx].item()),
-                            start_lat=float(block["start_lat"][idx].item()),
-                            env=env[idx].cpu(),
-                            valid=valid[idx].cpu(),
-                            candidate_lon=candidate_lon[idx].cpu(),
-                            candidate_lat=candidate_lat[idx].cpu(),
-                            candidate_x_m=candidate_x_m[idx].cpu(),
-                            candidate_y_m=candidate_y_m[idx].cpu(),
+                shared_keys = [
+                    "start_lon",
+                    "start_lat",
+                    "individual_id",
+                    "burst_id",
+                    "point_id_start",
+                    "point_id_end",
+                    "timestamp_ns",
+                    "timestamp_end_ns",
+                ]
+                if not self.lazy_rows:
+                    shared_keys = [
+                        "candidate_lon",
+                        "candidate_lat",
+                        "candidate_x_m",
+                        "candidate_y_m",
+                        *shared_keys,
+                    ]
+                for block in reader.iter_row_blocks(
+                    band_ids=None if self.lazy_rows else self._band_ids,
+                    shared_keys=shared_keys,
+                    block_size=2048,
+                ):
+                    env = None
+                    valid = None
+                    candidate_lon = None
+                    candidate_lat = None
+                    candidate_x_m = None
+                    candidate_y_m = None
+                    if not self.lazy_rows:
+                        env = block["env"]
+                        valid = block["valid"]
+                        if self.normalize_env:
+                            assert self._mean is not None
+                            assert self._std is not None
+                            env = (
+                                env - self._mean.view(1, -1, 1)
+                            ) / self._std.view(1, -1, 1)
+                        candidate_lon = block["candidate_lon"].index_select(
+                            1, self._cand_perm
                         )
-                    )
+                        candidate_lat = block["candidate_lat"].index_select(
+                            1, self._cand_perm
+                        )
+                        candidate_x_m = block["candidate_x_m"].index_select(
+                            1, self._cand_perm
+                        )
+                        candidate_y_m = block["candidate_y_m"].index_select(
+                            1, self._cand_perm
+                        )
+                        env = env.index_select(2, self._cand_perm)
+                        valid = valid.index_select(2, self._cand_perm)
+                    individual_ids = [str(x) for x in block["individual_id"].tolist()]
+                    burst_ids = block["burst_id"].to(dtype=torch.int64)
+
+                    for idx in range(int(block["row_idxs"].shape[0])):
+                        chain_key = (individual_ids[idx], int(burst_ids[idx].item()))
+                        chains_by_key.setdefault(chain_key, []).append(
+                            _StepRecord(
+                                split_key=str(split_key),
+                                row_idx=int(block["row_idxs"][idx].item()),
+                                point_id_start=int(block["point_id_start"][idx].item()),
+                                point_id_end=int(block["point_id_end"][idx].item()),
+                                timestamp_ns=int(block["timestamp_ns"][idx].item()),
+                                timestamp_end_ns=int(
+                                    block["timestamp_end_ns"][idx].item()
+                                ),
+                                start_lon=float(block["start_lon"][idx].item()),
+                                start_lat=float(block["start_lat"][idx].item()),
+                                env=None if env is None else env[idx].cpu(),
+                                valid=None if valid is None else valid[idx].cpu(),
+                                candidate_lon=(
+                                    None
+                                    if candidate_lon is None
+                                    else candidate_lon[idx].cpu()
+                                ),
+                                candidate_lat=(
+                                    None
+                                    if candidate_lat is None
+                                    else candidate_lat[idx].cpu()
+                                ),
+                                candidate_x_m=(
+                                    None
+                                    if candidate_x_m is None
+                                    else candidate_x_m[idx].cpu()
+                                ),
+                                candidate_y_m=(
+                                    None
+                                    if candidate_y_m is None
+                                    else candidate_y_m[idx].cpu()
+                                ),
+                            )
+                        )
 
         if self.num_candidates_total <= 1:
             raise ValueError(
@@ -517,16 +573,128 @@ class MoveFormerPointStoreDataset(Dataset):
     def __len__(self) -> int:
         return len(self._segments)
 
+    def _load_rows(
+        self,
+        split_key: str,
+        row_idxs: list[int],
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        store_dir, manifest = self._reader_spec_by_split[str(split_key)]
+        with PointStoreReader(store_dir=store_dir, manifest=manifest) as reader:
+            env, valid = reader.load_env_valid_rows(
+                band_ids=self._band_ids,
+                row_idxs=row_idxs,
+            )
+            shared = reader.load_shared_rows(
+                keys=[
+                    "candidate_lon",
+                    "candidate_lat",
+                    "candidate_x_m",
+                    "candidate_y_m",
+                ],
+                row_idxs=row_idxs,
+            )
+        if self.normalize_env:
+            assert self._mean is not None
+            assert self._std is not None
+            env = (env - self._mean.view(1, -1, 1)) / self._std.view(1, -1, 1)
+        return (
+            env.index_select(2, self._cand_perm),
+            valid.index_select(2, self._cand_perm),
+            torch.as_tensor(shared["candidate_lon"]).index_select(1, self._cand_perm),
+            torch.as_tensor(shared["candidate_lat"]).index_select(1, self._cand_perm),
+            torch.as_tensor(shared["candidate_x_m"]).index_select(1, self._cand_perm),
+            torch.as_tensor(shared["candidate_y_m"]).index_select(1, self._cand_perm),
+        )
+
+    def _row_payload(
+        self,
+        record: _StepRecord,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        values = (
+            record.env,
+            record.valid,
+            record.candidate_lon,
+            record.candidate_lat,
+            record.candidate_x_m,
+            record.candidate_y_m,
+        )
+        if all(value is not None for value in values):
+            return tuple(values)  # type: ignore[return-value]
+        return tuple(
+            value[0]
+            for value in self._load_rows(
+                str(record.split_key),
+                [int(record.row_idx)],
+            )
+        )
+
+    def _window_payload(
+        self,
+        window: list[_StepRecord],
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if not self.lazy_rows:
+            rows = [self._row_payload(record) for record in window]
+            return tuple(
+                torch.stack([row[field_idx] for row in rows], dim=0)
+                for field_idx in range(6)
+            )
+
+        fields: list[list[torch.Tensor | None]] = [
+            [None] * len(window) for _ in range(6)
+        ]
+        refs_by_split: dict[str, list[tuple[int, int]]] = {}
+        for local_idx, record in enumerate(window):
+            refs_by_split.setdefault(str(record.split_key), []).append(
+                (local_idx, int(record.row_idx))
+            )
+        for split_key, refs in refs_by_split.items():
+            batch = self._load_rows(
+                split_key,
+                [row_idx for _local_idx, row_idx in refs],
+            )
+            for field_idx, values in enumerate(batch):
+                for batch_idx, (local_idx, _row_idx) in enumerate(refs):
+                    fields[field_idx][local_idx] = values[batch_idx]
+        if any(value is None for field in fields for value in field):
+            raise ValueError("MoveFormer lazy row loading failed to populate a window")
+        return tuple(
+            torch.stack([value for value in field if value is not None], dim=0)
+            for field in fields
+        )
+
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         chain_idx, start, end = self._segments[int(idx)]
         chain = self._chains[chain_idx]
         window = chain[start:end]
-        seq_env = torch.stack([record.env for record in window], dim=0)
-        seq_valid = torch.stack([record.valid for record in window], dim=0)
-        candidate_lon = torch.stack([record.candidate_lon for record in window], dim=0)
-        candidate_lat = torch.stack([record.candidate_lat for record in window], dim=0)
-        candidate_x_m = torch.stack([record.candidate_x_m for record in window], dim=0)
-        candidate_y_m = torch.stack([record.candidate_y_m for record in window], dim=0)
+        (
+            seq_env,
+            seq_valid,
+            candidate_lon,
+            candidate_lat,
+            candidate_x_m,
+            candidate_y_m,
+        ) = self._window_payload(window)
         if self.candidate_subset_size is not None:
             num_negatives = int(self.candidate_subset_size) - 1
             negative_idx = torch.randperm(int(seq_env.shape[2]) - 1)[:num_negatives] + 1
@@ -552,20 +720,27 @@ class MoveFormerPointStoreDataset(Dataset):
             np.float32(np.nan),
             dtype=np.float32,
         )
-        for local_idx in range(len(window)):
-            global_idx = start + local_idx
-            if global_idx == 0:
-                continue
-            prev_record = chain[global_idx - 1]
-            prev_env = prev_record.env[:, 0].numpy().astype(np.float32, copy=False)
-            prev_valid = prev_record.valid[:, 0].numpy()
-            cov[local_idx] = np.where(prev_valid, prev_env, np.float32(np.nan)).astype(
+        if start > 0:
+            prev_env, prev_valid, *_rest = self._row_payload(chain[start - 1])
+            cov[0] = np.where(
+                prev_valid[:, 0].numpy(),
+                prev_env[:, 0].numpy(),
+                np.float32(np.nan),
+            ).astype(np.float32, copy=False)
+        if len(window) > 1:
+            prev_env = seq_env[:-1, :, 0].numpy()
+            prev_valid = seq_valid[:-1, :, 0].numpy()
+            cov[1:] = np.where(prev_valid, prev_env, np.float32(np.nan)).astype(
                 np.float32,
                 copy=False,
             )
 
-        start_lon = np.asarray([record.start_lon for record in window], dtype=np.float64)
-        start_lat = np.asarray([record.start_lat for record in window], dtype=np.float64)
+        start_lon = np.asarray(
+            [record.start_lon for record in window], dtype=np.float64
+        )
+        start_lat = np.asarray(
+            [record.start_lat for record in window], dtype=np.float64
+        )
         traj: dict[str, Any] = {
             "timestamp": _to_datetime64([record.timestamp_ns for record in window]),
             "timestamp_tgt": _to_datetime64(
@@ -581,7 +756,7 @@ class MoveFormerPointStoreDataset(Dataset):
             ),
             "location_long_cand": candidate_lon.numpy().astype(np.float64, copy=False),
             "location_lat_cand": candidate_lat.numpy().astype(np.float64, copy=False),
-            "taxon": np.zeros((len(window), 100), dtype=np.float32),
+            "taxon": np.tile(self._taxon_embedding, (len(window), 1)),
             "cov": cov,
             "cov_cand": cov_cand,
         }

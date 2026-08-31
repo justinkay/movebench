@@ -217,6 +217,7 @@ METHODS: dict[str, dict[str, object]] = {
         "key": "moveformer",
         "trains": True,
         "artifact_requirement": "points",
+        "sequence_context": True,
         "requires_normalization_stats": True,
         "executor": "movebench.bench.executors.moveformer:run",
         "model": {
@@ -237,6 +238,37 @@ METHODS: dict[str, dict[str, object]] = {
             "patience_evals": 10,
         },
     },
+}
+
+METHODS["moveformer-full-trainonly"] = {
+    **METHODS["moveformer"],
+    "key": "moveformer-full-trainonly",
+    "run_scope": "shared",
+    "evaluates": False,
+    "executor": "movebench.bench.executors.moveformer:train_full",
+    "hparams": {
+        "lr": 0.00005,
+        "weight_decay": 0.0,
+        "warmup_steps": 50,
+        "lr_gamma": 1.0,
+        "batch_size": 32,
+        "max_len": 64,
+        "min_len": 1,
+        "max_epochs": 180,
+        "evals_per_epoch": 2,
+        "patience_evals": 20,
+        "max_eval_items_per_study": 100,
+        "candidate_subset_size": 16,
+    },
+}
+METHODS["moveformer-full"] = {
+    **METHODS["moveformer-full-trainonly"],
+    "key": "moveformer-full",
+    "trains": False,
+    "run_scope": "study",
+    "evaluates": True,
+    "shared_training_method": "moveformer-full-trainonly",
+    "executor": "movebench.bench.executors.moveformer:score_full",
 }
 
 METHODS["issf_linear_time"] = {
@@ -269,6 +301,20 @@ def _dedupe_strings(values: list[object], *, label: str) -> list[str]:
         out.append(text)
         seen.add(text)
     return out
+
+
+def _normalize_study_selection(value: object, *, label: str) -> str | list[str]:
+    if isinstance(value, str):
+        selection = value.strip()
+        if selection.lower() == "all":
+            return "all"
+        if is_named_study_set(selection):
+            return selection.lower()
+    elif isinstance(value, list):
+        return _dedupe_strings(value, label=label)
+    raise ValueError(
+        f"'{label}' must be 'all', a named study set, or a list of study ids"
+    )
 
 
 def _validate_registry_keys(
@@ -377,23 +423,10 @@ def normalize_experiment(
     if not name:
         raise ValueError("Experiment must define a non-empty 'name'")
 
-    studies = merged.get("studies", "all")
-    if isinstance(studies, str):
-        studies = studies.strip()
-        if studies.lower() == "all":
-            studies = "all"
-        elif is_named_study_set(studies):
-            studies = studies.lower()
-        else:
-            raise ValueError(
-                "'studies' must be 'all', a named study set, or a list of study ids"
-            )
-    else:
-        if not isinstance(studies, list):
-            raise ValueError(
-                "'studies' must be 'all', a named study set, or a list of study ids"
-            )
-        studies = _dedupe_strings(studies, label="studies")
+    studies = _normalize_study_selection(
+        merged.get("studies", "all"),
+        label="studies",
+    )
 
     timescales = merged.get("timescales")
     if not isinstance(timescales, list) or not timescales:
@@ -432,6 +465,11 @@ def normalize_experiment(
         "methods": methods,
         "deepssf_data": deepssf_data,
     }
+    if "shared_training_studies" in merged:
+        normalized["shared_training_studies"] = _normalize_study_selection(
+            merged["shared_training_studies"],
+            label="shared_training_studies",
+        )
     if method_variants:
         normalized["method_variants"] = method_variants
     if source_path is not None:

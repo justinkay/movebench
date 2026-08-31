@@ -21,6 +21,7 @@ def build_moveformer_selection_model(
     heads: int = 8,
     var_len_training_v2: bool = True,
     max_len: int = 500,
+    taxon_dim: int = 100,
 ) -> AnyHorizonForecastTransformer:
     """Instantiate MoveFormer VarCtx-style selection model over generic covariates.
 
@@ -44,7 +45,7 @@ def build_moveformer_selection_model(
         "time_lmt": 2,
         "time_lmt_tgt": 2,
         "dtime_cont": 12,
-        "taxon": 100,
+        "taxon": int(taxon_dim),
         "cov": int(cov_dim),
         "cov_cand": int(cov_dim),
     }

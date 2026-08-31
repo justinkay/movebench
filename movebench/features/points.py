@@ -217,6 +217,25 @@ class PointStoreReader:
         state["_layer_memmaps"] = {}
         return state
 
+    def close(self) -> None:
+        seen: set[int] = set()
+        arrays = [self._shared_memmap]
+        for env, valid in self._layer_memmaps.values():
+            arrays.extend([env, valid])
+        for array in arrays:
+            mmap = getattr(array, "_mmap", None)
+            if mmap is not None and id(mmap) not in seen:
+                mmap.close()
+                seen.add(id(mmap))
+        self._shared_memmap = None
+        self._layer_memmaps = {}
+
+    def __enter__(self) -> "PointStoreReader":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     def _shared_array(self) -> np.ndarray:
         if self._shared_memmap is None:
             self._shared_memmap = np.load(

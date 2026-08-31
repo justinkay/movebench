@@ -58,5 +58,8 @@ moveformer = [
 where = ["."]
 include = ["movebench*"]
 
+[tool.setuptools.package-data]
+"movebench.bench" = ["assets/*.csv", "assets/*.npz"]
+
 [tool.ruff]
 extend-exclude = ["tests", "notebooks", "one_time_scripts", "mbr", "movebank", "execplans", "results", "docs", "movebench/lib","app/"]

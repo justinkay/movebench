@@ -268,6 +268,7 @@ class _MoveFormerForecastScorer:
             history.append(
                 _StepRecord(
                     split_key=str(self.split_key),
+                    row_idx=-1,
                     point_id_start=int(point_id_start),
                     point_id_end=int(point_id_start - 1),
                     timestamp_ns=int(state.timestamp_ns[trajectory_idx].item()),

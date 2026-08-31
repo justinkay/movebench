@@ -30,6 +30,8 @@ _GPU_DEFAULTS = {
     "issf_mlp": 0,
     "deepssf": 1,
     "moveformer": 1,
+    "moveformer-full-trainonly": 1,
+    "moveformer-full": 1,
 }
 
 

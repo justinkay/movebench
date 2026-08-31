@@ -27,6 +27,7 @@ from movebench.trajectories import (
 )
 
 MAIN_RESULTS_EXPERIMENT = paths.repo_root() / "experiments" / "main_results.py"
+MOVEFORMER_FULL_EXPERIMENT = paths.repo_root() / "experiments" / "moveformer_full.py"
 DEFAULT_STUDIES_CSV = paths.repo_root() / "MoveBench Studies V2.csv"
 DEFAULT_TRAITS_CSV = (
     paths.repo_root().parent
@@ -50,6 +51,7 @@ PLOT_METHODS = [
     "deepssf",
     "moveformer",
 ]
+OPTIONAL_PLOT_METHODS = ["moveformer-full"]
 SPLIT_ORDER = ["test_temporal", "test_individual"]
 SPLIT_LABELS = {
     "test_temporal": "Temporal Split",
@@ -83,6 +85,7 @@ METHOD_COLORS = {
     "issf_mlp": "#f77f00",
     "deepssf": "#003049",
     "moveformer": "#669bbc",
+    "moveformer-full": "#7b2cbf",
 }
 STUDY_ID_OVERRIDES = {
     (
@@ -288,8 +291,16 @@ def load_plot_results() -> pd.DataFrame:
         "main_results",
         experiment_module_path=MAIN_RESULTS_EXPERIMENT,
     )
+    full_results = bench_results.load_results(
+        "moveformer_full",
+        experiment_module_path=MOVEFORMER_FULL_EXPERIMENT,
+    )
+    results = pd.concat(
+        [results, full_results],
+        ignore_index=True,
+    )
     return results[
-        results["method"].isin([NORMALIZE_BY, *PLOT_METHODS])
+        results["method"].isin([NORMALIZE_BY, *PLOT_METHODS, *OPTIONAL_PLOT_METHODS])
         & (results["geometry"] == LOCAL_GEOMETRY)
         & results["split_key"].isin(SPLIT_ORDER)
     ].reset_index(drop=True)
@@ -383,7 +394,11 @@ def aggregate_plot_results(
     study_groups: pd.DataFrame,
 ) -> pd.DataFrame:
     normalized = bench_results.normalize_results(
-        raw_results[raw_results["method"].isin([NORMALIZE_BY, *PLOT_METHODS])],
+        raw_results[
+            raw_results["method"].isin(
+                [NORMALIZE_BY, *PLOT_METHODS, *OPTIONAL_PLOT_METHODS]
+            )
+        ],
         baseline_method=NORMALIZE_BY,
         by=["study_id", "timescale", "split_key"],
     )
@@ -413,6 +428,10 @@ def aggregate_plot_results(
                 **{key: index for index, key in enumerate(SPLIT_ORDER)},
                 **{key: index for index, key in enumerate(PANEL_ORDER)},
                 **{key: index for index, key in enumerate(PLOT_METHODS)},
+                **{
+                    key: len(PLOT_METHODS) + index
+                    for index, key in enumerate(OPTIONAL_PLOT_METHODS)
+                },
                 **{key: index for index, key in enumerate(TIMESCALE_ORDER)},
             }
         ),
@@ -455,6 +474,11 @@ def write_outputs(
     output_stem: Path,
 ) -> None:
     sns.set_theme(style="whitegrid", context="talk")
+    available_methods = set(aggregate["method"].astype(str))
+    plot_methods = [
+        *PLOT_METHODS,
+        *[method for method in OPTIONAL_PLOT_METHODS if method in available_methods],
+    ]
     x_index = {timescale: index for index, timescale in enumerate(TIMESCALE_ORDER)}
     count_map = {
         (row.split_key, row.panel): int(row.n_individuals)
@@ -482,7 +506,7 @@ def write_outputs(
                 (aggregate["split_key"] == split_key)
                 & (aggregate["panel"] == panel)
             ]
-            for method in PLOT_METHODS:
+            for method in plot_methods:
                 method_rows = subset[subset["method"] == method].copy()
                 if method_rows.empty:
                     continue
@@ -513,12 +537,10 @@ def write_outputs(
                 )
 
             ax.set_xticks(range(len(TIMESCALE_ORDER)), TIMESCALE_ORDER)
-            # if split_key == "test_temporal":
-            #     ax.set_ylim(0.65, 1.1)
-            # else:
-            #     ax.set_ylim(0.7, 2)
-
-            ax.set_ylim(0.65, 1.25)
+            if split_key == "test_temporal":
+                ax.set_ylim(0.65, 1.2)
+            else:
+                ax.set_ylim(0.7, 2)
 
             ax.set_yscale("log")
             ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4]))
@@ -548,7 +570,7 @@ def write_outputs(
         handles,
         labels,
         loc="upper center",
-        ncol=len(PLOT_METHODS) + 1,
+        ncol=len(plot_methods) + 1,
         frameon=False,
         bbox_to_anchor=(0.5, 0.91),
     )

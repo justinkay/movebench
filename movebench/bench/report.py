@@ -27,6 +27,7 @@ METHOD_COLORS = {
     "issf_mlp": "#f77f00",
     "deepssf": "#003049",
     "moveformer": "#2a9d8f",
+    "moveformer-full": "#669bbc",
 }
 COVARIATE_COLORS = {
     "all": "#003049",
