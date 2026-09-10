@@ -138,6 +138,8 @@ class DeepSSF(nn.Module):
         )
 
         self.model = ConvJointModel(params).to(dev)
+        self.model.conv_movement.double()
+        self.model.fcn_movement_all.double()
 
         # Ensure deepSSF's internal device attributes and precomputed layers are on the model device.
         self._sync_internal_device(dev)

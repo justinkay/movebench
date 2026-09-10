@@ -284,6 +284,8 @@ class _DeepSSFRuntime:
         for optimizer in self.optimizers.values():
             optimizer.zero_grad(set_to_none=True)
         loss = F.cross_entropy(logits["nll"], true_idx, reduction="mean")
+        if not bool(torch.isfinite(loss).item()):
+            raise FloatingPointError(f"deepSSF loss became non-finite at step {step}")
         loss.backward()
         for optimizer in self.optimizers.values():
             optimizer.step()
@@ -435,6 +437,9 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         ),
     }
     channel_indices = list(resolved_artifacts["channel_indices"])
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     model = DeepSSF(
         len(channel_indices),
         image_dim=image_dim,

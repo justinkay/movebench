@@ -49,7 +49,6 @@ PLOT_METHODS = [
     "issf_linear",
     "issf_mlp",
     "deepssf",
-    "moveformer",
 ]
 OPTIONAL_PLOT_METHODS = ["moveformer-full"]
 SPLIT_ORDER = ["test_temporal", "test_individual"]
@@ -85,7 +84,7 @@ METHOD_COLORS = {
     "issf_mlp": "#f77f00",
     "deepssf": "#003049",
     "moveformer": "#669bbc",
-    "moveformer-full": "#7b2cbf",
+    "moveformer-full": "#669bbc",# "#7b2cbf",
 }
 STUDY_ID_OVERRIDES = {
     (
@@ -122,6 +121,7 @@ DETAIL_GROUP_OVERRIDES = {
 def _method_label(method: str) -> str:
     return (
         str(method)
+        .replace("moveformer-full", "moveformer")
         .replace("baseline", "")
         .replace("_", " ")
         .replace("randomwalk", "crw")
@@ -166,6 +166,7 @@ def _group_lookup(traits_csv: Path) -> dict[str, str]:
                 if species:
                     lookup[species] = group
     lookup["Bubalus bubalis"] = "Freshwater Mammals"
+    lookup["Capreolus capreolus"] = "Terrestrial Mammals"
     lookup["Mobula"] = "Marine Sharks and Rays"
     return lookup
 
@@ -540,7 +541,7 @@ def write_outputs(
             if split_key == "test_temporal":
                 ax.set_ylim(0.65, 1.2)
             else:
-                ax.set_ylim(0.7, 2)
+                ax.set_ylim(0.7, 1.35)
 
             ax.set_yscale("log")
             ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4]))
