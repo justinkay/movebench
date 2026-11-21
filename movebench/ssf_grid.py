@@ -1,170 +1,24 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from scipy import stats
-from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from movebench.datasets.chips import ChipDataset
+from movebench.datasets.chips import make_grid_loader
 from movebench.geometry import LOCAL_GEOMETRY, centered_grid_coordinates_m
-from movebench.trajectories import (
-    SET_COL,
-    canonicalize_split_key,
-    fit_interval_step_support,
-    select_step_starts_with_support,
-)
 
 GRID_QUADRATURE_SUBCELLS = 2
+
+
 MIXED_MARGINAL_QUANTILES = 256
 
 
 def _wrap_to_pi(values: np.ndarray) -> np.ndarray:
     return (values + np.pi) % (2.0 * np.pi) - np.pi
-
-
-def selected_splits_from_manifest(manifest) -> list[str] | None:
-    raw_selected_splits = getattr(manifest, "extraction", {}).get("selected_splits")
-    if not isinstance(raw_selected_splits, list) or not raw_selected_splits:
-        return None
-    selected_splits: list[str] = []
-    seen: set[str] = set()
-    for raw_split in raw_selected_splits:
-        split = canonicalize_split_key(raw_split)
-        if not split or split in seen:
-            continue
-        selected_splits.append(split)
-        seen.add(split)
-    return selected_splits or None
-
-
-def fit_train_step_support(
-    trajectories_df,
-    *,
-    step_spec,
-) -> tuple[object, object]:
-    train_df = trajectories_df[trajectories_df[SET_COL] == "train"].copy()
-    if len(train_df) == 0:
-        raise ValueError("Study has no train split for SSF grid prediction support")
-    support = fit_interval_step_support(
-        train_df,
-        step_time_s=int(step_spec.step_time_s),
-        gap_q=float(step_spec.gap_q),
-        step_q=float(step_spec.step_q),
-        max_step_q=float(step_spec.max_step_q),
-        step_multiplier=float(step_spec.step_multiplier),
-    )
-    train_steps = select_step_starts_with_support(
-        train_df,
-        step_time_s=int(step_spec.step_time_s),
-        gap_q=float(step_spec.gap_q),
-        support=support,
-    )
-    return support, train_steps
-
-
-class SSFGridStepDataset(Dataset):
-    def __init__(self, chips: ChipDataset, *, include_env: bool) -> None:
-        if getattr(chips, "mode", None) != "steps":
-            raise ValueError("SSFGridStepDataset requires ChipDataset(mode='steps')")
-        self.chips = chips
-        self.include_env = bool(include_env)
-        self.output_hw = tuple(int(v) for v in chips.output_hw)
-        self.pixel_size_m = float(chips.pixel_size_m)
-        steps = chips.step_starts_df.reset_index(drop=True)
-        self._point_id_start = steps["point_id_start"].to_numpy(dtype=np.int64, copy=False)
-        self._timestamp_ns = steps["timestamp"].to_numpy(dtype="datetime64[ns]").astype(
-            np.int64, copy=False
-        )
-        self._start_bearing_rad = steps["start_bearing"].to_numpy(
-            dtype=np.float32, copy=False
-        )
-        self._individual_id = steps["individual-local-identifier"].astype(str).tolist()
-
-    def __len__(self) -> int:
-        return int(len(self.chips))
-
-    def __getitem__(self, idx: int) -> int:
-        return int(idx)
-
-    def collate(self, indices):
-        idxs = [int(idx) for idx in indices]
-        env = None
-        valid = None
-        if self.include_env:
-            env_rows = []
-            valid_rows = []
-            for idx in idxs:
-                env_i, valid_i, _target, _xfm, _crs = self.chips[idx]
-                env_rows.append(env_i)
-                valid_rows.append(valid_i)
-            env = torch.stack(env_rows, dim=0)
-            valid = torch.stack(valid_rows, dim=0)
-        return {
-            "env": env,
-            "valid": valid,
-            "point_id_start": torch.as_tensor(
-                self._point_id_start[idxs],
-                dtype=torch.int64,
-            ),
-            "timestamp_ns": torch.as_tensor(
-                self._timestamp_ns[idxs],
-                dtype=torch.int64,
-            ),
-            "start_bearing_rad": torch.as_tensor(
-                self._start_bearing_rad[idxs],
-                dtype=torch.float32,
-            ),
-            "individual_id": [self._individual_id[idx] for idx in idxs],
-        }
-
-
-def make_grid_step_dataset(
-    *,
-    study_dir: str | Path,
-    trajectories_path: str | Path,
-    split_key: str,
-    plan,
-    sampler_config,
-    output_hw: tuple[int, int],
-    selected_splits: list[str] | None,
-    include_env: bool,
-) -> SSFGridStepDataset:
-    chips = ChipDataset(
-        study_dir=study_dir,
-        trajectories_path=trajectories_path,
-        split=str(split_key),
-        plan=plan,
-        sampler_config=sampler_config,
-        output_hw=output_hw,
-        normalize=bool(include_env),
-        mode="steps",
-        selected_splits=selected_splits,
-    )
-    return SSFGridStepDataset(chips, include_env=include_env)
-
-
-def make_grid_loader(
-    dataset,
-    *,
-    batch_size: int,
-    num_workers: int,
-    device: torch.device,
-) -> DataLoader:
-    return DataLoader(
-        dataset,
-        batch_size=int(batch_size),
-        shuffle=False,
-        num_workers=int(num_workers),
-        collate_fn=dataset.collate,
-        drop_last=False,
-        pin_memory=device.type == "cuda",
-        persistent_workers=bool(num_workers > 0),
-    )
 
 
 def scaled_step_batch_size(

@@ -12,6 +12,7 @@ import pandas as pd
 import movebench.paths as paths
 
 import movebench.bench.config as bench_config
+import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.bench.results as bench_results
 import movebench.bench.run_state as bench_run_state
 
@@ -422,7 +423,6 @@ def _refresh_final_metrics(
         return latest_run_records, [], []
     refreshed: list[str] = []
     errors: list[dict[str, object]] = []
-    evaluate_run_fn = None
     for run_key, planned_run in planned_runs.items():
         latest = dict(latest_run_records.get(run_key, {}))
         if str(latest.get("status", "")) != "completed":
@@ -434,11 +434,7 @@ def _refresh_final_metrics(
         if (not refresh_metrics) and not missing_splits:
             continue
         try:
-            if evaluate_run_fn is None:
-                from movebench.bench.evaluation.runner import (
-                    evaluate_run as evaluate_run_fn,
-                )
-            evaluate_run_fn(run_key)
+            evaluation_runner.evaluate_run(run_key)
             refreshed.append(run_key)
         except Exception as exc:
             errors.append(

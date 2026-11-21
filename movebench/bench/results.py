@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 import movebench.bench.config as bench_config
-import movebench.bench.run as bench_run
+import movebench.bench.planning as bench_planning
 import movebench.bench.run_state as bench_run_state
 
 TIMESCALE_ORDER = list(bench_config.TIMESCALES.keys())
@@ -42,7 +42,7 @@ def _metric_split_key(split_key: str) -> str:
 
 
 def expanded_checked_in_experiments() -> list[dict[str, object]]:
-    return bench_run.expanded_checked_in_experiments()
+    return bench_planning.expanded_checked_in_experiments()
 
 
 def planned_run_index(
@@ -111,12 +111,12 @@ def load_results(
     wanted = set(names)
     if expanded_experiments is None and experiment_module_path is not None:
         module_path = str(Path(experiment_module_path).resolve())
-        experiment = bench_run.load_experiment(module_path)
+        experiment = bench_planning.load_experiment(module_path)
         expanded_experiments = [
             {
                 "module_path": module_path,
                 "experiment": experiment,
-                "runs": bench_run.expand_experiment(experiment),
+                "runs": bench_planning.expand_experiment(experiment),
             }
         ]
     elif expanded_experiments is not None and experiment_module_path is not None:

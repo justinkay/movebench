@@ -16,9 +16,9 @@ from tqdm import tqdm
 
 import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
-import movebench.bench.executors.ssf_grid as ssf_grid
+import movebench.ssf_grid as ssf_grid
 from movebench.bench.moveformer_taxa import moveformer_taxon_for_study
-from movebench.bench.train import TrainerConfig, run_training_loop
+from movebench.datasets.chips import make_grid_step_dataset, selected_splits_from_manifest
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset
 from movebench.features.points import PointStoreReader
 from movebench.geometry import (
@@ -31,6 +31,7 @@ from movebench.lib.moveformer.geo_transformers.training_utils import (
     collate_sequence_dicts,
 )
 from movebench.models.moveformer import build_moveformer_selection_model
+from movebench.training import TrainerConfig, run_training_loop
 
 
 def _batch_to_device(
@@ -712,10 +713,10 @@ def _write_grid_predictions(
                     continue
             except Exception:
                 pass
-        selected_splits = ssf_grid.selected_splits_from_manifest(
+        selected_splits = selected_splits_from_manifest(
             point_stores[split_key]["manifest"]
         )
-        grid_dataset = ssf_grid.make_grid_step_dataset(
+        grid_dataset = make_grid_step_dataset(
             study_dir=resolved_artifacts["study_dir"],
             trajectories_path=resolved_artifacts["trajectories_path"],
             split_key=split_key,

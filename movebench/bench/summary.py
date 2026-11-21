@@ -4,7 +4,11 @@ from collections import Counter, defaultdict
 import json
 import re
 
+import movebench.bench.config as bench_config
+import movebench.bench.planning as bench_planning
 import movebench.bench.run_state as bench_run_state
+from movebench.download_reports import load_chip_request_status_for_extract
+from movebench.study import Study
 
 STATUS_KEYS = (
     "completed",
@@ -770,12 +774,7 @@ def build_current_summary_payload(
     studies_override: list[str] | None = None,
     experiments_override: list[str] | None = None,
 ) -> dict[str, object]:
-    import movebench.bench.config as bench_config
-    import movebench.bench.run as bench_run
-    from movebench.download_reports import load_chip_request_status_for_extract
-    from movebench.study import Study
-
-    status_snapshot, expanded_experiments = bench_run._status_context(
+    status_snapshot, expanded_experiments = bench_planning._status_context(
         studies_override=studies_override
     )
     selected_experiments = normalize_experiment_selection(experiments_override)

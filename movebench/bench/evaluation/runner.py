@@ -11,6 +11,7 @@ import torch
 from tqdm import tqdm
 
 import movebench.bench.config as bench_config
+import movebench.bench.run_state as bench_run_state
 from movebench.bench.evaluation import energy
 import movebench.paths as paths
 from movebench.geometry import (
@@ -529,5 +530,5 @@ def evaluate_run_dir(
 
 def evaluate_run(run_key: str) -> dict[str, object]:
     return evaluate_run_dir(
-        paths.repo_root() / "results" / "bench" / "runs" / str(run_key)
+        bench_run_state.run_dir(str(run_key))
     )

@@ -5,16 +5,16 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
 
 import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
-import movebench.bench.executors.ssf_grid as ssf_grid
-from torch.utils.data import DataLoader, Subset
-
-from movebench.bench.train import TrainerConfig, run_training_loop
+import movebench.ssf_grid as ssf_grid
+from movebench.datasets.chips import make_grid_step_dataset, selected_splits_from_manifest
 from movebench.datasets.ssf import iSSFDataset
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
-from movebench.trajectories import load_trajectories_csv
+from movebench.training import TrainerConfig, run_training_loop
+from movebench.trajectories import fit_train_step_support, load_trajectories_csv
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -192,18 +192,6 @@ class _ISSFRuntime:
         self.optimizer.load_state_dict(dict(state["optimizer"]))
 
 
-def _selected_splits_from_manifest(manifest) -> list[str] | None:
-    return ssf_grid.selected_splits_from_manifest(manifest)
-
-
-def _fit_prediction_support(
-    trajectories_df,
-    *,
-    step_spec,
-) -> tuple[object, object]:
-    return ssf_grid.fit_train_step_support(trajectories_df, step_spec=step_spec)
-
-
 def _grid_prediction_payload(
     *,
     model: torch.nn.Module,
@@ -220,7 +208,7 @@ def _grid_prediction_payload(
     prediction_num_workers: int,
     device: torch.device,
 ) -> dict[str, object]:
-    grid_dataset = ssf_grid.make_grid_step_dataset(
+    grid_dataset = make_grid_step_dataset(
         study_dir=study_dir,
         trajectories_path=trajectories_path,
         split_key=str(split_key),
@@ -443,7 +431,7 @@ def _run(
             trajectories_df = load_trajectories_csv(
                 Path(resolved_artifacts["trajectories_path"])
             )
-            _support, train_steps = _fit_prediction_support(
+            _support, train_steps = fit_train_step_support(
                 trajectories_df,
                 step_spec=resolved_artifacts["plan"].step_spec,
             )
@@ -460,7 +448,7 @@ def _run(
                 train_manifest=train_manifest,
                 train_steps=train_steps,
                 split_key=str(split_key),
-                selected_splits=_selected_splits_from_manifest(split_manifest),
+                selected_splits=selected_splits_from_manifest(split_manifest),
                 study_dir=Path(resolved_artifacts["study_dir"]),
                 trajectories_path=Path(resolved_artifacts["trajectories_path"]),
                 sampler_config=resolved_artifacts["sampler"],

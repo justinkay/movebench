@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
 from dataclasses import dataclass
-from typing import Any
-from tqdm import tqdm
+from pathlib import Path
 
 import torch
+from tqdm import tqdm
+
+
+class RunTracker:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+
+    def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        del metrics, step
+
+    def write_history(self, history: list[dict[str, object]]) -> None:
+        history_path = self.run_dir / "history.json"
+        history_path.write_text(
+            json.dumps(history, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 @dataclass(frozen=True)

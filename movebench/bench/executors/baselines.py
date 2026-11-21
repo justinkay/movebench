@@ -8,7 +8,8 @@ import numpy as np
 import torch
 
 import movebench.bench.config as bench_config
-import movebench.bench.executors.ssf_grid as ssf_grid
+import movebench.ssf_grid as ssf_grid
+from movebench.datasets.chips import make_grid_step_dataset, selected_splits_from_manifest
 from movebench.features.points import PointStoreReader
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.trajectories import (
@@ -18,6 +19,7 @@ from movebench.trajectories import (
     POINT_ID_COL,
     TIME_COL,
     bearing_rad,
+    fit_train_step_support,
     geodesic_distance_m,
     load_trajectories_csv,
 )
@@ -168,7 +170,7 @@ def run_constvel(*, run_payload, resolved_artifacts, run_dir, tracker):
 def run_randomwalk(*, run_payload, resolved_artifacts, run_dir, tracker):
     trajectories_path = Path(resolved_artifacts["trajectories_path"])
     trajectories_df = load_trajectories_csv(trajectories_path)
-    _support, train_steps = ssf_grid.fit_train_step_support(
+    _support, train_steps = fit_train_step_support(
         trajectories_df,
         step_spec=resolved_artifacts["plan"].step_spec,
     )
@@ -187,14 +189,14 @@ def run_randomwalk(*, run_payload, resolved_artifacts, run_dir, tracker):
     )
     for split_key in run_payload["evaluation_split_keys"]:
         split_manifest = resolved_artifacts["point_stores"][split_key]["manifest"]
-        grid_dataset = ssf_grid.make_grid_step_dataset(
+        grid_dataset = make_grid_step_dataset(
             study_dir=resolved_artifacts["study_dir"],
             trajectories_path=trajectories_path,
             split_key=str(split_key),
             plan=resolved_artifacts["plan"],
             sampler_config=resolved_artifacts["sampler"],
             output_hw=output_hw,
-            selected_splits=ssf_grid.selected_splits_from_manifest(split_manifest),
+            selected_splits=selected_splits_from_manifest(split_manifest),
             include_env=False,
         )
         _write_predictions(

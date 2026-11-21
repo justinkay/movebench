@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import movebench.bench.evaluation.runner as evaluation_runner
-from movebench.bench.train import TrainerConfig, run_training_loop
+from movebench.training import TrainerConfig, run_training_loop
 from movebench.datasets.deepssf_gpu import (
     AlphaEarthGPUCache,
     build_deepssf_gpu_datasets,

@@ -625,3 +625,28 @@ def select_step_starts_with_support(
         gap_cutoffs=support.gap_cutoffs,
         max_step_length_m=float(support.max_step_length_m),
     )
+
+
+def fit_train_step_support(
+    trajectories_df,
+    *,
+    step_spec,
+) -> tuple[object, object]:
+    train_df = trajectories_df[trajectories_df[SET_COL] == "train"].copy()
+    if len(train_df) == 0:
+        raise ValueError("Study has no train split for SSF grid prediction support")
+    support = fit_interval_step_support(
+        train_df,
+        step_time_s=int(step_spec.step_time_s),
+        gap_q=float(step_spec.gap_q),
+        step_q=float(step_spec.step_q),
+        max_step_q=float(step_spec.max_step_q),
+        step_multiplier=float(step_spec.step_multiplier),
+    )
+    train_steps = select_step_starts_with_support(
+        train_df,
+        step_time_s=int(step_spec.step_time_s),
+        gap_q=float(step_spec.gap_q),
+        support=support,
+    )
+    return support, train_steps
