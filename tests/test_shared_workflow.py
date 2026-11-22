@@ -53,7 +53,7 @@ class SharedWorkflowTest(unittest.TestCase):
             experiment = {
                 "name": "shared-workflow", "studies": ["a", "b"],
                 "timescales": ["1h"], "covariate_sets": ["alphaearth_only"],
-                "methods": [method], "shared_training_studies": ["a", "b"],
+                "methods": [method], "trained_on_studies": ["a", "b"],
             }
             path = self.root / f"{method}.py"
             path.write_text(f"EXPERIMENT = {experiment!r}\n")
@@ -177,12 +177,12 @@ class SharedWorkflowTest(unittest.TestCase):
         trainer = self.train()
         before = self.snapshot(trainer)
         experiment = planning.load_experiment(self.experiments[SCORER])
-        experiment.pop("shared_training_studies")
+        experiment.pop("trained_on_studies")
         self.assertEqual(planning.expand_experiment(experiment, ["a"]), [])
         self.assertIn("not completed", experiment["blocked"][0]["reason"])
         runs = planning.expand_experiment(experiment, ["a", "b"])
         self.assertEqual({p["shared_checkpoint_run_key"] for p in runs}, {trainer.name})
-        experiment["shared_training_studies"] = ["a", "b"]
+        experiment["trained_on_studies"] = ["a", "b"]
         self.assertEqual(planning.expand_experiment(experiment, ["outside"]), [])
         self.assertIn("no compatible shared training run", experiment["blocked"][0]["reason"])
         self.assertEqual(self.local(TRAINER, ["a"])["executed_runs"], 1)

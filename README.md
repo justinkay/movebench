@@ -174,16 +174,29 @@ movebench bench run experiments/main_results.py --studies mini
 
 Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer_perstudy.py`.
 
-The shared MoveFormer scorer in `main_results.py` and `moveformer_full_predictonly.py` requires a completed checkpoint. Train it first, then run prediction and benchmark scoring with the same study selection:
+Shared MoveFormer uses one model trained on several studies. Train that model first, then use the second command to make predictions and calculate benchmark scores:
 
 ```bash
 movebench bench run experiments/moveformer_full_trainonly.py --studies mini
 movebench bench run experiments/moveformer_full_predictonly.py --studies mini
 ```
 
-Prediction-only does not schedule training. The per-study `moveformer_perstudy.py` experiment belongs to `ablation` and includes both `all` and `alphaearth_only` covariates.
+Wait for training to finish before running prediction. The prediction command only loads an already trained model; it cannot start training for you. The shared MoveFormer results in `main_results.py` also need this training step.
 
-On the training experiment, `--studies all` trains on all resolved studies and `--studies mini` trains only on the mini cohort. A scoring experiment may set `shared_training_studies` when its scoring cohort should use a checkpoint trained on a different cohort.
+Use `--studies mini` to train on MoveBench-Mini, or `--studies all` to train on all available studies.
+
+If you want results for only some studies, use `trained_on_studies` in the prediction experiment to say which studies the saved model was trained on. For example, `studies="mini"` with `trained_on_studies="all"` generates results for MoveBench-Mini using the model trained on all studies. This is also useful when rerunning predictions for a few studies that failed.
+
+If you leave out `trained_on_studies`, MoveBench looks for a model trained on the studies selected for prediction. Keep this setting fixed when adding more prediction studies so MoveBench can use the same model and skip finished results. Each study you predict for must be in the model's training study list.
+
+To repeat work, add `--rerun` to the command you want to repeat:
+
+- On the prediction command, it replaces results for the studies you requested.
+- On the training command, it trains a new shared model and deletes the study results made with the old model. Run prediction again afterward. MoveBench will refuse to replace a model while a prediction job is using it.
+
+If training stopped after saving the model but before writing its summary, repeat the training command without `--rerun`. It will load the saved model and finish the summary, keeping existing predictions. If the saved model is missing, it must train again and clear the old predictions.
+
+To train a separate model for each study instead, use `experiments/moveformer_perstudy.py`. Those results appear in the `ablation` group, with both the full set of environmental variables (`all`) and AlphaEarth alone (`alphaearth_only`).
 
 **Inspect benchmark state (Optional):**
 
@@ -223,3 +236,169 @@ movebench slurm bench run \
   --max-gpu-jobs 32 \
   --slurm-config path/to/slurm.yaml
 ```
+
+Shared MoveFormer also needs two separate commands on Slurm. Submit training first:
+
+```bash
+movebench slurm bench run experiments/moveformer_full_trainonly.py \
+  --studies mini \
+  --slurm-config path/to/slurm.yaml
+```
+
+Wait for the training job to finish, then submit prediction:
+
+```bash
+movebench slurm bench run experiments/moveformer_full_predictonly.py \
+  --studies mini \
+  --slurm-config path/to/slurm.yaml
+```
+
+Submitting both methods together will not make prediction wait for training. Once the model is ready, predictions for different studies can run in parallel.
+
+## Adding a benchmark method
+
+To add a method, write a Python class that can fit a model and make predictions, then list it in `METHODS` in [bench/config.py](movebench/bench/config.py). MoveBench will save its predictions, calculate Energy Scores, and include the results in reports.
+
+### Start with an example
+
+There are two small examples you can copy:
+
+- [origin_method.py](examples/origin_method.py) predicts that the animal stays where it is. It needs no training and shows the simplest prediction format.
+- [candidate_method.py](examples/candidate_method.py) trains a linear model to score possible next locations. It shows how to load training data, save and load a trained model, and predict over a grid of locations. Training is limited to two batches to keep the example short.
+
+If you have prepared the 12-hour point features, normalization statistics, and AlphaEarth rasters for Accio, run both examples from the repository directory:
+
+```bash
+python -m movebench.cli.main bench run examples/methods_experiment.py \
+  --studies Accio_967b7813_raw_merged
+```
+
+These examples live outside `experiments/`, so they are not included in the regular benchmark. The example experiment adds its methods when you load it. For your own method, put the class in `movebench/models/` and add its entry to `METHODS` in `bench/config.py`. That also makes the method available to separately launched Slurm jobs.
+
+### Write the fitting and prediction code
+
+Your class needs three methods:
+
+```python
+class MyMethod:
+    def __init__(self, *, model_config, hparams, seed):
+        self.model_config = dict(model_config)
+        self.hparams = dict(hparams)
+        self.seed = int(seed)
+
+    def fit(self, train, validation, *, work_dir, restore_from=None):
+        # Build the model and train it, or load the saved model in restore_from.
+        # Keep it on this object, for example as self.model_.
+        return self
+
+    def predict(self, data):
+        # Use the fitted model to predict for every point in data.
+        # Return a dictionary in one of the formats described below.
+        ...
+```
+
+Use `__init__` to remember settings. Build the model and load its data in `fit`. MoveBench sets the Python, NumPy, and PyTorch random seeds before creating your object.
+
+For each run that needs work, MoveBench calls `fit` once, then calls `predict` for each test dataset that needs predictions. `fit` should return `self`. Even a method that needs no training has a `fit` method, as the origin example shows. If your method only trains a model for later use, set `evaluates=False` in its registration and omit `predict`.
+
+If you use PyTorch, keep the network on your method object, such as `self.model_`. PyTorch's `model.train()` switches the network into training mode; your method's `fit` still needs to perform the training itself.
+
+### Load the data your method needs
+
+For a method trained on one study, `train`, `validation`, and `data` are [DataSplit](movebench/datasets/__init__.py) objects. A split is one part of a study's data, such as its training observations or its temporal test set. `validation` can be `None` if the method does not need it.
+
+Each object tells you which split it describes (`split_key`), the study and environmental variables it uses (`metadata`), and where to find the prepared data (`inputs`). It does not load all the observations into memory. Use the helpers in `movebench.datasets` to read the data in the form your model needs:
+
+| What you need | Helper |
+| --- | --- |
+| Observation IDs and the animal's previous movement | `points.point_context(data)` |
+| Movement steps from the training data | `points.training_steps(train)` |
+| Features at possible next locations, including the observed location | `ssf.candidate_dataset(data)` and `candidate_loader(...)` |
+| Environmental features on a grid around each observation | `chips.grid_dataset(data, ...)` |
+| Prepared images for deepSSF | `rasters.prepare_rasters(train, ...)` |
+| Sequences of observations for MoveFormer | `moveformer.sequence_dataset(data, ...)` and `sequence_loader(...)` |
+
+The candidate example shows how to use these helpers together. During training, the candidate loader reads and normalizes environmental features, then calls `make_model_batch` to assemble the model's inputs. For each observation, the observed next location is the last candidate. During prediction, `build_ssf_grid_artifact` uses the same `make_model_batch` function for the grid cells. This keeps the movement, time, and individual features consistent between training and prediction.
+
+If you call `make_model_batch` directly, pass environmental features that have already been normalized. For a batch with `N` observations, `C` environmental variables, and `P` possible locations, `env` and its validity mask have shape `[N, C, P]`; distances and angles have shape `[N, P]`. The function assembles the features without normalizing them again. See [ssf.py](movebench/datasets/ssf.py) for the optional timestamp and individual-ID arguments.
+
+### Return predictions
+
+Return a dictionary containing CPU tensors. Include `point_id_start`, with one unique 64-bit integer ID for every requested observation, and copy `geometry` from `data.metadata["geometry"]`. MoveBench uses the IDs to match each prediction to the observed movement. Return all requested predictions; MoveBench decides afterward which observations can be scored.
+
+Choose one of these formats. Here, `N` is the number of observations, `P` is the number of possible locations, and `H` and `W` are the height and width of a grid:
+
+| Prediction | `prediction_kind` | Fields to return |
+| --- | --- | --- |
+| One displacement per observation | `deterministic` | `dx_m[N]` and `dy_m[N]`, in meters |
+| Probabilities for a list of locations | `discrete` | `coords_m[N, P, 2]` in meters and `probs[N, P]` |
+| A score for each grid cell | `grid` | `scores[N, H, W]` and the cell width in meters, `pixel_size_m` |
+| A probability for each grid cell | `grid` | `probs_hw[N, H, W]` and the cell coordinates, `x_coords_m[W]` and `y_coords_m[H]`, in meters |
+
+For the list of locations, probabilities must be nonnegative and have a positive sum for each observation. For a probability grid, each grid must sum to one. The origin and candidate examples return the first and third formats, respectively.
+
+### Tell MoveBench how to run your method
+
+Add an entry to `METHODS` in [bench/config.py](movebench/bench/config.py). [methods_experiment.py](examples/methods_experiment.py) shows entries for both examples. The main settings are:
+
+- `implementation`: the Python module and class to import, such as `movebench.models.my_method:MyMethod`.
+- `model` and `hparams`: the default model and training settings passed to your constructor.
+- `artifact_requirement`: the kind of prepared data your method needs. Use `points` for the point-based examples.
+- `requires_normalization_stats`: whether the prepared data must include training means and standard deviations.
+- `trains`: whether the method performs training.
+
+You can also set `prediction_kind` to the format your method returns and `gpus` to the number of GPUs a Slurm job should request. Your method must still choose its own PyTorch device. Reports will include a newly registered method without changes to the plotting code.
+
+### Save and load trained models
+
+A checkpoint is a file containing a trained model and its training results. When `restore_from` is `None`, `fit` should train a new model. Otherwise, it must load the model specified by `restore_from`. If loading fails, let the error stop the run. Starting training instead would produce a different model from the one MoveBench expects to reuse.
+
+Use `save_checkpoint` and `read_checkpoint` from [training.py](movebench/training.py), as the candidate example does. They save the model weights, training step counts, and training and validation scores. The `restore_from` dictionary contains the file path as `checkpoint_path`; its `training_run_key` and `training_signature` fields identify a shared training run and are `None` for an ordinary model. Keep the saved training results when loading a model rather than calculating them again.
+
+Once your method can load a saved model this way, add `fit_reuse="checkpoint"` to its registration. This lets MoveBench keep predictions already made with that model when retrying a run. Methods that can recreate exactly the same fitted state from unchanged data and settings can use `fit_reuse="rebuild"` instead. Without either setting, MoveBench removes old predictions before calling `fit` again. Rerun affected experiments when you change a method or its input data.
+
+To include training results in the run summary, set `self.training_summary_` in `fit`. The candidate example shows the fields for step counts and training and validation scores. MoveBench saves this information before prediction, so a later prediction failure does not erase the training record.
+
+You can write your own training loop, use another library, or use MoveBench's `fit_or_restore` helper. For the helper, supply an object that holds the model and defines how to perform one training step, evaluate it, and save and load its state. `TrainerConfig` sets the training limit and when to evaluate; `RunTracker` saves the training history. See `ISSFMethod` in [models/ssf.py](movebench/models/ssf.py) for a complete example.
+
+### Train one model on several studies
+
+A shared method receives a `SharedTrainingData` object as `train` and `None` as `validation`. Each item in `train.studies` contains one study's training data and its validation splits. Keep these together when building datasets. For example, a shared MoveFormer method can create sequences like this:
+
+```python
+from movebench.bench.moveformer_taxa import moveformer_taxon_for_study
+from movebench.datasets.moveformer import sequence_dataset
+
+for study in train.studies:
+    taxon, _ = moveformer_taxon_for_study(study.train.metadata["study_id"])
+    train_sequences = sequence_dataset(
+        study.train, max_len=16, min_len=1, candidate_subset_size=16,
+        taxon_embedding=taxon, lazy_rows=True,
+    )
+    validation_sequences = [
+        sequence_dataset(
+            split, max_len=16, min_len=1,
+            context_splits=["train", split.split_key],
+            taxon_embedding=taxon, lazy_rows=True,
+        )
+        for split in study.validation
+    ]
+```
+
+Here, `moveformer_taxon_for_study` supplies the study's species information. `context_splits` lets each validation sequence include earlier observations from the training split, and `lazy_rows=True` reads features as they are needed. Some studies have no validation data, or too few observations to form a usable sequence; your method needs to account for that while keeping their training data.
+
+When predicting for a split, include its earlier observations as well. `allow_prediction_only_segments=True` includes sequences needed for prediction even when they cannot be used to calculate a training loss:
+
+```python
+prediction_sequences = sequence_dataset(
+    data, max_len=16, min_len=1,
+    context_splits=["train", data.split_key],
+    taxon_embedding=taxon, allow_prediction_only_segments=True, lazy_rows=False,
+)
+```
+
+The shared input also records the full requested study list and any studies with no usable training steps. These records let MoveBench identify which shared model a prediction should use. See [the input and method reference](astra_refactor_bench_plan_v2/target_architecture.md) for the complete fields.
+
+### Current limits
+
+Saved models are for making predictions after training has finished. They cannot resume an interrupted training job. A method returns all predictions for one split at a time, and predictions describe a single movement horizon rather than a chain of future movements. Shared training and prediction use separate commands, as shown above. There is no automatic conversion of checkpoints or results from older versions.

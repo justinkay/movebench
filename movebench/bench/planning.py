@@ -496,11 +496,11 @@ def expand_experiment(
 
     if score_candidates:
         training_studies = (
-            resolve_study_selection(experiment["shared_training_studies"])
-            if "shared_training_studies" in experiment
+            resolve_study_selection(experiment["trained_on_studies"])
+            if "trained_on_studies" in experiment
             else list(studies)
         )
-        experiment["resolved_shared_training_studies"] = training_studies
+        experiment["resolved_trained_on_studies"] = training_studies
         companion_runs: dict[tuple[str, str], list[dict[str, object]]] = {}
         for candidate in score_candidates:
             score_method = str(candidate["method"])

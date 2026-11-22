@@ -82,7 +82,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
         *,
         method,
         studies,
-        shared_training_studies=None,
+        trained_on_studies=None,
         training_studies=None,
         bands_by_study=None,
         resolve_artifacts=None,
@@ -95,8 +95,8 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
             "covariate_sets": ["alphaearth_only"],
             "methods": [method],
         }
-        if shared_training_studies is not None:
-            experiment["shared_training_studies"] = shared_training_studies
+        if trained_on_studies is not None:
+            experiment["trained_on_studies"] = trained_on_studies
 
         def resolve_studies(_experiment, override=None):
             return list(studies if override is None else override)
@@ -290,7 +290,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
         _experiment, all_runs = self._expand(
             method="moveformer_full_predictonly",
             studies=["mini"],
-            shared_training_studies="all",
+            trained_on_studies="all",
             training_studies=["mini", "other"],
         )
         self.assertEqual(

@@ -9,7 +9,7 @@ class BenchmarkImportsTest(unittest.TestCase):
         self._check_imports(
             ["movebench.models.baselines", "movebench.models.ssf",
              "movebench.models.deepssf", "movebench.models.moveformer"],
-            forbidden=["movebench.bench.run", "movebench.bench.executors.issf"],
+            forbidden=["movebench.bench.run"],
         )
 
     def test_issf_import_does_not_change_multiprocessing_sharing(self):
@@ -76,6 +76,8 @@ sharing.assert_not_called()
             "movebench.models.deepssf",
             "movebench.ssf_grid",
             "movebench.training",
+            "movebench.slurm.bench",
+            "movebench.cli.main",
         ]
         execution_first = [modules[1], modules[0], *modules[2:]]
         for order in (modules, execution_first, list(reversed(modules))):

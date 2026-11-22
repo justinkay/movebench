@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 
 import movebench.bench.config as bench_config
+import movebench.bench.run as bench_run
 from movebench.slurm.launcher import (
     ArrayRequest,
     SlurmResources,
@@ -22,12 +23,6 @@ _SLURM_DEFAULTS = {
     "polling_interval": 5.0,
     "log_dir": Path("results/slurm/bench"),
 }
-
-def _bench_run_module():
-    from movebench.bench import run as bench_run
-
-    return bench_run
-
 
 def _default_gpus_for_method(method: str) -> int:
     return int(bench_config.METHODS.get(str(method), {}).get("gpus", 0))
@@ -110,7 +105,6 @@ def _bucket_pending_runs(
 def _run_worker(args: argparse.Namespace) -> int:
     if not args.manifest_path or not args.run_key:
         raise ValueError("Worker mode requires --manifest-path and --run-key")
-    bench_run = _bench_run_module()
     run_payload = bench_run.load_resolved_run(Path(args.manifest_path), str(args.run_key))
     summary = bench_run.execute_run_payload(
         run_payload,
@@ -126,7 +120,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
         if int(getattr(args, name)) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be > 0")
 
-    bench_run = _bench_run_module()
     resolved = bench_run.resolve_pending_runs(
         args.experiment_module,
         studies_override=args.studies,

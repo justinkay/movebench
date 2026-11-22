@@ -492,10 +492,10 @@ def normalize_experiment(
         "methods": methods,
         "deepssf_data": deepssf_data,
     }
-    if "shared_training_studies" in merged:
-        normalized["shared_training_studies"] = _normalize_study_selection(
-            merged["shared_training_studies"],
-            label="shared_training_studies",
+    if "trained_on_studies" in merged:
+        normalized["trained_on_studies"] = _normalize_study_selection(
+            merged["trained_on_studies"],
+            label="trained_on_studies",
         )
     if method_variants:
         normalized["method_variants"] = method_variants
