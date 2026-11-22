@@ -10,7 +10,8 @@ import numpy as np
 import torch
 
 from movebench.bench import artifacts, planning, run, run_state
-from movebench.training import TrainerConfig, fit_or_restore, save_checkpoint
+from movebench.datasets import DataSplit
+from movebench.training import RunTracker, TrainerConfig, fit_or_restore, save_checkpoint
 
 
 class FitCleanupTest(unittest.TestCase):
@@ -19,7 +20,7 @@ class FitCleanupTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
-        self.enterContext(patch.object(artifacts, "_resolve_artifacts_for_run", return_value={"status": "resolved"}))
+        self.enterContext(patch.object(artifacts, "_resolve_artifacts_for_run", return_value={"status": "resolved", "train": object(), "splits": {"train": DataSplit("train", {}, {})}}))
         self.model = torch.nn.Linear(1, 1)
         self.fit = {
             "best_step": 2, "completed_steps": 3,
@@ -29,8 +30,8 @@ class FitCleanupTest(unittest.TestCase):
     def payload(self, key="local", *, shared=False):
         return {
             "run_key": key,
-            "method": "moveformer-full-trainonly" if shared else "issf_linear",
-            "executor": "unused:executor",
+            "method": "moveformer_full_trainonly" if shared else "issf_linear",
+            "implementation": "unused:method",
             "seed": 17,
             "early_stop_split_key": "test_temporal",
             "evaluates": False,
@@ -41,7 +42,7 @@ class FitCleanupTest(unittest.TestCase):
         directory = run_state.run_dir(payload["run_key"])
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "resolved_run.json").write_text(json.dumps(planning._canonical_run_payload(payload)))
-        (directory / "training_summary.json").write_text('{"status": "completed"}')
+        (directory / "training_summary.json").write_text('{"status": "completed", "fit_completed": true}')
         for name in ("predictions", "final_metrics"):
             (directory / name).mkdir(exist_ok=True)
             (directory / name / "old").write_text("old model results")
@@ -60,8 +61,14 @@ class FitCleanupTest(unittest.TestCase):
             fit=self.fit, schedule={}, model_metadata=metadata,
         )
 
-    def execute(self, payload, executor, *, resume=True):
-        with patch.object(run, "_load_executor", return_value=executor):
+    def execute(self, payload, fit_callback, *, resume=True):
+        def fit(train, validation, *, work_dir, restore_from=None):
+            method.training_summary_ = fit_callback(
+                run_dir=work_dir, restore_from=restore_from, tracker=RunTracker(work_dir),
+            )
+            return method
+        method = SimpleNamespace(fit=fit)
+        with patch.object(run, "_load_implementation", return_value=lambda **kwargs: method):
             return run.execute_run_payload(payload, resume=resume)
 
     def restore(self, *, restore_from, run_dir, tracker, **kwargs):
@@ -98,6 +105,7 @@ class FitCleanupTest(unittest.TestCase):
                     self.assertEqual(kwargs["restore_from"] is not None, after_save)
                     if after_save:
                         return self.restore(**kwargs)
+                    self.checkpoint(directory)
                     return {"status": "completed", "train_steps": 0}
 
                 self.assertEqual(self.execute(payload, retry)["status"], "completed")
@@ -151,7 +159,7 @@ class FitCleanupTest(unittest.TestCase):
         payload = self.payload("trainer", shared=True)
         trainer = self.results(payload)
         dependents = [self.results({
-            **self.payload(study), "method": "moveformer-full",
+            **self.payload(study), "method": "moveformer_full_predictonly",
             "shared_checkpoint_run_key": "trainer",
         }) for study in ("a", "outside")]
         unrelated = self.results({**self.payload("unrelated"), "shared_checkpoint_run_key": "other"})
@@ -184,7 +192,7 @@ class FitCleanupTest(unittest.TestCase):
         before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
         with (
             patch.object(run_state, "active_run_is_live", side_effect=lambda directory: directory == dependents[-1]),
-            patch.object(run, "_load_executor") as executor,
+            patch.object(run, "_load_implementation") as executor,
         ):
             with self.assertRaisesRegex(RuntimeError, "Retry training after scoring finishes"):
                 run.execute_run_payload(payload, resume=False)
@@ -204,7 +212,7 @@ class FitCleanupTest(unittest.TestCase):
 
         with (
             patch.object(run, "_clear_prediction_outputs", side_effect=fail_second),
-            patch.object(run, "_load_executor") as executor,
+            patch.object(run, "_load_implementation") as executor,
         ):
             with self.assertRaisesRegex(OSError, "cleanup failed"):
                 run.execute_run_payload(payload, resume=False)
@@ -241,11 +249,12 @@ class FitCleanupTest(unittest.TestCase):
         self.checkpoint(directory, shared=True)
         self.assertEqual(run_state._load_run_record("trainer")["status"], "completed")
 
-    def test_runner_seeds_all_generators_before_executor_setup(self):
+    def test_runner_seeds_all_generators_before_method_setup(self):
         draws = []
 
         def executor(**kwargs):
             draws.append((random.random(), float(np.random.rand()), torch.rand(3)))
+            self.checkpoint(kwargs["run_dir"])
             return {"status": "completed"}
 
         for initial in (3, 88):

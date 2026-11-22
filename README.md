@@ -172,14 +172,16 @@ movebench pack --studies mini --timescales 1h 12h 1d 7d
 movebench bench run experiments/main_results.py --studies mini
 ```
 
-Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer.py`.
+Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer_perstudy.py`.
 
-MoveFormer Full uses an explicit two-stage workflow. Train the shared checkpoint first, then run the per-study scoring experiment with the same study selection:
+The shared MoveFormer scorer in `main_results.py` and `moveformer_full_predictonly.py` requires a completed checkpoint. Train it first, then run prediction and benchmark scoring with the same study selection:
 
 ```bash
 movebench bench run experiments/moveformer_full_trainonly.py --studies mini
-movebench bench run experiments/moveformer_full.py --studies mini
+movebench bench run experiments/moveformer_full_predictonly.py --studies mini
 ```
+
+Prediction-only does not schedule training. The per-study `moveformer_perstudy.py` experiment belongs to `ablation` and includes both `all` and `alphaearth_only` covariates.
 
 On the training experiment, `--studies all` trains on all resolved studies and `--studies mini` trains only on the mini cohort. A scoring experiment may set `shared_training_studies` when its scoring cohort should use a checkpoint trained on a different cohort.
 

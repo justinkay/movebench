@@ -25,7 +25,7 @@ EXPERIMENT = {
     "studies": "mini",
     "timescales": ["1h", "12h", "1d", "7d"],
     "covariate_sets": ["alphaearth_only"],
-    "methods": ["moveformer"],
-    "method_variants": {"moveformer": METHOD_VARIANTS},
+    "methods": ["moveformer_perstudy"],
+    "method_variants": {"moveformer_perstudy": METHOD_VARIANTS},
     "seed": 0,
 }

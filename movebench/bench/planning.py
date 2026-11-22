@@ -363,7 +363,7 @@ def expand_experiment(
                         "band_ids": band_ids,
                         "method": str(method_key),
                         "artifact_requirement": requirement,
-                        "executor": str(method["executor"]),
+                        "implementation": str(method["implementation"]),
                         "seed": int(experiment["seed"]),
                         "early_stop_split_key": (
                             ""

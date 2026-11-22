@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
+import movebench.bench.config as bench_config
 from movebench.slurm.launcher import (
     ArrayRequest,
     SlurmResources,
@@ -22,19 +23,6 @@ _SLURM_DEFAULTS = {
     "log_dir": Path("results/slurm/bench"),
 }
 
-_GPU_DEFAULTS = {
-    "baseline_nomove": 0,
-    "baseline_constvel": 0,
-    "baseline_randomwalk": 0,
-    "issf_linear": 0,
-    "issf_mlp": 0,
-    "deepssf": 1,
-    "moveformer": 1,
-    "moveformer-full-trainonly": 1,
-    "moveformer-full": 1,
-}
-
-
 def _bench_run_module():
     from movebench.bench import run as bench_run
 
@@ -42,7 +30,7 @@ def _bench_run_module():
 
 
 def _default_gpus_for_method(method: str) -> int:
-    return int(_GPU_DEFAULTS.get(str(method), 0))
+    return int(bench_config.METHODS.get(str(method), {}).get("gpus", 0))
 
 
 def _resources_for_run(

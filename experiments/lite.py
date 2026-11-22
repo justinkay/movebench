@@ -10,7 +10,7 @@ EXPERIMENT = {
         "issf_linear",
         "issf_mlp",
         "deepssf",
-        "moveformer",
+        "moveformer_perstudy",
     ],
     "seed": 0,
 }

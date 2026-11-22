@@ -8,6 +8,6 @@ EXPERIMENT = {
         "alphaearth_only",
         "lite",
     ],
-    "methods": ["issf_linear", "issf_mlp", "deepssf", "moveformer"],
+    "methods": ["issf_linear", "issf_mlp", "deepssf", "moveformer_perstudy"],
     "seed": 0,
 }

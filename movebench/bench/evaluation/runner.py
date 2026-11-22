@@ -466,6 +466,12 @@ def _write_energy_rows(path: Path, rows: list[dict[str, object]]) -> None:
             writer.writerow(row)
 
 
+def _write_split_metrics(run_dir: Path, split_key: str, rows, summary) -> None:
+    out_dir = run_dir / "final_metrics" / split_key
+    _write_energy_rows(out_dir / "energy_by_step.csv.gz", rows)
+    _write_json(out_dir / "summary.json", summary)
+
+
 def evaluate_run_dir(
     run_dir: str | Path,
     *,
@@ -497,30 +503,44 @@ def evaluate_run_dir(
     run_payload = _load_json(run_dir / "resolved_run.json")
     run_key = str(run_payload.get("run_key") or run_dir.name)
     del mlflow_run_id
-    training_summary = _load_json(run_dir / "training_summary.json")
-    if str(training_summary.get("status", "")) != "completed":
-        raise ValueError(
-            f"Only completed runs can be evaluated, got status={training_summary.get('status')!r}"
-        )
+    training_summary = bench_run_state.load_training_summary(run_dir)
+    if not bench_run_state.metric_repair_eligible(run_dir, run_payload, training_summary):
+        raise ValueError(f"Run {run_key} is not eligible for metric evaluation")
 
     split_summaries: dict[str, dict[str, object]] = {}
-    for split_key in list(run_payload.get("evaluation_split_keys", [])):
-        pred_path = _prediction_path(run_dir, str(split_key))
-        if not pred_path.exists():
-            continue
-        pred_artifact = torch.load(pred_path, map_location="cpu")
-        rows, summary = _score_split(
-            split_key=str(split_key),
-            pred_artifact=dict(pred_artifact),
-            run_payload=run_payload,
-        )
-        out_dir = run_dir / "final_metrics" / str(split_key)
-        _write_energy_rows(out_dir / "energy_by_step.csv.gz", rows)
-        _write_json(out_dir / "summary.json", summary)
-        split_summaries[str(split_key)] = summary
-
-    if not split_summaries:
-        raise ValueError(f"No held-out prediction artifacts found under {run_dir / 'predictions'}")
+    with bench_run_state.active_run(run_dir):
+        try:
+            bench_run_state.write_training_summary(
+                run_dir, training_summary, status="running"
+            )
+            for split_key in run_payload["evaluation_split_keys"]:
+                pred_artifact = torch.load(
+                    _prediction_path(run_dir, split_key), map_location="cpu"
+                )
+                rows, summary = _score_split(
+                    split_key=split_key,
+                    pred_artifact=dict(pred_artifact),
+                    run_payload=run_payload,
+                )
+                _write_split_metrics(run_dir, split_key, rows, summary)
+                split_summaries[split_key] = summary
+                del pred_artifact, rows
+            bench_run_state.write_training_summary(
+                run_dir, training_summary, status="completed"
+            )
+        except (KeyboardInterrupt, bench_run_state.RunInterrupted) as exc:
+            bench_run_state.write_training_summary(
+                run_dir,
+                training_summary,
+                status="interrupted",
+                reason=bench_run_state.interrupt_reason(exc),
+            )
+            raise
+        except Exception as exc:
+            bench_run_state.write_training_summary(
+                run_dir, training_summary, status="failed", reason=str(exc)
+            )
+            raise
     return {
         "run_key": run_key,
         "run_dir": str(run_dir),

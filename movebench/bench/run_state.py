@@ -2,15 +2,120 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
+from contextlib import contextmanager
+from pathlib import Path
 
 import movebench.paths as paths
 
 _ACTIVE_RUN_FILENAME = "active_run.json"
 _RESULTS_ROOT = Path("results") / "bench" / "runs"
+
+
+class RunInterrupted(BaseException):
+    def __init__(self, reason: str) -> None:
+        super().__init__(str(reason))
+        self.reason = str(reason)
+
+
+def interrupt_reason(exc: BaseException) -> str:
+    return exc.reason if isinstance(exc, RunInterrupted) else exc.__class__.__name__
+
+
+def _install_interrupt_handlers() -> dict[int, object]:
+    previous: dict[int, object] = {}
+
+    def _handle_signal(signum, frame) -> None:
+        del frame
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = f"SIG{int(signum)}"
+        raise RunInterrupted(name)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[int(signum)] = signal.getsignal(signum)
+            signal.signal(signum, _handle_signal)
+        except (ValueError, OSError, RuntimeError):
+            continue
+    return previous
+
+
+@contextmanager
+def active_run(run_dir: Path):
+    write_active_run(run_dir)
+    previous = _install_interrupt_handlers()
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except (ValueError, OSError, RuntimeError):
+                continue
+        remove_active_run(run_dir)
+
+
+def load_training_summary(run_dir: Path) -> dict[str, object]:
+    try:
+        return _load_json(run_dir / "training_summary.json")
+    except (OSError, ValueError):
+        return {}
+
+
+def write_training_summary(
+    run_dir: Path,
+    summary: dict[str, object],
+    *,
+    status: str,
+    reason: str | None = None,
+) -> dict[str, object]:
+    summary = {**summary, "status": status}
+    summary.pop("reason", None)
+    if reason is not None:
+        summary["reason"] = reason
+    _write_json(run_dir / "training_summary.json", summary)
+    return summary
+
+
+def completion_error(
+    run_dir: Path, run_payload: dict[str, object], summary: dict[str, object]
+) -> str | None:
+    if summary.get("fit_completed") is not True:
+        return "missing successful fitting information"
+    if not run_payload.get("evaluates", True):
+        required = [run_dir / "checkpoint_best.pt"]
+    else:
+        required = [
+            path
+            for split in run_payload["evaluation_split_keys"]
+            for path in (
+                run_dir / "predictions" / f"{split}.pt",
+                run_dir / "final_metrics" / split / "energy_by_step.csv.gz",
+                run_dir / "final_metrics" / split / "summary.json",
+            )
+        ]
+    for path in required:
+        if not path.is_file():
+            return f"missing {path.relative_to(run_dir)}"
+    return None
+
+
+def metric_repair_eligible(
+    run_dir: Path, run_payload: dict[str, object], summary: dict[str, object]
+) -> bool:
+    splits = run_payload.get("evaluation_split_keys", [])
+    return bool(
+        run_payload.get("evaluates", True)
+        and splits
+        and summary.get("fit_completed") is True
+        and not active_run_is_live(run_dir)
+        and all((run_dir / "predictions" / f"{split}.pt").is_file() for split in splits)
+    )
 
 
 def _json_text(value: object) -> str:
@@ -210,17 +315,23 @@ def _terminal_record(
 ) -> dict[str, object]:
     tags = _payload_tags(run_key, run_payload)
     raw_status = str(training_summary.get("status", "")).strip()
-    if (
-        raw_status == "completed"
-        and run_payload.get("shared_training_run")
-        and not (run_dir / "checkpoint_best.pt").exists()
-    ):
+    reason = (
+        completion_error(run_dir, run_payload, training_summary)
+        if raw_status == "completed"
+        else None
+    )
+    if reason or raw_status in {"", "running"}:
         return _synthetic_record(
             run_key,
             run_dir=run_dir,
             run_payload=run_payload,
             status="failed",
-            failure_reason="missing checkpoint_best.pt",
+            failure_reason=reason or (
+                "stale interrupted run"
+                if raw_status == "running"
+                else "invalid training_summary.json"
+            ),
+            interrupted=raw_status == "running",
         )
     record_status = raw_status
     if raw_status == "interrupted":

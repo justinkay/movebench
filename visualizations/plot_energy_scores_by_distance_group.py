@@ -27,7 +27,6 @@ from movebench.trajectories import (
 )
 
 MAIN_RESULTS_EXPERIMENT = paths.repo_root() / "experiments" / "main_results.py"
-MOVEFORMER_FULL_EXPERIMENT = paths.repo_root() / "experiments" / "moveformer_full.py"
 DEFAULT_STUDIES_CSV = paths.repo_root() / "MoveBench Studies V2.csv"
 DEFAULT_TRAITS_CSV = (
     paths.repo_root().parent
@@ -50,7 +49,7 @@ PLOT_METHODS = [
     "issf_mlp",
     "deepssf",
 ]
-OPTIONAL_PLOT_METHODS = ["moveformer-full"]
+OPTIONAL_PLOT_METHODS = ["moveformer_full_predictonly"]
 SPLIT_ORDER = ["test_temporal", "test_individual"]
 SPLIT_LABELS = {
     "test_temporal": "Temporal Split",
@@ -83,8 +82,8 @@ METHOD_COLORS = {
     "issf_linear": "#c1121f",
     "issf_mlp": "#f77f00",
     "deepssf": "#003049",
-    "moveformer": "#669bbc",
-    "moveformer-full": "#669bbc",# "#7b2cbf",
+    "moveformer_perstudy": "#669bbc",
+    "moveformer_full_predictonly": "#669bbc",# "#7b2cbf",
 }
 STUDY_ID_OVERRIDES = {
     (
@@ -121,7 +120,8 @@ DETAIL_GROUP_OVERRIDES = {
 def _method_label(method: str) -> str:
     return (
         str(method)
-        .replace("moveformer-full", "moveformer")
+        .replace("moveformer_full_predictonly", "moveformer")
+        .replace("moveformer_perstudy", "moveformer")
         .replace("baseline", "")
         .replace("_", " ")
         .replace("randomwalk", "crw")
@@ -291,14 +291,6 @@ def load_plot_results() -> pd.DataFrame:
     results = bench_results.load_results(
         "main_results",
         experiment_module_path=MAIN_RESULTS_EXPERIMENT,
-    )
-    full_results = bench_results.load_results(
-        "moveformer_full",
-        experiment_module_path=MOVEFORMER_FULL_EXPERIMENT,
-    )
-    results = pd.concat(
-        [results, full_results],
-        ignore_index=True,
     )
     return results[
         results["method"].isin([NORMALIZE_BY, *PLOT_METHODS, *OPTIONAL_PLOT_METHODS])

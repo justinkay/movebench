@@ -22,7 +22,7 @@ EXPERIMENT_DEFAULTS: dict[str, object] = {
     "studies": "all",
     "timescales": ["1h", "12h", "1d", "7d"],
     "covariate_sets": ["all"],
-    "methods": ["issf_linear", "issf_mlp", "deepssf", "moveformer"],
+    "methods": ["issf_linear", "issf_mlp", "deepssf", "moveformer_perstudy"],
 }
 
 TIMESCALES: dict[str, dict[str, object]] = {
@@ -125,7 +125,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": False,
         "artifact_requirement": "points",
         "requires_normalization_stats": False,
-        "executor": "movebench.bench.executors.baselines:run_nomove",
+        "implementation": "movebench.models.baselines:NoMove",
+        "fit_reuse": "rebuild",
+        "prediction_kind": "deterministic",
+        "gpus": 0,
         "model": {},
         "hparams": {},
     },
@@ -134,7 +137,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": False,
         "artifact_requirement": "points",
         "requires_normalization_stats": False,
-        "executor": "movebench.bench.executors.baselines:run_constvel",
+        "implementation": "movebench.models.baselines:ConstantVelocity",
+        "fit_reuse": "rebuild",
+        "prediction_kind": "deterministic",
+        "gpus": 0,
         "model": {},
         "hparams": {},
     },
@@ -143,7 +149,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": False,
         "artifact_requirement": "points",
         "requires_normalization_stats": False,
-        "executor": "movebench.bench.executors.baselines:run_randomwalk",
+        "implementation": "movebench.models.baselines:RandomWalk",
+        "fit_reuse": "rebuild",
+        "prediction_kind": "grid",
+        "gpus": 0,
         "model": {},
         "hparams": {},
     },
@@ -152,7 +161,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": True,
         "artifact_requirement": "points",
         "requires_normalization_stats": True,
-        "executor": "movebench.bench.executors.issf:run_linear",
+        "implementation": "movebench.models.ssf:linear_method",
+        "fit_reuse": "checkpoint",
+        "prediction_kind": "grid",
+        "gpus": 0,
         "model": {},
         "hparams": {
             "lr": 0.03,
@@ -171,7 +183,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": True,
         "artifact_requirement": "points",
         "requires_normalization_stats": True,
-        "executor": "movebench.bench.executors.issf:run_mlp",
+        "implementation": "movebench.models.ssf:mlp_method",
+        "fit_reuse": "checkpoint",
+        "prediction_kind": "grid",
+        "gpus": 0,
         "model": {
             "hidden_dims": [128, 128],
             "dropout": 0.6,
@@ -193,7 +208,10 @@ METHODS: dict[str, dict[str, object]] = {
         "trains": True,
         "artifact_requirement": "deepssf_cache",
         "requires_normalization_stats": False,
-        "executor": "movebench.bench.executors.deepssf:run",
+        "implementation": "movebench.models.deepssf:DeepSSFMethod",
+        "fit_reuse": "checkpoint",
+        "prediction_kind": "grid",
+        "gpus": 1,
         "model": {
             "image_dim": 101,
             "output_channels": 4,
@@ -213,13 +231,16 @@ METHODS: dict[str, dict[str, object]] = {
             "max_eval_items": 2500, # to keep validation fast during training loop
         },
     },
-    "moveformer": {
-        "key": "moveformer",
+    "moveformer_perstudy": {
+        "key": "moveformer_perstudy",
         "trains": True,
         "artifact_requirement": "points",
         "sequence_context": True,
         "requires_normalization_stats": True,
-        "executor": "movebench.bench.executors.moveformer:run",
+        "implementation": "movebench.models.moveformer:MoveFormerMethod",
+        "fit_reuse": "checkpoint",
+        "prediction_kind": "grid",
+        "gpus": 1,
         "model": {
             "depth": 6,
             "heads": 8,
@@ -240,12 +261,13 @@ METHODS: dict[str, dict[str, object]] = {
     },
 }
 
-METHODS["moveformer-full-trainonly"] = {
-    **METHODS["moveformer"],
-    "key": "moveformer-full-trainonly",
+METHODS["moveformer_full_trainonly"] = {
+    **METHODS["moveformer_perstudy"],
+    "key": "moveformer_full_trainonly",
     "run_scope": "shared",
+    "prediction_kind": None,
     "evaluates": False,
-    "executor": "movebench.bench.executors.moveformer:train_full",
+    "implementation": "movebench.models.moveformer:SharedMoveFormerTrainer",
     "hparams": {
         "lr": 0.00005,
         "weight_decay": 0.0,
@@ -261,14 +283,19 @@ METHODS["moveformer-full-trainonly"] = {
         "candidate_subset_size": 16,
     },
 }
-METHODS["moveformer-full"] = {
-    **METHODS["moveformer-full-trainonly"],
-    "key": "moveformer-full",
+METHODS["moveformer_full_predictonly"] = {
+    **{
+        key: value
+        for key, value in METHODS["moveformer_full_trainonly"].items()
+        if key != "fit_reuse"
+    },
+    "key": "moveformer_full_predictonly",
     "trains": False,
     "run_scope": "study",
     "evaluates": True,
-    "shared_training_method": "moveformer-full-trainonly",
-    "executor": "movebench.bench.executors.moveformer:score_full",
+    "shared_training_method": "moveformer_full_trainonly",
+    "prediction_kind": "grid",
+    "implementation": "movebench.models.moveformer:SharedMoveFormerScorer",
 }
 
 METHODS["issf_linear_time"] = {

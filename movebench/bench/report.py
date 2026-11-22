@@ -27,8 +27,8 @@ METHOD_COLORS = {
     "issf_linear": "#c1121f",
     "issf_mlp": "#f77f00",
     "deepssf": "#003049",
-    "moveformer": "#2a9d8f",
-    "moveformer-full": "#669bbc",
+    "moveformer_perstudy": "#2a9d8f",
+    "moveformer_full_predictonly": "#669bbc",
 }
 COVARIATE_COLORS = {
     "all": "#003049",
@@ -374,10 +374,13 @@ def _final_summaries(
     missing: list[str] = []
     for split_key in split_keys:
         path = _final_summary_path(run_key, split_key)
-        if not path.exists():
+        try:
+            summaries[str(split_key)] = _load_json(path)
+        except (OSError, ValueError, TypeError):
             missing.append(str(split_key))
             continue
-        summaries[str(split_key)] = _load_json(path)
+        if not (path.parent / "energy_by_step.csv.gz").is_file():
+            missing.append(str(split_key))
     return summaries, missing
 
 
@@ -425,13 +428,16 @@ def _refresh_final_metrics(
     errors: list[dict[str, object]] = []
     for run_key, planned_run in planned_runs.items():
         latest = dict(latest_run_records.get(run_key, {}))
-        if str(latest.get("status", "")) != "completed":
+        run_dir = bench_run_state.run_dir(run_key)
+        if not bench_run_state.metric_repair_eligible(
+            run_dir, planned_run, bench_run_state.load_training_summary(run_dir)
+        ):
             continue
         split_keys = [
             str(split_key) for split_key in planned_run.get("evaluation_split_keys", [])
         ]
         _summaries, missing_splits = _final_summaries(run_key, split_keys)
-        if (not refresh_metrics) and not missing_splits:
+        if not refresh_metrics and not missing_splits and latest.get("status") == "completed":
             continue
         try:
             evaluation_runner.evaluate_run(run_key)
@@ -444,7 +450,7 @@ def _refresh_final_metrics(
                     "reason": str(exc),
                 }
             )
-    if refreshed:
+    if refreshed or errors:
         latest_run_records = bench_run_state.search_latest_run_records_by_key(
             list(planned_runs.keys())
         )

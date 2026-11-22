@@ -98,32 +98,25 @@ class MethodInterfaceTest(unittest.TestCase):
         replay.assert_called_once()
 
     def test_runner_owns_saved_predictions_and_reuses_valid_files(self):
-        train = DataSplit("train", {}, {})
         validation = DataSplit("test_temporal", {}, {})
-        payload = {"seed": 0, "method_model": {}, "method_hparams": {},
-                   "early_stop_split_key": "test_temporal",
-                   "evaluation_split_keys": ["test_temporal"]}
-        method = Mock()
-        method.training_summary_ = {"train_steps": 3, "best_step": 2}
         prediction = {"prediction_kind": "grid", "point_id_start": torch.tensor([8]),
                       "scores": torch.zeros(1, 2, 2)}
+        method = Mock()
         method.predict.return_value = prediction
-        constructor = Mock(return_value=method)
         with tempfile.TemporaryDirectory() as directory:
-            kwargs = dict(run_payload=payload, run_dir=Path(directory), tracker=object(),
-                          resolved_artifacts={"splits": {"train": train, "test_temporal": validation}})
-            summary = run._run_method(constructor, **kwargs)
+            kwargs = dict(run_payload={}, run_dir=Path(directory), prediction_kind="grid")
+            with patch.object(run.evaluation_runner, "_score_split", return_value=([], {})) as score:
+                run._predict_and_score(method, validation, **kwargs)
+                run._predict_and_score(method, validation, **kwargs)
+                self.assertEqual(score.call_count, 2)
             path = Path(directory) / "predictions/test_temporal.pt"
             torch.testing.assert_close(torch.load(path)["scores"], prediction["scores"])
-            with patch.object(run.evaluation_runner, "_score_split") as score:
-                self.assertEqual(run._run_method(constructor, **kwargs), summary)
-                score.assert_called_once()
             method.predict.assert_called_once_with(validation)
             with patch.object(run.evaluation_runner, "_score_split", side_effect=ValueError("invalid")):
-                run._run_method(constructor, **kwargs)
+                with self.assertRaisesRegex(ValueError, "invalid"):
+                    run._predict_and_score(method, validation, **kwargs)
             self.assertEqual(method.predict.call_count, 2)
-            self.assertEqual(method.fit.call_count, 3)
-            self.assertFalse((Path(directory) / "training_summary.json").exists())
+            method.fit.assert_not_called()
 
 
 if __name__ == "__main__":

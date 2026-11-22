@@ -20,6 +20,7 @@ STATUS_KEYS = (
 )
 KNOWN_RUN_STATUSES = {"completed", "running", "failed", "blocked"}
 EXPERIMENT_SELECTION_ALIASES = {
+    "ablation": "ablation",
     "main": "main_results",
     "main_results": "main_results",
     "main-results": "main_results",
@@ -34,6 +35,7 @@ EXPERIMENT_SELECTION_ALIASES = {
     "smoke-one-study": "smoke_one_study",
 }
 EXPERIMENT_ORDER = [
+    "ablation",
     "main_results",
     "covariate_comparison",
     "baselines",
@@ -47,8 +49,8 @@ METHOD_ORDER = [
     "issf_linear",
     "issf_mlp",
     "deepssf",
-    "moveformer",
-    "moveformer-full",
+    "moveformer_perstudy",
+    "moveformer_full_predictonly",
 ]
 TOP_BLOCKER_LIMIT = 5
 SMALL_FAILED_DOWNLOAD_THRESHOLD = 25

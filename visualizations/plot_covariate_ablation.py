@@ -30,7 +30,7 @@ DEFAULT_OUTPUT_STEM = (
 )
 NORMALIZE_BY = "baseline_nomove"
 RANDOM_WALK = "baseline_randomwalk"
-PLOT_METHODS = ["issf_linear", "issf_mlp", "deepssf", "moveformer"]
+PLOT_METHODS = ["issf_linear", "issf_mlp", "deepssf", "moveformer_perstudy"]
 AVERAGE_METHOD = "all_average"
 SPLIT_ORDER = ["test_temporal", "test_individual"]
 SPLIT_LABELS = {
@@ -61,7 +61,7 @@ def _method_label(method: str) -> str:
         "issf_linear": "iSSF Linear",
         "issf_mlp": "iSSF MLP",
         "deepssf": "deepSSF",
-        "moveformer": "MoveFormer",
+        "moveformer_perstudy": "MoveFormer",
         AVERAGE_METHOD: "All",
     }[method]
 

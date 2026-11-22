@@ -10,7 +10,7 @@ EXPERIMENT = {
         "issf_linear",
         "issf_mlp",
         "deepssf",
-        "moveformer",
+        "moveformer_full_predictonly",
     ],
     "deepssf_data": "gpu",
     "seed": 0,

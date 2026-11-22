@@ -920,7 +920,10 @@ def _resolve_shared_checkpoint(
             "status": "blocked",
             "reason": f"shared training run {run_key} has an incompatible signature",
         }
-    if summary.get("status") != "completed":
+    if (
+        bench_run_state.active_run_is_live(run_dir)
+        or summary.get("status") != "completed"
+    ):
         return {
             "status": "blocked",
             "reason": f"shared training run {run_key} is not completed",
@@ -930,6 +933,9 @@ def _resolve_shared_checkpoint(
             "status": "blocked",
             "reason": f"shared training run {run_key} is missing checkpoint_best.pt",
         }
+    error = bench_run_state.completion_error(run_dir, training_payload, summary)
+    if error:
+        return {"status": "blocked", "reason": f"shared training run {run_key}: {error}"}
     return {
         "status": "resolved",
         "shared_checkpoint_path": checkpoint_path,

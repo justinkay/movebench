@@ -30,7 +30,7 @@ class MethodSweepTest(unittest.TestCase):
         expected = {
             "issf_linear.py": ("issf_linear", 6),
             "issf_mlp.py": ("issf_mlp", 12),
-            "moveformer.py": ("moveformer", 8),
+            "moveformer.py": ("moveformer_perstudy", 8),
         }
         checked_in = set(bench_planning.checked_in_experiment_module_paths())
         for filename, (method, count) in expected.items():
@@ -92,7 +92,7 @@ class MethodSweepTest(unittest.TestCase):
         moveformer = {
             variant["key"]: variant
             for variant in self._load("moveformer.py")["method_variants"][
-                "moveformer"
+                "moveformer_perstudy"
             ]
         }
         self.assertEqual(
@@ -145,8 +145,8 @@ class MethodSweepTest(unittest.TestCase):
             variant["key"]: variant
             for variant in bench_planning._expand_method_variants(
                 moveformer,
-                "moveformer",
-                bench_config.METHODS["moveformer"],
+                "moveformer_perstudy",
+                bench_config.METHODS["moveformer_perstudy"],
             )
         }
         self.assertEqual(
@@ -161,13 +161,13 @@ class MethodSweepTest(unittest.TestCase):
         self.assertEqual(variants["ctx64"]["model"], variants["current"]["model"])
         self.assertEqual(variants["ctx64"]["hparams"]["max_len"], 64)
 
-        with self.assertRaisesRegex(ValueError, "Unknown moveformer model"):
+        with self.assertRaisesRegex(ValueError, "Unknown moveformer_perstudy model"):
             bench_config.normalize_experiment(
                 {
                     "name": "bad_moveformer_variant",
-                    "methods": ["moveformer"],
+                    "methods": ["moveformer_perstudy"],
                     "method_variants": {
-                        "moveformer": [
+                        "moveformer_perstudy": [
                             {"key": "bad", "model": {"width": 128}}
                         ]
                     },
@@ -274,10 +274,10 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             def __len__(self):
                 return 1
 
-        method_hparams = dict(bench_config.METHODS["moveformer"]["hparams"])
+        method_hparams = dict(bench_config.METHODS["moveformer_perstudy"]["hparams"])
         method_hparams["max_len"] = 64
         run_payload = {
-            "method": "moveformer",
+            "method": "moveformer_perstudy",
             "method_model": {
                 "depth": 2,
                 "heads": 4,

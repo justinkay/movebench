@@ -5,7 +5,6 @@ import hashlib
 import importlib
 import json
 import shutil
-import signal
 from pathlib import Path
 
 import torch
@@ -18,83 +17,53 @@ import movebench.bench.report as bench_report
 import movebench.bench.run_state as bench_run_state
 import movebench.bench.summary as bench_summary
 import movebench.paths as paths
-from movebench.training import RestorationReference, RunTracker, seed_everything
-
-_SUPPORTED_METHODS = {
-    str(method_key)
-    for method_key, method_cfg in bench_config.METHODS.items()
-    if bool(method_cfg.get("executor"))
-}
-
-
-class _RunInterrupted(BaseException):
-    def __init__(self, reason: str) -> None:
-        super().__init__(str(reason))
-        self.reason = str(reason)
+from movebench.training import RestorationReference, seed_everything
 
 
 def _log_progress(message: str) -> None:
     print(str(message), flush=True)
 
 
-def _load_executor(executor_ref: str):
-    module_name, func_name = str(executor_ref).split(":", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, func_name)
+def _load_implementation(reference: str):
+    module_name, name = reference.split(":", 1)
+    return getattr(importlib.import_module(module_name), name)
 
 
-def _run_method(
-    implementation,
-    *,
-    run_payload,
-    resolved_artifacts,
-    run_dir,
-    tracker,
-    restore_from=None,
-    reuse_predictions=True,
-    prediction_kind=None,
-):
-    """Run fit/predict beneath the existing executor registrations."""
-    method = implementation(
-        model_config=run_payload.get("method_model", {}),
-        hparams=run_payload.get("method_hparams", {}),
-        seed=run_payload["seed"],
-    )
-    if run_payload.get("shared_training_run"):
-        train, validation = resolved_artifacts["train"], None
-    else:
-        splits = resolved_artifacts["splits"]
-        train = splits["train"]
-        validation = splits.get(run_payload["early_stop_split_key"])
-    method.fit(train, validation, work_dir=Path(run_dir), restore_from=restore_from)
-    summary = dict(getattr(method, "training_summary_", {}))
-    summary.setdefault("train_steps", 0)
-    summary.setdefault("early_stop_split_key", run_payload["early_stop_split_key"])
-    if bool(run_payload.get("evaluates", True)):
-        pred_dir = Path(run_dir) / "predictions"
-        pred_dir.mkdir(parents=True, exist_ok=True)
-        for split_key in run_payload["evaluation_split_keys"]:
-            pred_path = pred_dir / f"{split_key}.pt"
-            if reuse_predictions and pred_path.exists():
-                try:
-                    payload = dict(torch.load(pred_path, map_location="cpu"))
-                    if (
-                        prediction_kind is not None
-                        and payload.get("prediction_kind") != prediction_kind
-                    ):
-                        raise ValueError(f"Expected {prediction_kind} predictions")
-                    evaluation_runner._score_split(
-                        split_key=str(split_key),
-                        pred_artifact=payload,
-                        run_payload=run_payload,
-                    )
-                    continue
-                except Exception:
-                    pass
-                finally:
-                    payload = None
-            torch.save(method.predict(splits[str(split_key)]), pred_path)
-    return {**summary, "status": "completed"}
+def _predict_and_score(method, data, *, run_payload, run_dir, prediction_kind):
+    split_key = data.split_key
+    pred_path = run_dir / "predictions" / f"{split_key}.pt"
+    payload = None
+    scored = None
+    if pred_path.exists():
+        try:
+            payload = dict(torch.load(pred_path, map_location="cpu"))
+            if (
+                prediction_kind is not None
+                and payload.get("prediction_kind") != prediction_kind
+            ):
+                raise ValueError(f"Expected {prediction_kind} predictions")
+            scored = evaluation_runner._score_split(
+                split_key=split_key,
+                pred_artifact=payload,
+                run_payload=run_payload,
+            )
+        except Exception:
+            payload = None
+    if scored is None:
+        payload = method.predict(data)
+        pred_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, pred_path)
+        if (
+            prediction_kind is not None
+            and payload.get("prediction_kind") != prediction_kind
+        ):
+            raise ValueError(f"Expected {prediction_kind} predictions")
+        scored = evaluation_runner._score_split(
+            split_key=split_key,
+            pred_artifact=payload,
+            run_payload=run_payload,
+        )
+    evaluation_runner._write_split_metrics(run_dir, split_key, *scored)
 
 
 def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]) -> None:
@@ -137,40 +106,6 @@ def _interrupted_summary(
         "train_steps": _history_steps_completed(run_dir),
         "early_stop_split_key": str(run_payload["early_stop_split_key"]),
     }
-
-
-def _interrupt_reason(exc: BaseException) -> str:
-    if isinstance(exc, _RunInterrupted):
-        return str(exc.reason)
-    return exc.__class__.__name__
-
-
-def _install_interrupt_handlers() -> dict[int, object]:
-    previous: dict[int, object] = {}
-
-    def _handle_signal(signum, frame) -> None:
-        del frame
-        try:
-            name = signal.Signals(signum).name
-        except ValueError:
-            name = f"SIG{int(signum)}"
-        raise _RunInterrupted(name)
-
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            previous[int(signum)] = signal.getsignal(signum)
-            signal.signal(signum, _handle_signal)
-        except (ValueError, OSError, RuntimeError):
-            continue
-    return previous
-
-
-def _restore_interrupt_handlers(previous: dict[int, object]) -> None:
-    for signum, handler in previous.items():
-        try:
-            signal.signal(signum, handler)
-        except (ValueError, OSError, RuntimeError):
-            continue
 
 
 def _manifest_slug(name: str) -> str:
@@ -224,8 +159,7 @@ def _clear_prediction_outputs(run_dir: Path) -> None:
         shutil.rmtree(final_metrics_dir)
 
 
-def _clear_runtime_outputs(run_dir: Path) -> None:
-    _clear_prediction_outputs(run_dir)
+def _clear_fitted_state(run_dir: Path) -> None:
     bench_run_state.remove_active_run(run_dir)
     for path in (run_dir / "history.json", run_dir / "checkpoint_best.pt"):
         if path.exists():
@@ -304,14 +238,16 @@ def _execute_run(
         if final_metrics_dir.exists():
             shutil.rmtree(final_metrics_dir)
     else:
-        _clear_runtime_outputs(run_dir)
+        _clear_prediction_outputs(run_dir)
+        _clear_fitted_state(run_dir)
     _write_json(resolved_run_path, canonical_payload)
 
-    if str(run_payload["method"]) not in _SUPPORTED_METHODS:
+    method_config = bench_config.METHODS.get(str(run_payload["method"]), {})
+    if not method_config.get("implementation"):
         return _write_blocked_run(
             run_payload,
             run_dir=run_dir,
-            reason=f"executor not implemented for method {run_payload['method']}",
+            reason=f"implementation not available for method {run_payload['method']}",
         )
 
     resolved = bench_artifacts._resolve_artifacts_for_run(run_payload)
@@ -323,76 +259,89 @@ def _execute_run(
         )
 
     restore_from: RestorationReference | None = None
-    trains = bool(bench_config.METHODS[str(run_payload["method"])]["trains"])
     if "shared_checkpoint_path" in resolved:
         restore_from = {
             "checkpoint_path": resolved["shared_checkpoint_path"],
             "training_run_key": str(run_payload["shared_checkpoint_run_key"]),
             "training_signature": str(run_payload["shared_training_signature"]),
         }
-    elif trains:
+    elif method_config.get("fit_reuse") == "checkpoint":
         if resume_run and checkpoint_path.exists():
             restore_from = {
                 "checkpoint_path": checkpoint_path,
                 "training_run_key": (
                     str(run_payload["run_key"])
-                    if run_payload.get("shared_training_run") else None
+                    if run_payload.get("shared_training_run")
+                    else None
                 ),
                 "training_signature": run_payload.get("shared_training_signature"),
             }
         else:
             if run_payload.get("shared_training_run") and not replacing_shared:
                 _clear_shared_dependents(str(run_payload["run_key"]))
-            _clear_runtime_outputs(run_dir)
+            _clear_prediction_outputs(run_dir)
+            _clear_fitted_state(run_dir)
 
-    _log_progress(f"{run_payload['run_key']}: starting executor {run_payload['method']}")
-    tracker = RunTracker(run_dir)
-    bench_run_state.write_active_run(run_dir)
-    previous_handlers = _install_interrupt_handlers()
-    try:
+    elif method_config.get("fit_reuse") != "rebuild":
+        _clear_prediction_outputs(run_dir)
+
+    _log_progress(f"{run_payload['run_key']}: starting method {run_payload['method']}")
+    summary = {
+        "train_steps": 0,
+        "early_stop_split_key": run_payload["early_stop_split_key"],
+    }
+    with bench_run_state.active_run(run_dir):
         try:
             seed_everything(int(run_payload["seed"]))
-            executor = _load_executor(str(run_payload["executor"]))
-            executor_kwargs = {}
-            if trains or "shared_checkpoint_path" in resolved:
-                executor_kwargs["restore_from"] = restore_from
-            summary = dict(
-                executor(
-                    run_payload=run_payload,
-                    resolved_artifacts=resolved,
-                    run_dir=run_dir,
-                    tracker=tracker,
-                    **executor_kwargs,
-                )
+            implementation = _load_implementation(str(run_payload["implementation"]))
+            method = implementation(
+                model_config=run_payload.get("method_model", {}),
+                hparams=run_payload.get("method_hparams", {}),
+                seed=run_payload["seed"],
             )
-            summary.setdefault("status", "completed")
-            if str(summary["status"]) == "completed":
-                _write_json(run_dir / "training_summary.json", summary)
-                if bool(run_payload.get("evaluates", True)):
-                    _log_progress(f"{run_payload['run_key']}: starting evaluation")
-                    evaluation_runner.evaluate_run_dir(run_dir)
-                    _log_progress(f"{run_payload['run_key']}: finished evaluation")
-            _write_json(run_dir / "training_summary.json", summary)
-            return summary
-        except (KeyboardInterrupt, _RunInterrupted) as exc:
-            reason = _interrupt_reason(exc)
+            if run_payload.get("shared_training_run"):
+                train, validation = resolved["train"], None
+            else:
+                splits = resolved["splits"]
+                train = splits["train"]
+                validation = splits.get(run_payload["early_stop_split_key"])
+            method.fit(train, validation, work_dir=run_dir, restore_from=restore_from)
+            summary.update(dict(getattr(method, "training_summary_", {})))
+            summary["fit_completed"] = True
+            summary = bench_run_state.write_training_summary(
+                run_dir, summary, status="running"
+            )
+            if run_payload.get("evaluates", True):
+                for split_key in run_payload["evaluation_split_keys"]:
+                    _predict_and_score(
+                        method,
+                        splits[split_key],
+                        run_payload=run_payload,
+                        run_dir=run_dir,
+                        prediction_kind=method_config.get("prediction_kind"),
+                    )
+            error = bench_run_state.completion_error(run_dir, run_payload, summary)
+            if error:
+                raise ValueError(error)
+            return bench_run_state.write_training_summary(
+                run_dir, summary, status="completed"
+            )
+        except (KeyboardInterrupt, bench_run_state.RunInterrupted) as exc:
+            reason = bench_run_state.interrupt_reason(exc)
             _log_progress(f"{run_payload['run_key']}: interrupted: {reason}")
-            summary = _interrupted_summary(run_payload, run_dir=run_dir, reason=reason)
-            _write_json(run_dir / "training_summary.json", summary)
+            if not summary.get("fit_completed"):
+                summary = _interrupted_summary(
+                    run_payload, run_dir=run_dir, reason=reason
+                )
+            bench_run_state.write_training_summary(
+                run_dir, summary, status="interrupted", reason=reason
+            )
             raise
         except Exception as exc:
             _log_progress(f"{run_payload['run_key']}: failed: {exc}")
-            summary = {
-                "status": "failed",
-                "reason": str(exc),
-                "train_steps": 0,
-                "early_stop_split_key": str(run_payload["early_stop_split_key"]),
-            }
-            _write_json(run_dir / "training_summary.json", summary)
-            return summary
-    finally:
-        _restore_interrupt_handlers(previous_handlers)
-        bench_run_state.remove_active_run(run_dir)
+            return bench_run_state.write_training_summary(
+                run_dir, summary, status="failed", reason=str(exc)
+            )
 
 
 def execute_run_payload(
@@ -499,7 +448,7 @@ def run_experiment(
     )
 
     executed_runs = 0
-    executor_blocked_runs = 0
+    method_blocked_runs = 0
     failed_runs = 0
     pending_runs = list(resolved["pending_runs"])
     total_pending_runs = len(pending_runs)
@@ -518,7 +467,7 @@ def run_experiment(
         executed_runs += 1
         status = str(summary.get("status", ""))
         if status == "blocked":
-            executor_blocked_runs += 1
+            method_blocked_runs += 1
         elif status == "failed":
             failed_runs += 1
         _log_progress(
@@ -529,7 +478,7 @@ def run_experiment(
         "planned_runs": int(resolved["counts"]["planned_runs"]),
         "executed_runs": executed_runs,
         "skipped_runs": skipped_runs,
-        "blocked_runs": planner_blocked_runs + executor_blocked_runs,
+        "blocked_runs": planner_blocked_runs + method_blocked_runs,
         "failed_runs": failed_runs,
     }
 

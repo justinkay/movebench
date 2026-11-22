@@ -1,8 +1,8 @@
 EXPERIMENT = {
-    "name": "moveformer_full_trainonly",
+    "name": "main_results",
     "studies": "all",
     "timescales": ["1h", "12h", "1d", "7d"],
     "covariate_sets": ["alphaearth_only"],
-    "methods": ["moveformer-full-trainonly"],
+    "methods": ["moveformer_full_trainonly"],
     "seed": 0,
 }

@@ -158,11 +158,11 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
             )
 
         _all_experiment, all_runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=available,
         )
         _mini_experiment, mini_runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=[mini_study],
         )
         self.assertEqual(all_runs[0]["shared_study_ids"], sorted(available))
@@ -171,7 +171,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_shared_training_groups_only_compatible_studies(self):
         _experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["land-a", "land-b", "marine"],
             bands_by_study={
                 "land-a": ["alphaearth.A00"],
@@ -186,7 +186,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_resolver_accepts_planned_cohort_without_zero_step_studies(self):
         _experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["a", "b"],
         )
         self.assertEqual(len(runs), 1)
@@ -222,7 +222,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
             return {"status": "resolved"}
 
         experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["ready", "blocked"],
             resolve_artifacts=resolve,
         )
@@ -231,7 +231,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_shared_training_does_not_drop_readiness_blocked_study(self):
         experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["ready", "blocked"],
             readiness_by_study={
                 "ready": _readiness(),
@@ -243,7 +243,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_shared_training_records_zero_step_study_without_blocking_group(self):
         experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["ready", "empty"],
             readiness_by_study={
                 "ready": _readiness(),
@@ -266,7 +266,7 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_shared_training_keeps_train_ready_study_without_heldout_store(self):
         experiment, runs = self._expand(
-            method="moveformer-full-trainonly",
+            method="moveformer_full_trainonly",
             studies=["with-eval", "train-only"],
             readiness_by_study={
                 "with-eval": _readiness(),
@@ -282,13 +282,13 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
 
     def test_scoring_cohort_defaults_to_selection_and_can_be_explicit(self):
         _experiment, mini_runs = self._expand(
-            method="moveformer-full",
+            method="moveformer_full_predictonly",
             studies=["mini"],
         )
         self.assertEqual(mini_runs[0]["shared_training_study_ids"], ["mini"])
 
         _experiment, all_runs = self._expand(
-            method="moveformer-full",
+            method="moveformer_full_predictonly",
             studies=["mini"],
             shared_training_studies="all",
             training_studies=["mini", "other"],
@@ -312,10 +312,10 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
                 run_dir = root / "results" / "bench" / "runs" / "train-key"
                 run_dir.mkdir(parents=True)
                 (run_dir / "resolved_run.json").write_text(
-                    json.dumps({"shared_training_signature": "signature"})
+                    json.dumps({"shared_training_signature": "signature", "evaluates": False})
                 )
                 (run_dir / "training_summary.json").write_text(
-                    json.dumps({"status": "completed"})
+                    json.dumps({"status": "completed", "fit_completed": True})
                 )
                 self.assertEqual(
                     bench_artifacts._resolve_shared_checkpoint(payload)["status"],
