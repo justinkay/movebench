@@ -11,7 +11,7 @@ import torch
 
 from movebench.bench import artifacts, planning, run, run_state
 from movebench.datasets import DataSplit
-from movebench.training import RunTracker, TrainerConfig, fit_or_restore, save_checkpoint
+from movebench.training import TrainerConfig, fit_or_restore, save_checkpoint
 
 
 class FitCleanupTest(unittest.TestCase):
@@ -64,16 +64,16 @@ class FitCleanupTest(unittest.TestCase):
     def execute(self, payload, fit_callback, *, resume=True):
         def fit(train, validation, *, work_dir, restore_from=None):
             method.training_summary_ = fit_callback(
-                run_dir=work_dir, restore_from=restore_from, tracker=RunTracker(work_dir),
+                run_dir=work_dir, restore_from=restore_from,
             )
             return method
         method = SimpleNamespace(fit=fit)
         with patch.object(run, "_load_implementation", return_value=lambda **kwargs: method):
             return run.execute_run_payload(payload, resume=resume)
 
-    def restore(self, *, restore_from, run_dir, tracker, **kwargs):
+    def restore(self, *, restore_from, run_dir, **kwargs):
         result = fit_or_restore(
-            SimpleNamespace(model=self.model), TrainerConfig(3, 1, 2), tracker,
+            SimpleNamespace(model=self.model), TrainerConfig(3, 1, 2),
             work_dir=run_dir, restore_from=restore_from,
         )
         return {"status": "completed", "train_steps": result["completed_steps"]}

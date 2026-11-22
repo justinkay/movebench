@@ -315,7 +315,7 @@ Each object tells you which split it describes (`split_key`), the study and envi
 | Movement steps from the training data | `points.training_steps(train)` |
 | Features at possible next locations, including the observed location | `ssf.candidate_dataset(data)` and `candidate_loader(...)` |
 | Environmental features on a grid around each observation | `chips.grid_dataset(data, ...)` |
-| Prepared images for deepSSF | `rasters.prepare_rasters(train, ...)` |
+| Prepared images for deepSSF | `rasters.PreparedRasters(train, ...)` |
 | Sequences of observations for MoveFormer | `moveformer.sequence_dataset(data, ...)` and `sequence_loader(...)` |
 
 The candidate example shows how to use these helpers together. During training, the candidate loader reads and normalizes environmental features, then calls `make_model_batch` to assemble the model's inputs. For each observation, the observed next location is the last candidate. During prediction, `build_ssf_grid_artifact` uses the same `make_model_batch` function for the grid cells. This keeps the movement, time, and individual features consistent between training and prediction.
@@ -345,9 +345,8 @@ Add an entry to `METHODS` in [bench/config.py](movebench/bench/config.py). [meth
 - `model` and `hparams`: the default model and training settings passed to your constructor.
 - `artifact_requirement`: the kind of prepared data your method needs. Use `points` for the point-based examples.
 - `requires_normalization_stats`: whether the prepared data must include training means and standard deviations.
-- `trains`: whether the method performs training.
 
-You can also set `prediction_kind` to the format your method returns and `gpus` to the number of GPUs a Slurm job should request. Your method must still choose its own PyTorch device. Reports will include a newly registered method without changes to the plotting code.
+You can also set `gpus` to the number of GPUs a Slurm job should request. Your method must still choose its own PyTorch device. Reports will include a newly registered method without changes to the plotting code.
 
 ### Save and load trained models
 
@@ -359,7 +358,7 @@ Once your method can load a saved model this way, add `fit_reuse="checkpoint"` t
 
 To include training results in the run summary, set `self.training_summary_` in `fit`. The candidate example shows the fields for step counts and training and validation scores. MoveBench saves this information before prediction, so a later prediction failure does not erase the training record.
 
-You can write your own training loop, use another library, or use MoveBench's `fit_or_restore` helper. For the helper, supply an object that holds the model and defines how to perform one training step, evaluate it, and save and load its state. `TrainerConfig` sets the training limit and when to evaluate; `RunTracker` saves the training history. See `ISSFMethod` in [models/ssf.py](movebench/models/ssf.py) for a complete example.
+You can write your own training loop, use another library, or use MoveBench's `fit_or_restore` helper. For the helper, supply an object that holds the model and defines how to perform one training step, evaluate it, and save and load its state. `TrainerConfig` sets the training limit and when to evaluate; the helper saves the training history in `work_dir/history.json`. See `ISSFMethod` in [models/ssf.py](movebench/models/ssf.py) for a complete example.
 
 ### Train one model on several studies
 

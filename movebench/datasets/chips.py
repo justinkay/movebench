@@ -739,31 +739,6 @@ class SSFGridStepDataset(Dataset):
         }
 
 
-def make_grid_step_dataset(
-    *,
-    study_dir: str | Path,
-    trajectories_path: str | Path,
-    split_key: str,
-    plan,
-    sampler_config,
-    output_hw: tuple[int, int],
-    selected_splits: list[str] | None,
-    include_env: bool,
-) -> SSFGridStepDataset:
-    chips = ChipDataset(
-        study_dir=study_dir,
-        trajectories_path=trajectories_path,
-        split=str(split_key),
-        plan=plan,
-        sampler_config=sampler_config,
-        output_hw=output_hw,
-        normalize=bool(include_env),
-        mode="steps",
-        selected_splits=selected_splits,
-    )
-    return SSFGridStepDataset(chips, include_env=include_env)
-
-
 def make_grid_loader(
     dataset,
     *,
@@ -786,15 +761,17 @@ def make_grid_loader(
 def grid_dataset(
     data: DataSplit, *, plan: LayerPlan, include_env: bool
 ) -> SSFGridStepDataset:
-    return make_grid_step_dataset(
+    chips = ChipDataset(
         study_dir=data.inputs["study_dir"],
         trajectories_path=data.inputs["trajectories_path"],
-        split_key=data.split_key,
+        split=data.split_key,
         plan=plan,
         sampler_config=data.inputs["sampler"],
         output_hw=data.metadata["output_hw"],
+        normalize=include_env,
+        mode="steps",
         selected_splits=selected_splits_from_manifest(
             data.inputs["point_stores"][data.split_key]["manifest"]
         ),
-        include_env=include_env,
     )
+    return SSFGridStepDataset(chips, include_env=include_env)

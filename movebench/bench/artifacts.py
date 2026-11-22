@@ -477,7 +477,6 @@ def _resolve_point_artifacts(
             "status": "blocked",
             "reason": f"unknown point-store band ids: {missing_band_ids}",
         }
-    band_indices = [all_band_ids.index(band_id) for band_id in band_ids]
 
     point_stores: dict[str, PointStoreInput] = {}
     for split in ["train", *list(run_payload["evaluation_split_keys"])]:
@@ -576,8 +575,6 @@ def _resolve_point_artifacts(
         "trajectories_path": study_dir / "trajectories.csv",
         "plan": timescale["plan"],
         "sampler": timescale["sampler"],
-        "all_band_ids": all_band_ids,
-        "band_indices": band_indices,
         "normalization_stats_path": normalization_stats_path,
         "point_stores": point_stores,
     }
@@ -760,7 +757,6 @@ def _resolve_deepssf_cache_artifacts(
     inputs: WDSInputs = {
         "kind": "wds",
         "study_dir": paths.study_dir(str(run_payload["study_id"])),
-        "all_band_ids": all_band_ids,
         "channel_indices": channel_indices,
         "cache_manifests": cache_manifests,
     }
@@ -834,7 +830,6 @@ def _resolve_deepssf_gpu_artifacts(
         "trajectories_path": trajectories_path,
         "plan": _subset_layer_plan(timescale["plan"], alphaearth_band_ids),
         "catalog": catalog,
-        "all_band_ids": alphaearth_band_ids,
         "channel_indices": [
             alphaearth_band_ids.index(band_id) for band_id in band_ids
         ],
@@ -939,9 +934,6 @@ def _resolve_shared_checkpoint(
     return {
         "status": "resolved",
         "shared_checkpoint_path": checkpoint_path,
-        "shared_training_run_dir": run_dir,
-        "shared_training_payload": training_payload,
-        "shared_training_summary": summary,
     }
 
 

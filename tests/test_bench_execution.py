@@ -43,9 +43,9 @@ class BenchExecutionTest(unittest.TestCase):
         self.root = Path(directory.name)
         self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
         self.entry = {
-            "implementation": f"{__name__}:OriginMethod", "trains": False,
+            "implementation": f"{__name__}:OriginMethod",
             "artifact_requirement": "points", "requires_normalization_stats": False,
-            "fit_reuse": "rebuild", "prediction_kind": "deterministic", "gpus": 2,
+            "fit_reuse": "rebuild", "gpus": 2,
             "model": {}, "hparams": {},
         }
         self.enterContext(patch.dict(config.METHODS, origin=self.entry))
@@ -107,7 +107,7 @@ class BenchExecutionTest(unittest.TestCase):
             planned = planning.expand_experiment(experiment)
         self.assertEqual(len(planned), 1)
         payload = planned[0]
-        for field in ("executor", "fit_reuse", "prediction_kind", "gpus"):
+        for field in ("executor", "fit_reuse", "gpus"):
             self.assertNotIn(field, payload)
         self.assertEqual(payload["implementation"], self.entry["implementation"])
         self.assertEqual(run.execute_run_payload(payload)["status"], "completed")
@@ -141,7 +141,7 @@ class BenchExecutionTest(unittest.TestCase):
             self.assertEqual(handle.read().splitlines()[1:], ["1,20,5.0,5.0,0.0", "0,10,5.0,5.0,0.0"])
 
     def test_saved_prediction_recovery_and_missing_split(self):
-        for damage in ("unreadable", "wrong_kind", "wrong_ids", "missing"):
+        for damage in ("unreadable", "unsupported_kind", "wrong_ids", "missing"):
             with self.subTest(damage=damage):
                 self.execute()
                 path = self.directory / "predictions/test_temporal.pt"
@@ -151,8 +151,8 @@ class BenchExecutionTest(unittest.TestCase):
                 elif damage == "missing":
                     path.unlink()
                 else:
-                    if damage == "wrong_kind":
-                        prediction.update(prediction_kind="discrete", coords_m=torch.zeros(2, 1, 2), probs=torch.ones(2, 1))
+                    if damage == "unsupported_kind":
+                        prediction["prediction_kind"] = "unsupported"
                     else:
                         prediction["point_id_start"] = torch.tensor([10, 10])
                     torch.save(prediction, path)
@@ -162,7 +162,7 @@ class BenchExecutionTest(unittest.TestCase):
                 ):
                     self.assertEqual(self.execute()["status"], "completed")
                 self.assertEqual(predict.call_count, 1)
-                self.assertEqual(score.call_count, 3 if damage == "wrong_ids" else 2)
+                self.assertEqual(score.call_count, 3 if damage in {"unsupported_kind", "wrong_ids"} else 2)
 
     def test_invalid_fresh_prediction_fails_once_and_retains_fit(self):
         with patch.object(OriginMethod, "predict", return_value={}) as predict:
@@ -358,8 +358,7 @@ class BenchExecutionTest(unittest.TestCase):
         with patch.object(OriginMethod, "predict", new=watched_predict), patch.object(evaluation, "_score_split", new=reject):
             self.assertEqual(self.execute()["status"], "completed")
 
-    def test_optional_prediction_kind_accepts_supported_representations(self):
-        self.entry.pop("prediction_kind")
+    def test_execution_and_report_accept_supported_representations(self):
         common = OriginMethod(model_config={}, hparams={}, seed=0).predict(None)
         variants = [
             common,
@@ -370,6 +369,12 @@ class BenchExecutionTest(unittest.TestCase):
         for prediction in variants:
             with patch.object(OriginMethod, "predict", return_value=prediction):
                 self.assertEqual(run.execute_run_payload(self.payload, resume=False)["status"], "completed")
+            metrics_path = self.directory / "final_metrics/test_temporal/summary.json"
+            metrics = json.loads(metrics_path.read_text())
+            _, refreshed, errors = self.refresh(force=True)
+            self.assertEqual(refreshed, ["origin"])
+            self.assertEqual(errors, [])
+            self.assertEqual(json.loads(metrics_path.read_text()), metrics)
         for row in self.truth:
             row["in_support"] = False
         with patch.object(OriginMethod, "predict", return_value=common):

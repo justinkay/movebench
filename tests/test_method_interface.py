@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pandas as pd
 import torch
 
 from movebench.bench import run
@@ -22,7 +23,7 @@ class MethodInterfaceTest(unittest.TestCase):
         with (
             patch.object(baselines, "training_steps") as steps,
             patch.object(ssf, "candidate_dataset") as candidates,
-            patch.object(deepssf, "prepare_rasters") as rasters,
+            patch.object(deepssf, "PreparedRasters") as rasters,
             patch.object(moveformer, "sequence_dataset") as sequences,
             patch.object(torch.cuda, "is_available") as cuda,
         ):
@@ -47,7 +48,9 @@ class MethodInterfaceTest(unittest.TestCase):
         }})
         state = {"num_candidates": 10}
         with (
-            patch.object(baselines, "training_steps", return_value=(None, object())) as steps,
+            patch.object(baselines, "training_steps", return_value=(None, pd.DataFrame({
+                "step_length_m": [1.], "turn_angle_rad": [0.],
+            }))) as steps,
             patch.object(baselines.ssf_grid, "_replay_sampler_state", return_value=state) as replay,
             patch.object(baselines, "grid_dataset") as grid,
             patch.object(baselines.ssf_grid, "build_ssf_grid_artifact", return_value={}) as predict,
@@ -78,7 +81,9 @@ class MethodInterfaceTest(unittest.TestCase):
                 "completed_steps": 2, "best_step": 1,
                 "train_metrics": {}, "eval_metrics": {},
             }),
-            patch.object(ssf, "training_steps", return_value=(None, object())) as steps,
+            patch.object(ssf, "training_steps", return_value=(None, pd.DataFrame({
+                "step_length_m": [1.], "turn_angle_rad": [0.],
+            }))) as steps,
             patch.object(ssf.ssf_grid, "_replay_sampler_state", return_value={}) as replay,
             patch.object(ssf, "grid_dataset"),
             patch.object(ssf.ssf_grid, "build_ssf_grid_artifact", return_value={}),
@@ -104,7 +109,7 @@ class MethodInterfaceTest(unittest.TestCase):
         method = Mock()
         method.predict.return_value = prediction
         with tempfile.TemporaryDirectory() as directory:
-            kwargs = dict(run_payload={}, run_dir=Path(directory), prediction_kind="grid")
+            kwargs = dict(run_payload={}, run_dir=Path(directory))
             with patch.object(run.evaluation_runner, "_score_split", return_value=([], {})) as score:
                 run._predict_and_score(method, validation, **kwargs)
                 run._predict_and_score(method, validation, **kwargs)

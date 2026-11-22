@@ -81,9 +81,3 @@ class PreparedRasters:
             persistent_workers=False,
             prefetch_factor=None,
         )
-
-
-def prepare_rasters(
-    train: DataSplit, *, batch_size: int, seed: int, device: torch.device
-) -> PreparedRasters:
-    return PreparedRasters(train, batch_size=batch_size, seed=seed, device=device)

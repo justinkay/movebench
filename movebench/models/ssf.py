@@ -19,7 +19,7 @@ from movebench.datasets.ssf import (
     candidate_eval_loader,
     candidate_loader,
 )
-from movebench.training import RunTracker, TrainerConfig, fit_or_restore
+from movebench.training import TrainerConfig, fit_or_restore
 
 
 def _require_batch_tensor(
@@ -269,18 +269,6 @@ def _loss_step_select(logits: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(logits, target)
 
 
-def _move_batch_to_device(
-    batch: dict[str, torch.Tensor | None], device: torch.device
-) -> dict[str, torch.Tensor | None]:
-    out: dict[str, torch.Tensor | None] = {}
-    for key, value in batch.items():
-        if value is None:
-            out[key] = None
-        else:
-            out[key] = value.to(device, non_blocking=device.type == "cuda")
-    return out
-
-
 @torch.no_grad()
 def _eval_step_select_loader(
     model: torch.nn.Module,
@@ -291,7 +279,7 @@ def _eval_step_select_loader(
     total_nll = 0.0
     total = 0
     for batch in loader:
-        batch = _move_batch_to_device(batch, device)
+        batch = ssf_grid._move_batch_to_device(batch, device)
         logits = model(batch)
         loss = _loss_step_select(logits)
         total_nll += float(loss.item()) * int(logits.shape[0])
@@ -335,7 +323,7 @@ class _ISSFRuntime:
         except StopIteration:
             self._train_iter = iter(self.train_loader)
             batch = next(self._train_iter)
-        return _move_batch_to_device(batch, self.device)
+        return ssf_grid._move_batch_to_device(batch, self.device)
 
     def train_step(self, step: int) -> dict[str, float]:
         del step
@@ -441,7 +429,6 @@ class ISSFMethod:
                 eval_every_steps=int(self.hparams["eval_every_steps"]),
                 patience_evals=int(self.hparams["patience_evals"]),
             ),
-            RunTracker(Path(work_dir)),
             work_dir=Path(work_dir), restore_from=restore_from,
         )
         self.model_ = runtime.model
@@ -459,7 +446,8 @@ class ISSFMethod:
             _support, steps = training_steps(self.train_)
             self.sampler_state_ = ssf_grid._replay_sampler_state(
                 train_manifest=self.train_.inputs["point_stores"]["train"]["manifest"],
-                train_steps=steps,
+                step_lengths_m=steps["step_length_m"].to_numpy(),
+                turn_angles_rad=steps["turn_angle_rad"].to_numpy(),
             )
         dataset = self._dataset(data)
         return ssf_grid.build_ssf_grid_artifact(

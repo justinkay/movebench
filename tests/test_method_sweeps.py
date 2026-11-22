@@ -325,6 +325,7 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             patch(
                 "movebench.training.run_training_loop",
                 return_value={
+                    "history": [],
                     "completed_steps": 10,
                     "best_step": 10,
                     "train_metrics": metrics,

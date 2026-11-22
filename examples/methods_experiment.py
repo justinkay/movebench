@@ -6,8 +6,6 @@ METHODS["example_origin"] = {
     "implementation": "examples.origin_method:OriginMethod",
     "artifact_requirement": "points",
     "requires_normalization_stats": False,
-    "trains": False,
-    "prediction_kind": "deterministic",
     "model": {},
     "hparams": {},
 }
@@ -15,8 +13,6 @@ METHODS["example_candidates"] = {
     "implementation": "examples.candidate_method:CandidateMethod",
     "artifact_requirement": "points",
     "requires_normalization_stats": True,
-    "trains": True,
-    "prediction_kind": "grid",
     "fit_reuse": "checkpoint",
     "model": {"include_time": True},
     "hparams": {"batch_size": 8, "max_steps": 2, "lr": 0.001},

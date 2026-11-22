@@ -74,7 +74,8 @@ class CandidateMethod:
             _, steps = training_steps(self.train_)
             self.sampler_state_ = ssf_grid._replay_sampler_state(
                 train_manifest=self.train_.inputs["point_stores"]["train"]["manifest"],
-                train_steps=steps,
+                step_lengths_m=steps["step_length_m"].to_numpy(),
+                turn_angles_rad=steps["turn_angle_rad"].to_numpy(),
             )
         return ssf_grid.build_ssf_grid_artifact(
             grid_dataset=grid_dataset(data, plan=self.dataset_.plan, include_env=True),

@@ -31,8 +31,6 @@ class PointInputs(TypedDict):
     trajectories_path: Path
     plan: LayerPlan
     sampler: SamplerConfig
-    all_band_ids: list[str]
-    band_indices: list[int]
     normalization_stats_path: Path | None
     point_stores: Mapping[str, PointStoreInput]
 
@@ -40,7 +38,6 @@ class PointInputs(TypedDict):
 class WDSInputs(TypedDict):
     kind: Literal["wds"]
     study_dir: Path
-    all_band_ids: list[str]
     channel_indices: list[int]
     cache_manifests: Mapping[str, WDSCacheInput]
 
@@ -51,7 +48,6 @@ class GPUInputs(TypedDict):
     trajectories_path: Path
     plan: LayerPlan
     catalog: AlphaEarthCatalog
-    all_band_ids: list[str]
     channel_indices: list[int]
     selected_splits: tuple[str, ...]
 

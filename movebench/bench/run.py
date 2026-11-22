@@ -29,7 +29,7 @@ def _load_implementation(reference: str):
     return getattr(importlib.import_module(module_name), name)
 
 
-def _predict_and_score(method, data, *, run_payload, run_dir, prediction_kind):
+def _predict_and_score(method, data, *, run_payload, run_dir):
     split_key = data.split_key
     pred_path = run_dir / "predictions" / f"{split_key}.pt"
     payload = None
@@ -37,11 +37,6 @@ def _predict_and_score(method, data, *, run_payload, run_dir, prediction_kind):
     if pred_path.exists():
         try:
             payload = dict(torch.load(pred_path, map_location="cpu"))
-            if (
-                prediction_kind is not None
-                and payload.get("prediction_kind") != prediction_kind
-            ):
-                raise ValueError(f"Expected {prediction_kind} predictions")
             scored = evaluation_runner._score_split(
                 split_key=split_key,
                 pred_artifact=payload,
@@ -53,11 +48,6 @@ def _predict_and_score(method, data, *, run_payload, run_dir, prediction_kind):
         payload = method.predict(data)
         pred_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(payload, pred_path)
-        if (
-            prediction_kind is not None
-            and payload.get("prediction_kind") != prediction_kind
-        ):
-            raise ValueError(f"Expected {prediction_kind} predictions")
         scored = evaluation_runner._score_split(
             split_key=split_key,
             pred_artifact=payload,
@@ -318,7 +308,6 @@ def _execute_run(
                         splits[split_key],
                         run_payload=run_payload,
                         run_dir=run_dir,
-                        prediction_kind=method_config.get("prediction_kind"),
                     )
             error = bench_run_state.completion_error(run_dir, run_payload, summary)
             if error:

@@ -9,7 +9,6 @@ from unittest.mock import Mock, patch
 import torch
 
 from movebench.training import (
-    RunTracker,
     TrainerConfig,
     fit_or_restore,
     read_checkpoint,
@@ -34,6 +33,7 @@ class CheckpointTest(unittest.TestCase):
             "completed_steps": 6,
             "train_metrics": {"nll": 1.5},
             "eval_metrics": {"nll": 2.0},
+            "history": [],
         }
         self.schedule = {"steps_per_epoch": 2, "max_steps": 10}
         self.config = TrainerConfig(10, 2, 1)
@@ -51,7 +51,7 @@ class CheckpointTest(unittest.TestCase):
         runtime = SimpleNamespace(model=self.model)
         with patch("movebench.training.run_training_loop", return_value=self.fit) as fit:
             result = fit_or_restore(
-                runtime, self.config, object(), work_dir=self.directory,
+                runtime, self.config, work_dir=self.directory,
                 restore_from=None, schedule=self.schedule,
             )
         fit.assert_called_once()
@@ -66,6 +66,8 @@ class CheckpointTest(unittest.TestCase):
             with self.subTest(history=history):
                 if history is not None:
                     (self.directory / "history.json").write_text(history)
+                else:
+                    (self.directory / "history.json").unlink()
                 with torch.no_grad():
                     self.model.weight.fill_(-10)
                 with (
@@ -73,7 +75,7 @@ class CheckpointTest(unittest.TestCase):
                     patch.object(Path, "read_text", side_effect=AssertionError("history read")),
                 ):
                     restored = fit_or_restore(
-                        runtime, self.config, object(), work_dir=self.directory,
+                        runtime, self.config, work_dir=self.directory,
                         restore_from=self.reference, schedule={"max_steps": 999},
                         model_metadata={"changed": True},
                     )
@@ -103,12 +105,12 @@ class CheckpointTest(unittest.TestCase):
                 with patch("movebench.training.run_training_loop") as fit:
                     with self.assertRaises(Exception):
                         fit_or_restore(
-                            SimpleNamespace(model=self.model), self.config, object(),
+                            SimpleNamespace(model=self.model), self.config,
                             work_dir=self.directory, restore_from=self.reference,
                         )
                 fit.assert_not_called()
 
-    def test_shared_reader_and_trainer_require_signature_and_metadata(self):
+    def test_shared_restore_requires_signature_but_not_descriptive_fields(self):
         metadata = {
             "shared_training_signature": "expected",
             "shared_study_ids": ["a", "b", "zero"],
@@ -119,12 +121,17 @@ class CheckpointTest(unittest.TestCase):
             "skipped_eval_study_ids": ["b"],
         }
         self.reference.update(training_run_key="trainer", training_signature="expected")
-        self.save(metadata)
-        self.assertEqual(read_checkpoint(self.reference)["model_metadata"], metadata)
-        invalid = [{**metadata, "shared_training_signature": "wrong"}]
-        invalid += [{key: value for key, value in metadata.items() if key != missing}
-                    for missing in metadata]
-        for candidate in invalid:
+        for candidate in (metadata, {"shared_training_signature": "expected"}):
+            self.save(candidate)
+            self.assertEqual(read_checkpoint(self.reference)["model_metadata"], candidate)
+            with patch("movebench.training.run_training_loop") as fit:
+                restored = fit_or_restore(
+                    SimpleNamespace(model=self.model), self.config,
+                    work_dir=self.directory, restore_from=self.reference,
+                )
+            self.assertEqual(restored["model_metadata"], candidate)
+            fit.assert_not_called()
+        for candidate in ({"shared_training_signature": "wrong"}, {}):
             with self.subTest(metadata=candidate):
                 self.save(candidate)
                 with self.assertRaises(ValueError):
@@ -132,7 +139,7 @@ class CheckpointTest(unittest.TestCase):
                 with patch("movebench.training.run_training_loop") as fit:
                     with self.assertRaises(ValueError):
                         fit_or_restore(
-                            SimpleNamespace(model=self.model), self.config, object(),
+                            SimpleNamespace(model=self.model), self.config,
                             work_dir=self.directory, restore_from=self.reference,
                         )
                 fit.assert_not_called()
@@ -169,7 +176,7 @@ class CheckpointTest(unittest.TestCase):
 
         runtime = Runtime()
         result = fit_or_restore(
-            runtime, self.config, RunTracker(self.directory),
+            runtime, self.config,
             work_dir=self.directory, restore_from=None,
         )
         self.assertEqual(result["best_step"], 4)
@@ -188,7 +195,7 @@ class CheckpointTest(unittest.TestCase):
                 runtime = Mock()
                 runtime.train_step.side_effect = error
                 with self.assertRaises(type(error)):
-                    run_training_loop(runtime, self.config, object())
+                    run_training_loop(runtime, self.config)
                 runtime.close.assert_called_once()
 
 

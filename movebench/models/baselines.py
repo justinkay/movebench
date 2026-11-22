@@ -62,7 +62,8 @@ class RandomWalk:
         self.plan_ = train.inputs["plan"]
         self.sampler_state_ = ssf_grid._replay_sampler_state(
             train_manifest=train.inputs["point_stores"]["train"]["manifest"],
-            train_steps=steps,
+            step_lengths_m=steps["step_length_m"].to_numpy(),
+            turn_angles_rad=steps["turn_angle_rad"].to_numpy(),
         )
         return self
 

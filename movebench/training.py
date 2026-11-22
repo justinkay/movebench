@@ -12,21 +12,6 @@ import torch
 from tqdm import tqdm
 
 
-class RunTracker:
-    def __init__(self, run_dir: Path) -> None:
-        self.run_dir = run_dir
-
-    def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
-        del metrics, step
-
-    def write_history(self, history: list[dict[str, object]]) -> None:
-        history_path = self.run_dir / "history.json"
-        history_path.write_text(
-            json.dumps(history, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-
 @dataclass(frozen=True)
 class TrainerConfig:
     max_steps: int
@@ -68,17 +53,6 @@ def read_checkpoint(restore_from: RestorationReference) -> dict[str, object]:
         metadata = checkpoint["model_metadata"]
         if metadata.get("shared_training_signature") != signature:
             raise ValueError("Shared checkpoint training signature mismatch")
-        required = {
-            "shared_study_ids",
-            "shared_data_study_ids",
-            "shared_zero_step_studies",
-            "taxa",
-            "eval_split_by_study",
-            "skipped_eval_study_ids",
-        }
-        missing = required.difference(metadata)
-        if missing:
-            raise ValueError(f"Shared checkpoint is missing metadata: {sorted(missing)}")
     return checkpoint
 
 
@@ -108,7 +82,6 @@ def save_checkpoint(
 def fit_or_restore(
     runtime: object,
     config: TrainerConfig,
-    tracker: object,
     *,
     work_dir: Path,
     restore_from: RestorationReference | None,
@@ -120,7 +93,10 @@ def fit_or_restore(
         checkpoint = read_checkpoint(restore_from)
         runtime.model.load_state_dict(checkpoint["model_state"])
     else:
-        fit = run_training_loop(runtime, config, tracker)
+        fit = run_training_loop(runtime, config)
+        (Path(work_dir) / "history.json").write_text(
+            json.dumps(fit["history"], indent=2, sort_keys=True), encoding="utf-8"
+        )
         checkpoint = save_checkpoint(
             Path(work_dir) / "checkpoint_best.pt",
             model=runtime.model,
@@ -131,22 +107,9 @@ def fit_or_restore(
     return {key: value for key, value in checkpoint.items() if key != "model_state"}
 
 
-def _log_metrics(tracker: object, metrics: dict[str, float], *, step: int) -> None:
-    log_fn = getattr(tracker, "log_metrics", None)
-    if callable(log_fn):
-        log_fn(dict(metrics), step=int(step))
-
-
-def _write_history(tracker: object, history: list[dict[str, float]]) -> None:
-    write_fn = getattr(tracker, "write_history", None)
-    if callable(write_fn):
-        write_fn([dict(entry) for entry in history])
-
-
 def run_training_loop(
     runtime: object,
     config: TrainerConfig,
-    tracker: object,
 ) -> dict[str, object]:
     if int(config.max_steps) <= 0:
         raise ValueError(f"max_steps must be > 0, got {config.max_steps!r}")
@@ -178,11 +141,7 @@ def run_training_loop(
     try:
         for step in tqdm(range(1, int(config.max_steps) + 1), desc=f"Training..."):
             completed_steps = int(step)
-            train_step_metrics = {
-                str(key): float(value)
-                for key, value in dict(runtime.train_step(step)).items()
-            }
-            _log_metrics(tracker, train_step_metrics, step=step)
+            runtime.train_step(step)
 
             should_eval = step % int(config.eval_every_steps) == 0
             early_stop_due = should_eval or step == int(config.max_steps)
@@ -226,18 +185,6 @@ def run_training_loop(
             )
             history_entry.update(scheduler_metrics)
             history.append(history_entry)
-            _log_metrics(
-                tracker,
-                {
-                    **{f"train/{key}": value for key, value in train_metrics.items()},
-                    **{
-                        f"{early_stop_split_key}/{key}": value
-                        for key, value in eval_metrics.items()
-                    },
-                    **scheduler_metrics,
-                },
-                step=step,
-            )
 
             if not early_stop_due:
                 continue
@@ -271,7 +218,6 @@ def run_training_loop(
         }
         print("Train final:", final_train_metrics)
         print("Eval final:", final_eval_metrics)
-        _write_history(tracker, history)
         return {
             "best_step": int(best_step),
             "completed_steps": int(completed_steps),

@@ -145,7 +145,6 @@ class TrainingScheduleTest(unittest.TestCase):
                 eval_every_steps=4,
                 patience_evals=3,
             ),
-            object(),
         )
 
         self.assertFalse(result["stopped_early"])

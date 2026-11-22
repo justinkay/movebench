@@ -533,8 +533,6 @@ class MoveFormerFullMethodTest(unittest.TestCase):
             "trajectories_path": Path(study_id) / "trajectories.csv",
             "plan": object(),
             "sampler": object(),
-            "all_band_ids": ["alphaearth.A00"],
-            "band_indices": [0],
             "normalization_stats_path": None,
             "point_stores": {},
         }
@@ -589,6 +587,7 @@ class MoveFormerFullMethodTest(unittest.TestCase):
                         "best_step": 3,
                         "train_metrics": {"nll": 2.0},
                         "eval_metrics": {"nll": 3.0},
+                        "history": [],
                     },
                 ) as fit,
                 patch.object(moveformer_model, "_eval_metrics") as evaluate,

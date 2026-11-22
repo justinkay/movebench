@@ -15,14 +15,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from movebench.datasets.rasters import prepare_rasters
+from movebench.datasets.rasters import PreparedRasters
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.lib.deepSSF.deepSSF_model import (
     Conv2d_block_toFC,
     ConvJointModel,
     ModelParams,
 )
-from movebench.training import RunTracker, TrainerConfig, fit_or_restore
+from movebench.training import TrainerConfig, fit_or_restore
 
 
 def _infer_dense_dim_in_all(
@@ -490,7 +490,7 @@ class DeepSSFMethod:
         eval_max_items = int(method_hparams["max_eval_items"])
         backend = train.inputs["kind"]
         device = _device_for_backend(backend)
-        rasters = prepare_rasters(
+        rasters = PreparedRasters(
             train,
             batch_size=batch_size,
             seed=seed,
@@ -561,7 +561,6 @@ class DeepSSFMethod:
                 eval_every_steps=int(schedule["eval_every_steps"]),
                 patience_evals=int(schedule["patience_evals"]),
             ),
-            RunTracker(Path(work_dir)),
             work_dir=Path(work_dir),
             restore_from=restore_from,
             schedule=schedule,

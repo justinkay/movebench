@@ -36,7 +36,7 @@ from movebench.lib.moveformer.geo_transformers.models.any_horizon_forecast_trans
     AnyHorizonForecastTransformer,
     SelectionHead,
 )
-from movebench.training import RunTracker, TrainerConfig, fit_or_restore, read_checkpoint
+from movebench.training import TrainerConfig, fit_or_restore, read_checkpoint
 
 
 def build_moveformer_selection_model(
@@ -267,52 +267,11 @@ def _train_sampler_state_from_point_store(
     if not length_chunks or not turn_chunks:
         raise ValueError("MoveFormer grid prediction requires non-empty train point store")
 
-    valid_lengths = np.concatenate(length_chunks).astype(np.float64, copy=False)
-    valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
-    valid_turns = np.concatenate(turn_chunks).astype(np.float64, copy=False)
-    valid_turns = valid_turns[np.isfinite(valid_turns)]
-    if len(valid_lengths) == 0:
-        raise ValueError("No valid train step lengths available for MoveFormer grid prediction")
-    if len(valid_turns) == 0:
-        raise ValueError("No valid train turn angles available for MoveFormer grid prediction")
-
-    sampler = dict(getattr(train_manifest, "sampler", {}))
-    gamma = (
-        dict(sampler.get("gamma", {}))
-        if isinstance(sampler.get("gamma"), dict)
-        else {}
+    return ssf_grid._replay_sampler_state(
+        train_manifest=train_manifest,
+        step_lengths_m=np.concatenate(length_chunks),
+        turn_angles_rad=np.concatenate(turn_chunks),
     )
-    gamma_params = gamma.get("params")
-    if not (bool(gamma.get("used", False)) and isinstance(gamma_params, list) and gamma_params):
-        gamma_params = None
-    else:
-        gamma_params = tuple(float(x) for x in gamma_params)
-
-    vonmises = (
-        dict(sampler.get("vonmises", {}))
-        if isinstance(sampler.get("vonmises"), dict)
-        else {}
-    )
-    vonmises_params = vonmises.get("params")
-    if not (
-        bool(vonmises.get("used", False))
-        and isinstance(vonmises_params, list)
-        and vonmises_params
-    ):
-        vonmises_params = None
-    else:
-        vonmises_params = tuple(float(x) for x in vonmises_params)
-
-    return {
-        "valid_lengths": valid_lengths,
-        "valid_turns": valid_turns,
-        "num_candidates": int(sampler["num_candidates"]),
-        "random_seed": int(sampler["random_seed"]),
-        "gamma_used": gamma_params is not None,
-        "gamma_params": gamma_params,
-        "vonmises_used": vonmises_params is not None,
-        "vonmises_params": vonmises_params,
-    }
 
 
 @torch.no_grad()
@@ -404,6 +363,7 @@ def _selection_scores(
 def _grid_candidate_features(
     *,
     grid_dataset,
+    rows_by_point_id,
     point_ids: torch.Tensor,
     env: torch.Tensor | None,
     valid: torch.Tensor | None,
@@ -412,7 +372,6 @@ def _grid_candidate_features(
 ) -> dict[str, torch.Tensor]:
     if env is None or valid is None:
         raise ValueError("MoveFormer grid prediction requires environment chips")
-    rows_by_point_id = _grid_step_rows_by_point_id(grid_dataset)
     ordered_point_ids = [int(point_id) for point_id in point_ids.tolist()]
     start_lon = np.asarray(
         [float(rows_by_point_id[point_id][1].start_lon) for point_id in ordered_point_ids],
@@ -479,17 +438,13 @@ def _grid_prediction_payload(
     model: torch.nn.Module,
     loader,
     *,
-    split_key: str,
     grid_dataset,
     mov_vec_scale: float,
     step_batch_size: int,
-    train_sampler_state: dict[str, Any] | None = None,
-    train_store_dir: str | Path | None = None,
-    train_manifest=None,
+    train_sampler_state: dict[str, Any],
     num_workers: int = 0,
     device: torch.device,
 ) -> dict[str, object]:
-    del split_key
     point_ids, query_rows = _prediction_queries(model, loader, device=device)
     height, width = (int(grid_dataset.output_hw[0]), int(grid_dataset.output_hw[1]))
     pixel_size_m = float(grid_dataset.pixel_size_m)
@@ -512,15 +467,6 @@ def _grid_prediction_payload(
     if set(rows_by_point_id.keys()) != set(ordered_point_ids):
         raise ValueError("MoveFormer query point_id_start values do not match held-out grid steps")
     ordered_indices = [int(rows_by_point_id[point_id][0]) for point_id in ordered_point_ids]
-    if train_sampler_state is None:
-        if train_store_dir is None or train_manifest is None:
-            raise ValueError(
-                "MoveFormer grid prediction requires train_sampler_state or train_store_dir/train_manifest"
-            )
-        train_sampler_state = _train_sampler_state_from_point_store(
-            train_store_dir=train_store_dir,
-            train_manifest=train_manifest,
-        )
 
     model.eval()
     grid_loader = DataLoader(
@@ -550,6 +496,7 @@ def _grid_prediction_payload(
         )
         candidate_features = _grid_candidate_features(
             grid_dataset=grid_dataset,
+            rows_by_point_id=rows_by_point_id,
             point_ids=point_id_batch.cpu(),
             env=grid_batch["env"],
             valid=grid_batch["valid"],
@@ -827,7 +774,6 @@ class MoveFormerMethod:
                 eval_every_steps=int(schedule["eval_every_steps"]),
                 patience_evals=int(schedule["patience_evals"]),
             ),
-            RunTracker(Path(work_dir)),
             work_dir=Path(work_dir),
             restore_from=restore_from,
             schedule=schedule,
@@ -836,6 +782,7 @@ class MoveFormerMethod:
         self.model_ = runtime.model
         self.device_ = device
         self.train_ = train
+        self.sampler_state_ = None
         self.mov_vec_scale_ = float(train_dataset._mov_vec_scale)
         self.taxon_ = None
         self.training_summary_ = {
@@ -852,7 +799,11 @@ class MoveFormerMethod:
         split_key = data.split_key
         hparams = self.hparams
         batch_size = int(hparams["batch_size"])
-        point_stores = self.train_.inputs["point_stores"]
+        if self.sampler_state_ is None:
+            store = self.train_.inputs["point_stores"]["train"]
+            self.sampler_state_ = _train_sampler_state_from_point_store(
+                train_store_dir=store["store_dir"], train_manifest=store["manifest"]
+            )
         prediction_dataset = sequence_dataset(
             data,
             max_len=int(hparams["max_len"]),
@@ -876,12 +827,10 @@ class MoveFormerMethod:
                 shuffle=False,
                 seed=self.seed,
             ),
-            split_key=split_key,
             grid_dataset=grid,
             mov_vec_scale=self.mov_vec_scale_,
             step_batch_size=step_batch_size,
-            train_store_dir=point_stores["train"]["store_dir"],
-            train_manifest=point_stores["train"]["manifest"],
+            train_sampler_state=self.sampler_state_,
             num_workers=int(hparams.get("prediction_num_workers", 4)),
             device=self.device_,
         )
@@ -1024,7 +973,6 @@ class SharedMoveFormerTrainer:
                 eval_every_steps=int(schedule["eval_every_steps"]),
                 patience_evals=int(schedule["patience_evals"]),
             ),
-            RunTracker(Path(work_dir)),
             work_dir=Path(work_dir),
             restore_from=restore_from,
             schedule=schedule,
@@ -1040,21 +988,14 @@ class SharedMoveFormerTrainer:
                 "skipped_eval_study_ids": skipped_eval_study_ids,
             },
         )
-        metadata = fit["model_metadata"]
-
         self.model_ = runtime.model
         self.training_summary_ = {
+            **fit["model_metadata"],
             "train_steps": int(fit["completed_steps"]),
             "best_step": int(fit["best_step"]),
             "early_stop_split_key": "shared_eval",
             "train_metrics": dict(fit["train_metrics"]),
             "eval_metrics": dict(fit["eval_metrics"]),
-            "shared_training_signature": metadata["shared_training_signature"],
-            "shared_study_ids": metadata["shared_study_ids"],
-            "shared_data_study_ids": metadata["shared_data_study_ids"],
-            "shared_zero_step_studies": metadata["shared_zero_step_studies"],
-            "eval_split_by_study": metadata["eval_split_by_study"],
-            "skipped_eval_study_ids": metadata["skipped_eval_study_ids"],
             "schedule": dict(fit["schedule"]),
         }
         return self
@@ -1088,6 +1029,7 @@ class SharedMoveFormerScorer(MoveFormerMethod):
         self.model_ = model
         self.device_ = device
         self.train_ = train
+        self.sampler_state_ = None
         self.mov_vec_scale_ = float(train_dataset._mov_vec_scale)
         self.taxon_ = taxon
         self.training_summary_ = {

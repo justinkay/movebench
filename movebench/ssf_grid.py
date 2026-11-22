@@ -35,11 +35,12 @@ def scaled_step_batch_size(
 def _replay_sampler_state(
     *,
     train_manifest,
-    train_steps,
+    step_lengths_m: np.ndarray,
+    turn_angles_rad: np.ndarray,
 ) -> dict[str, Any]:
-    valid_lengths = train_steps["step_length_m"].to_numpy(dtype=np.float64)
+    valid_lengths = np.asarray(step_lengths_m, dtype=np.float64)
     valid_lengths = valid_lengths[np.isfinite(valid_lengths) & (valid_lengths > 0.0)]
-    valid_turns = train_steps["turn_angle_rad"].to_numpy(dtype=np.float64)
+    valid_turns = np.asarray(turn_angles_rad, dtype=np.float64)
     valid_turns = valid_turns[np.isfinite(valid_turns)]
     if len(valid_lengths) == 0:
         raise ValueError("No valid train step lengths available for SSF grid prediction")
