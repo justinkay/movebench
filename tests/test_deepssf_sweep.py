@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import movebench.bench.config as bench_config
-import movebench.bench.executors.deepssf as deepssf_executor
+import movebench.models.deepssf as deepssf_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
 from movebench.training import TrainerConfig, run_training_loop
@@ -28,7 +28,7 @@ class DeepSSFObjectiveTest(unittest.TestCase):
         target = torch.tensor([[[0.0, 1.0]]])
         loader = [(spatial, scalars, bearing, target, torch.tensor([1]))]
 
-        metrics = deepssf_executor._evaluate_loader(
+        metrics = deepssf_model._evaluate_loader(
             FixedModel(),
             loader,
             device=torch.device("cpu"),
@@ -61,7 +61,7 @@ class DeepSSFObjectiveTest(unittest.TestCase):
                     "habitat": [self.habitat],
                 }
 
-        runtime = deepssf_executor._DeepSSFRuntime(
+        runtime = deepssf_model._DeepSSFRuntime(
             model=TwoPartModel(),
             train_loader=[],
             eval_loaders={},

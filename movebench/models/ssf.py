@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+import movebench.ssf_grid as ssf_grid
+from movebench.datasets.chips import grid_dataset
+from movebench.datasets.points import training_steps
+from movebench.datasets.ssf import (
+    candidate_dataset,
+    candidate_eval_loader,
+    candidate_loader,
+)
+from movebench.training import RunTracker, TrainerConfig, fit_or_restore
 
 
 def _require_batch_tensor(
@@ -243,3 +255,229 @@ def random_baseline_metrics(num_choices: int, topk: Sequence[int]) -> dict:
         "nll": float(math.log(k)),
         "topk": {int(kk): float(min(int(kk), k)) / float(k) for kk in topk},
     }
+
+
+def _loss_step_select(logits: torch.Tensor) -> torch.Tensor:
+    if logits.ndim != 2:
+        raise ValueError(f"Expected logits with shape (B,P), got {tuple(logits.shape)}")
+    target = torch.full(
+        (int(logits.shape[0]),),
+        int(logits.shape[1] - 1),
+        dtype=torch.long,
+        device=logits.device,
+    )
+    return F.cross_entropy(logits, target)
+
+
+def _move_batch_to_device(
+    batch: dict[str, torch.Tensor | None], device: torch.device
+) -> dict[str, torch.Tensor | None]:
+    out: dict[str, torch.Tensor | None] = {}
+    for key, value in batch.items():
+        if value is None:
+            out[key] = None
+        else:
+            out[key] = value.to(device, non_blocking=device.type == "cuda")
+    return out
+
+
+@torch.no_grad()
+def _eval_step_select_loader(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    total_nll = 0.0
+    total = 0
+    for batch in loader:
+        batch = _move_batch_to_device(batch, device)
+        logits = model(batch)
+        loss = _loss_step_select(logits)
+        total_nll += float(loss.item()) * int(logits.shape[0])
+        total += int(logits.shape[0])
+    if total == 0:
+        raise ValueError("Loader yielded zero items")
+    return {"nll": float(total_nll / float(total))}
+
+
+class _ISSFRuntime:
+    early_stop_metric = "nll"
+
+    def __init__(
+        self,
+        *,
+        model: torch.nn.Module,
+        train_loader: DataLoader,
+        eval_train_loader: DataLoader,
+        eval_loader: DataLoader,
+        early_stop_split_key: str,
+        device: torch.device,
+        lr: float,
+        weight_decay: float,
+    ) -> None:
+        self.model = model.to(device)
+        self.train_loader = train_loader
+        self.eval_train_loader = eval_train_loader
+        self.eval_loader = eval_loader
+        self.early_stop_split_key = str(early_stop_split_key)
+        self.device = device
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=float(lr),
+            weight_decay=float(weight_decay),
+        )
+        self._train_iter = iter(self.train_loader)
+
+    def _next_batch(self) -> dict[str, torch.Tensor | None]:
+        try:
+            batch = next(self._train_iter)
+        except StopIteration:
+            self._train_iter = iter(self.train_loader)
+            batch = next(self._train_iter)
+        return _move_batch_to_device(batch, self.device)
+
+    def train_step(self, step: int) -> dict[str, float]:
+        del step
+        batch = self._next_batch()
+        self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
+        logits = self.model(batch)
+        loss = _loss_step_select(logits)
+        loss.backward()
+        self.optimizer.step()
+        return {"loss/train_step": float(loss.item())}
+
+    def evaluate(self, split_key: str) -> dict[str, float]:
+        if split_key == "train":
+            return _eval_step_select_loader(
+                self.model, self.eval_train_loader, self.device
+            )
+        if split_key != self.early_stop_split_key:
+            raise KeyError(f"Unknown split for iSSF runtime: {split_key!r}")
+        return _eval_step_select_loader(self.model, self.eval_loader, self.device)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "model": {
+                key: value.detach().cpu().clone()
+                for key, value in self.model.state_dict().items()
+            },
+            "optimizer": self.optimizer.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.model.load_state_dict(dict(state["model"]))
+        self.optimizer.load_state_dict(dict(state["optimizer"]))
+
+
+class ISSFMethod:
+    def __init__(self, *, model_config, hparams, seed, model_kind):
+        self.model_config = dict(model_config)
+        self.hparams = dict(hparams)
+        self.seed = int(seed)
+        self.model_kind = model_kind
+
+    def _dataset(self, data):
+        if data.split_key not in self.datasets_:
+            self.datasets_[data.split_key] = candidate_dataset(
+                data, include_time=bool(self.model_config.get("include_time", False))
+            )
+        return self.datasets_[data.split_key]
+
+    def fit(self, train, validation, *, work_dir, restore_from=None):
+        torch.multiprocessing.set_sharing_strategy("file_system")
+        self.device_ = torch.device("cpu")
+        self.train_ = train
+        self.datasets_ = {}
+        self.sampler_state_ = None
+        batch_size = int(self.hparams.get("batch_size", 256))
+        num_workers = int(self.hparams.get("num_workers", 0) or 0)
+        eval_max_items = self.hparams.get("max_eval_items")
+        train_dataset = self._dataset(train)
+        eval_dataset = self._dataset(validation)
+        train_loader = candidate_loader(
+            train_dataset, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, device=self.device_,
+        )
+        eval_train_loader = candidate_eval_loader(
+            train_dataset, batch_size=batch_size, seed=self.seed,
+            max_items=eval_max_items, num_workers=num_workers, device=self.device_,
+        )
+        eval_loader = candidate_eval_loader(
+            eval_dataset, batch_size=batch_size, seed=self.seed + 1,
+            max_items=eval_max_items, num_workers=num_workers, device=self.device_,
+        )
+        if self.model_kind == "linear":
+            model = LinearStepSelect(
+                int(train_dataset.c_env),
+                include_time=bool(train_dataset.include_time),
+                n_individuals=int(train_dataset.n_individuals),
+            )
+        elif self.model_kind == "mlp":
+            model = MLPStepSelect(
+                int(train_dataset.c_env),
+                include_time=bool(train_dataset.include_time),
+                n_individuals=int(train_dataset.n_individuals),
+                hidden_dims=tuple(self.model_config.get("hidden_dims", [128])),
+                dropout=float(self.model_config.get("dropout", 0.6)),
+                interactions_before_mlp=bool(
+                    self.model_config.get("interactions_before_mlp", False)
+                ),
+            )
+        else:
+            raise ValueError(f"Unsupported iSSF model kind: {self.model_kind!r}")
+        runtime = _ISSFRuntime(
+            model=model, train_loader=train_loader,
+            eval_train_loader=eval_train_loader, eval_loader=eval_loader,
+            early_stop_split_key=validation.split_key, device=self.device_,
+            lr=float(self.hparams["lr"]),
+            weight_decay=float(self.hparams["weight_decay"]),
+        )
+        fit = fit_or_restore(
+            runtime,
+            TrainerConfig(
+                max_steps=int(self.hparams["max_steps"]),
+                eval_every_steps=int(self.hparams["eval_every_steps"]),
+                patience_evals=int(self.hparams["patience_evals"]),
+            ),
+            RunTracker(Path(work_dir)),
+            work_dir=Path(work_dir), restore_from=restore_from,
+        )
+        self.model_ = runtime.model
+        self.training_summary_ = {
+            "train_steps": int(fit["completed_steps"]),
+            "best_step": int(fit["best_step"]),
+            "early_stop_split_key": validation.split_key,
+            "train_metrics": dict(fit["train_metrics"]),
+            "eval_metrics": dict(fit["eval_metrics"]),
+        }
+        return self
+
+    def predict(self, data):
+        if self.sampler_state_ is None:
+            _support, steps = training_steps(self.train_)
+            self.sampler_state_ = ssf_grid._replay_sampler_state(
+                train_manifest=self.train_.inputs["point_stores"]["train"]["manifest"],
+                train_steps=steps,
+            )
+        dataset = self._dataset(data)
+        return ssf_grid.build_ssf_grid_artifact(
+            grid_dataset=grid_dataset(data, plan=dataset.plan, include_env=True),
+            sampler_state=self.sampler_state_,
+            batch_size=int(self.hparams.get("batch_size", 256)),
+            num_workers=int(self.hparams.get("prediction_num_workers", 4) or 0),
+            device=self.device_, model=self.model_, feature_adapter=dataset,
+        )
+
+
+def linear_method(*, model_config, hparams, seed):
+    return ISSFMethod(
+        model_config=model_config, hparams=hparams, seed=seed, model_kind="linear"
+    )
+
+
+def mlp_method(*, model_config, hparams, seed):
+    return ISSFMethod(
+        model_config=model_config, hparams=hparams, seed=seed, model_kind="mlp"
+    )

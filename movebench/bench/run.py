@@ -8,6 +8,8 @@ import shutil
 import signal
 from pathlib import Path
 
+import torch
+
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
@@ -39,6 +41,60 @@ def _load_executor(executor_ref: str):
     module_name, func_name = str(executor_ref).split(":", 1)
     module = importlib.import_module(module_name)
     return getattr(module, func_name)
+
+
+def _run_method(
+    implementation,
+    *,
+    run_payload,
+    resolved_artifacts,
+    run_dir,
+    tracker,
+    restore_from=None,
+    reuse_predictions=True,
+    prediction_kind=None,
+):
+    """Run fit/predict beneath the existing executor registrations."""
+    method = implementation(
+        model_config=run_payload.get("method_model", {}),
+        hparams=run_payload.get("method_hparams", {}),
+        seed=run_payload["seed"],
+    )
+    if run_payload.get("shared_training_run"):
+        train, validation = resolved_artifacts["train"], None
+    else:
+        splits = resolved_artifacts["splits"]
+        train = splits["train"]
+        validation = splits.get(run_payload["early_stop_split_key"])
+    method.fit(train, validation, work_dir=Path(run_dir), restore_from=restore_from)
+    summary = dict(getattr(method, "training_summary_", {}))
+    summary.setdefault("train_steps", 0)
+    summary.setdefault("early_stop_split_key", run_payload["early_stop_split_key"])
+    if bool(run_payload.get("evaluates", True)):
+        pred_dir = Path(run_dir) / "predictions"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        for split_key in run_payload["evaluation_split_keys"]:
+            pred_path = pred_dir / f"{split_key}.pt"
+            if reuse_predictions and pred_path.exists():
+                try:
+                    payload = dict(torch.load(pred_path, map_location="cpu"))
+                    if (
+                        prediction_kind is not None
+                        and payload.get("prediction_kind") != prediction_kind
+                    ):
+                        raise ValueError(f"Expected {prediction_kind} predictions")
+                    evaluation_runner._score_split(
+                        split_key=str(split_key),
+                        pred_artifact=payload,
+                        run_payload=run_payload,
+                    )
+                    continue
+                except Exception:
+                    pass
+                finally:
+                    payload = None
+            torch.save(method.predict(splits[str(split_key)]), pred_path)
+    return {**summary, "status": "completed"}
 
 
 def _write_json(path: Path, payload: dict[str, object] | list[dict[str, object]]) -> None:

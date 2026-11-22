@@ -11,7 +11,7 @@ import torch
 from rasterio.transform import from_bounds
 
 import movebench.bench.config as bench_config
-import movebench.bench.executors.deepssf as deepssf_executor
+import movebench.models.deepssf as deepssf_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
 import movebench.datasets.rasters as raster_data
@@ -279,7 +279,7 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
                 patch.object(
-                    deepssf_executor,
+                    deepssf_model,
                     "_device_for_backend",
                     return_value=torch.device("cpu"),
                 ),
@@ -303,19 +303,24 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                     side_effect=AssertionError("WDS loader"),
                 ),
                 patch.object(
-                    deepssf_executor,
+                    deepssf_model,
                     "DeepSSF",
                     side_effect=lambda *_args, **_kwargs: FakeModel(),
                 ) as deep_ssf,
             ):
-                result = deepssf_executor.run(
-                    run_payload=run_payload,
-                    resolved_artifacts=resolved_artifacts,
-                    run_dir=Path(tmpdir),
-                    tracker=object(),
-                    restore_from=None,
+                method = deepssf_model.DeepSSFMethod(
+                    model_config=run_payload["method_model"],
+                    hparams=run_payload["method_hparams"],
+                    seed=run_payload["seed"],
                 )
-            self.assertEqual(result["status"], "completed")
+                train = resolved_artifacts["splits"]["train"]
+                validation = DataSplit("test_temporal", train.metadata, train.inputs)
+                self.assertIs(
+                    method.fit(train, validation, work_dir=Path(tmpdir)), method
+                )
+                prediction = method.predict(validation)
+                result = method.training_summary_
+            self.assertFalse((Path(tmpdir) / "predictions").exists())
             gpu_cache.assert_called_once()
             self.assertEqual(make_gpu_loader.call_count, 4)
             self.assertEqual(result["schedule"]["steps_per_epoch"], 1)
@@ -325,10 +330,6 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                 5,
             )
             self.assertEqual(deep_ssf.call_args.kwargs["dense_dim_hidden"], 128)
-            prediction = torch.load(
-                Path(tmpdir) / "predictions" / "test_temporal.pt",
-                map_location="cpu",
-            )
             self.assertEqual(prediction["point_id_start"].tolist(), [7])
 
 

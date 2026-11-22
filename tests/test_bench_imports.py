@@ -5,6 +5,28 @@ from pathlib import Path
 
 
 class BenchmarkImportsTest(unittest.TestCase):
+    def test_method_modules_do_not_import_execution(self):
+        self._check_imports(
+            ["movebench.models.baselines", "movebench.models.ssf",
+             "movebench.models.deepssf", "movebench.models.moveformer"],
+            forbidden=["movebench.bench.run", "movebench.bench.executors.issf"],
+        )
+
+    def test_issf_import_does_not_change_multiprocessing_sharing(self):
+        code = """
+from unittest.mock import patch
+import torch
+with patch.object(torch.multiprocessing, 'set_sharing_strategy') as sharing:
+    import movebench.models.ssf
+sharing.assert_not_called()
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def _check_imports(self, modules, forbidden=()):
         code = (
             "import importlib, sys\n"

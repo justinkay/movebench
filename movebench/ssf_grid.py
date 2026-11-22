@@ -326,8 +326,7 @@ def _move_batch_to_device(batch: dict[str, torch.Tensor | None], device: torch.d
 def build_ssf_grid_artifact(
     *,
     grid_dataset,
-    train_manifest,
-    train_steps,
+    sampler_state: dict[str, Any],
     batch_size: int,
     num_workers: int,
     device: torch.device,
@@ -344,13 +343,9 @@ def build_ssf_grid_artifact(
             "pixel_size_m": float(grid_dataset.pixel_size_m),
         }
 
-    sampler_state = _replay_sampler_state(
-        train_manifest=train_manifest,
-        train_steps=train_steps,
-    )
     step_batch_size = scaled_step_batch_size(
         batch_size=batch_size,
-        train_points_per_step=int(train_manifest.sampler["num_candidates"]) + 1,
+        train_points_per_step=int(sampler_state["num_candidates"]) + 1,
         output_hw=grid_dataset.output_hw,
     )
     print("Computed step batch size, workers", step_batch_size, num_workers)

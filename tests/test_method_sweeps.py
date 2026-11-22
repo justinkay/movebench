@@ -9,7 +9,7 @@ import torch
 from x_transformers.x_transformers import Attention
 
 import movebench.bench.config as bench_config
-import movebench.bench.executors.moveformer as moveformer_executor
+import movebench.models.moveformer as moveformer_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
 from movebench.datasets import DataSplit
@@ -264,7 +264,7 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             sum(parameter.numel() for parameter in baseline.parameters()),
         )
 
-    def test_executor_forwards_resolved_model_settings(self):
+    def test_method_forwards_resolved_model_settings(self):
         class FakeDataset:
             cov_dim = 7
             num_candidates_total = 101
@@ -307,18 +307,18 @@ class MoveFormerConfigurationTest(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as run_dir,
             patch.object(
-                moveformer_executor,
+                moveformer_model,
                 "sequence_dataset",
                 return_value=FakeDataset(),
             ),
-            patch.object(moveformer_executor, "sequence_loader", return_value=object()),
+            patch.object(moveformer_model, "sequence_loader", return_value=object()),
             patch.object(
-                moveformer_executor,
+                moveformer_model,
                 "build_moveformer_selection_model",
                 return_value=model,
             ) as build_model,
             patch.object(
-                moveformer_executor,
+                moveformer_model,
                 "_MoveFormerRuntime",
                 return_value=runtime,
             ),
@@ -331,21 +331,25 @@ class MoveFormerConfigurationTest(unittest.TestCase):
                     "eval_metrics": metrics,
                 },
             ),
-            patch.object(moveformer_executor, "_eval_metrics") as evaluate,
+            patch.object(moveformer_model, "_eval_metrics") as evaluate,
             patch.object(
-                moveformer_executor.torch.cuda,
+                moveformer_model.torch.cuda,
                 "is_available",
                 return_value=False,
             ),
-            patch.object(moveformer_executor.torch, "save"),
+            patch.object(moveformer_model.torch, "save"),
         ):
-            result = moveformer_executor.run(
-                run_payload=run_payload,
-                resolved_artifacts=resolved_artifacts,
-                run_dir=run_dir,
-                tracker=object(),
-                restore_from=None,
+            method = moveformer_model.MoveFormerMethod(
+                model_config=run_payload["method_model"],
+                hparams=run_payload["method_hparams"],
+                seed=run_payload["seed"],
             )
+            self.assertIs(method.fit(
+                resolved_artifacts["splits"]["train"],
+                resolved_artifacts["splits"]["test_temporal"],
+                work_dir=run_dir,
+            ), method)
+            result = method.training_summary_
 
         build_model.assert_called_once_with(
             cov_dim=7,
@@ -354,7 +358,6 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             heads=4,
             var_len_training_v2=False,
         )
-        self.assertEqual(result["status"], "completed")
         self.assertEqual(result["train_metrics"], metrics)
         self.assertEqual(result["eval_metrics"], metrics)
         evaluate.assert_not_called()
