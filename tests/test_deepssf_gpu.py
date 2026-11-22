@@ -14,6 +14,8 @@ import movebench.bench.config as bench_config
 import movebench.bench.executors.deepssf as deepssf_executor
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
+import movebench.datasets.rasters as raster_data
+from movebench.datasets import DataSplit
 from movebench.datasets.chips import ChipDataset
 from movebench.datasets.deepssf import DeepSSFDataset
 from movebench.datasets.deepssf_gpu import (
@@ -259,12 +261,20 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                 "lr_scheduler_patience_epochs": 5,
             },
         }
-        resolved_artifacts = {
+        inputs = {
+            "kind": "gpu",
             "trajectories_path": Path("unused.csv"),
             "plan": object(),
             "catalog": object(),
-            "output_hw": (5, 5),
             "channel_indices": [0],
+            "selected_splits": ("train", "test_temporal"),
+        }
+        resolved_artifacts = {
+            "splits": {
+                "train": DataSplit(
+                    "train", {"study_id": "study", "output_hw": (5, 5)}, inputs
+                )
+            }
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
@@ -274,21 +284,21 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                     return_value=torch.device("cpu"),
                 ),
                 patch.object(
-                    deepssf_executor,
+                    raster_data,
                     "build_deepssf_gpu_datasets",
                     return_value={
                         "train": FakeDataset(),
                         "test_temporal": FakeDataset(),
                     },
                 ),
-                patch.object(deepssf_executor, "AlphaEarthGPUCache"),
+                patch.object(raster_data, "AlphaEarthGPUCache") as gpu_cache,
                 patch.object(
-                    deepssf_executor,
+                    raster_data,
                     "make_deepssf_gpu_loader",
                     return_value=loader,
                 ) as make_gpu_loader,
                 patch.object(
-                    deepssf_executor,
+                    raster_data,
                     "make_deepssf_wds_loader",
                     side_effect=AssertionError("WDS loader"),
                 ),
@@ -305,6 +315,7 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                     tracker=object(),
                 )
             self.assertEqual(result["status"], "completed")
+            gpu_cache.assert_called_once()
             self.assertEqual(make_gpu_loader.call_count, 4)
             self.assertEqual(result["schedule"]["steps_per_epoch"], 1)
             self.assertEqual(result["schedule"]["lr_scheduler_factor"], 0.1)

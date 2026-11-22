@@ -21,6 +21,7 @@ from rasterio.warp import calculate_default_transform
 from torch.utils.data import DataLoader, Dataset
 
 import movebench.layers.derived as derived
+from movebench.datasets import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.geometry import (
@@ -779,4 +780,21 @@ def make_grid_loader(
         drop_last=False,
         pin_memory=device.type == "cuda",
         persistent_workers=bool(num_workers > 0),
+    )
+
+
+def grid_dataset(
+    data: DataSplit, *, plan: LayerPlan, include_env: bool
+) -> SSFGridStepDataset:
+    return make_grid_step_dataset(
+        study_dir=data.inputs["study_dir"],
+        trajectories_path=data.inputs["trajectories_path"],
+        split_key=data.split_key,
+        plan=plan,
+        sampler_config=data.inputs["sampler"],
+        output_hw=data.metadata["output_hw"],
+        selected_splits=selected_splits_from_manifest(
+            data.inputs["point_stores"][data.split_key]["manifest"]
+        ),
+        include_env=include_env,
     )

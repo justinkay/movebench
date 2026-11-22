@@ -12,6 +12,7 @@ import movebench.bench.config as bench_config
 import movebench.bench.executors.moveformer as moveformer_executor
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
+from movebench.datasets import DataSplit
 from movebench.models.moveformer import build_moveformer_selection_model
 
 
@@ -291,13 +292,13 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             "study_id": "study",
             "covariate_set": "alphaearth_only",
         }
+        inputs = {"point_stores": {}}
+        metadata = {"output_hw": (101, 101)}
         resolved_artifacts = {
-            "normalization_stats_path": "stats.json",
-            "point_stores": {},
-            "study_dir": "/tmp/study",
-            "trajectories_path": "/tmp/study/trajectories.csv",
-            "plan": object(),
-            "sampler": object(),
+            "splits": {
+                split: DataSplit(split, metadata, inputs)
+                for split in ("train", "test_temporal")
+            }
         }
         model = torch.nn.Linear(1, 1)
         runtime = SimpleNamespace(model=model)
@@ -307,10 +308,10 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             tempfile.TemporaryDirectory() as run_dir,
             patch.object(
                 moveformer_executor,
-                "MoveFormerPointStoreDataset",
+                "sequence_dataset",
                 return_value=FakeDataset(),
             ),
-            patch.object(moveformer_executor, "_loader", return_value=object()),
+            patch.object(moveformer_executor, "sequence_loader", return_value=object()),
             patch.object(
                 moveformer_executor,
                 "build_moveformer_selection_model",
@@ -330,11 +331,6 @@ class MoveFormerConfigurationTest(unittest.TestCase):
                 moveformer_executor,
                 "_eval_metrics",
                 return_value=metrics,
-            ),
-            patch.object(
-                moveformer_executor.bench_config,
-                "resolve_timescale",
-                return_value={"output_hw": (101, 101)},
             ),
             patch.object(
                 moveformer_executor.torch.cuda,

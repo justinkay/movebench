@@ -7,18 +7,10 @@ import torch
 import torch.nn.functional as F
 
 import movebench.bench.evaluation.runner as evaluation_runner
-from movebench.training import TrainerConfig, run_training_loop
-from movebench.datasets.deepssf_gpu import (
-    AlphaEarthGPUCache,
-    build_deepssf_gpu_datasets,
-    make_deepssf_gpu_loader,
-)
-from movebench.datasets.deepssf_wds_cache import (
-    make_deepssf_wds_loader,
-    steps_per_epoch_from_manifest,
-)
+from movebench.datasets.rasters import prepare_rasters
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.models.deepssf import DeepSSF
+from movebench.training import TrainerConfig, run_training_loop
 
 
 def _slice_spatial(
@@ -172,26 +164,6 @@ def _completed_steps_from_history(run_dir: Path, *, fallback: int = 0) -> int:
         if isinstance(entry, dict) and "step" in entry
     ]
     return max(steps) if steps else int(fallback)
-
-
-def _make_loader(
-    cache_dir: Path,
-    *,
-    batch_size: int,
-    seed: int,
-    shuffle: bool,
-):
-    return make_deepssf_wds_loader(
-        cache_dir,
-        batch_size=int(batch_size),
-        num_workers=8,
-        shardshuffle=100 if shuffle else 0,
-        shuffle_buffer=int(batch_size) * 8 if shuffle else 0,
-        seed=int(seed),
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=False,
-        prefetch_factor=None,
-    )
 
 
 def _device_for_backend(backend: str) -> torch.device:
@@ -349,60 +321,14 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     eval_max_items = int(method_hparams["max_eval_items"])
     backend = str(run_payload.get("deepssf_data", "wds"))
     device = _device_for_backend(backend)
-    if backend == "gpu":
-        selected_splits = [str(split) for split in run_payload["selected_splits"]]
-        datasets = build_deepssf_gpu_datasets(
-            study_id=str(run_payload["study_id"]),
-            trajectories_path=resolved_artifacts["trajectories_path"],
-            plan=resolved_artifacts["plan"],
-            splits=selected_splits,
-            catalog=resolved_artifacts["catalog"],
-            output_hw=tuple(resolved_artifacts["output_hw"]),
-        )
-        output_hw = tuple(int(value) for value in resolved_artifacts["output_hw"])
-        pixel_size_m = float(datasets["train"].pixel_size_m)
-        cache = AlphaEarthGPUCache(resolved_artifacts["catalog"], device)
-
-        def loader_for_split(split_key: str, *, shuffle: bool):
-            return make_deepssf_gpu_loader(
-                datasets[str(split_key)],
-                cache=cache,
-                batch_size=batch_size,
-                num_workers=8,
-                seed=seed,
-                shuffle=shuffle,
-            )
-
-    elif backend == "wds":
-        for split_key in ["train", *list(run_payload["evaluation_split_keys"])]:
-            manifest = dict(
-                resolved_artifacts["cache_manifests"][str(split_key)]["manifest"]
-            )
-            if str(manifest.get("sample_identity", "")) != "point_id_start":
-                raise ValueError(
-                    "deepSSF cache manifest must declare sample_identity='point_id_start'; rebuild the cache"
-                )
-        train_manifest = dict(
-            resolved_artifacts["cache_manifests"]["train"]["manifest"]
-        )
-        output_hw = tuple(int(value) for value in train_manifest["output_hw"])
-        pixel_size_m = float(train_manifest["pixel_size_m"])
-
-        def loader_for_split(split_key: str, *, shuffle: bool):
-            return _make_loader(
-                Path(
-                    resolved_artifacts["cache_manifests"][str(split_key)][
-                        "cache_dir"
-                    ]
-                ),
-                batch_size=batch_size,
-                seed=seed,
-                shuffle=shuffle,
-            )
-
-    else:
-        raise ValueError(f"Unsupported deepssf_data={backend!r}")
-
+    rasters = prepare_rasters(
+        resolved_artifacts["splits"]["train"],
+        batch_size=batch_size,
+        seed=seed,
+        device=device,
+    )
+    output_hw = rasters.output_hw
+    pixel_size_m = rasters.pixel_size_m
     if len(output_hw) != 2 or int(output_hw[0]) != int(output_hw[1]):
         raise ValueError(f"deepSSF expects square chips. Got output_hw={output_hw}.")
     method_model = dict(run_payload.get("method_model", {}))
@@ -412,15 +338,11 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
             f"deepSSF model.image_dim={image_dim} is incompatible with output_hw={list(output_hw)}"
         )
 
-    train_loader = loader_for_split("train", shuffle=True)
-    steps_per_epoch = (
-        len(train_loader)
-        if backend == "gpu"
-        else steps_per_epoch_from_manifest(train_manifest, batch_size=batch_size)
-    )
+    train_loader = rasters.loader("train", shuffle=True)
+    steps_per_epoch = rasters.steps_per_epoch
     eval_loaders = {
-        "train": loader_for_split("train", shuffle=False),
-        early_stop_split_key: loader_for_split(
+        "train": rasters.loader("train", shuffle=False),
+        early_stop_split_key: rasters.loader(
             early_stop_split_key,
             shuffle=False,
         ),
@@ -436,7 +358,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
             method_hparams["lr_scheduler_patience_epochs"]
         ),
     }
-    channel_indices = list(resolved_artifacts["channel_indices"])
+    channel_indices = rasters.channel_indices
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -523,7 +445,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
                 continue
             except Exception:
                 pass
-        loader = loader_for_split(str(split_key), shuffle=False)
+        loader = rasters.loader(str(split_key), shuffle=False)
         torch.save(
             _prediction_payload(
                 runtime.model,

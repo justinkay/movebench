@@ -391,22 +391,14 @@ def build_ssf_grid_artifact(
                 output_hw=grid_dataset.output_hw,
                 pixel_size_m=float(grid_dataset.pixel_size_m),
             )
-            model_batch: dict[str, torch.Tensor | None] = {
-                "env": flat_env.to(dtype=torch.float32),
-                "valid": flat_valid.to(dtype=torch.bool),
-                "move": feature_adapter._movement_tensor(
-                    step_length_m=step_length_m,
-                    turn_angle_rad=turn_angle_rad,
-                ),
-                "time": None,
-                "individual_idx": None,
-            }
-            if bool(getattr(feature_adapter, "include_time", False)):
-                model_batch["time"] = feature_adapter._time_tensor(batch["timestamp_ns"])
-            if bool(getattr(feature_adapter, "include_individual_id", False)):
-                model_batch["individual_idx"] = feature_adapter._individual_idx_tensor(
-                    np.asarray(batch["individual_id"])
-                )
+            model_batch = feature_adapter.make_model_batch(
+                env=flat_env.to(dtype=torch.float32),
+                valid=flat_valid.to(dtype=torch.bool),
+                step_length_m=step_length_m,
+                turn_angle_rad=turn_angle_rad,
+                timestamp_ns=batch["timestamp_ns"],
+                individual_ids=np.asarray(batch["individual_id"]),
+            )
             logits = model(_move_batch_to_device(model_batch, device))
             scores_hw = log_q_hw + logits.detach().cpu().view(n_steps, height, width)
         point_id_chunks.append(point_id_start)

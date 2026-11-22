@@ -14,12 +14,16 @@ import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 from tqdm import tqdm
 
-import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.ssf_grid as ssf_grid
 from movebench.bench.moveformer_taxa import moveformer_taxon_for_study
-from movebench.datasets.chips import make_grid_step_dataset, selected_splits_from_manifest
-from movebench.datasets.moveformer import MoveFormerPointStoreDataset
+from movebench.datasets import SharedTrainingData, StudyTrainingData
+from movebench.datasets.chips import grid_dataset
+from movebench.datasets.moveformer import (
+    MoveFormerPointStoreDataset,
+    sequence_dataset,
+    sequence_loader,
+)
 from movebench.features.points import PointStoreReader
 from movebench.geometry import (
     LOCAL_GEOMETRY,
@@ -27,9 +31,6 @@ from movebench.geometry import (
     lonlat_from_local_xy_m,
 )
 from movebench.lib.moveformer.geo_transformers.geo_utils import gcs_to_n_vector
-from movebench.lib.moveformer.geo_transformers.training_utils import (
-    collate_sequence_dicts,
-)
 from movebench.models.moveformer import build_moveformer_selection_model
 from movebench.training import TrainerConfig, run_training_loop
 
@@ -68,10 +69,6 @@ def _grid_offsets_np(
     )
     x_hw, y_hw = np.meshgrid(x_coords_m, y_coords_m, indexing="xy")
     return x_hw, y_hw
-
-
-def _collate_moveformer(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    return collate_sequence_dicts(batch)
 
 
 @torch.no_grad()
@@ -621,51 +618,6 @@ class _MoveFormerRuntime:
         self._set_lr()
 
 
-def _loader(
-    dataset: Dataset,
-    *,
-    batch_size: int,
-    shuffle: bool,
-    seed: int,
-    num_workers: int = 4,
-):
-    kwargs = {
-        "dataset": dataset,
-        "batch_size": int(batch_size),
-        "shuffle": bool(shuffle),
-        "num_workers": int(num_workers),
-        "collate_fn": _collate_moveformer,
-    }
-    if shuffle:
-        generator = torch.Generator()
-        generator.manual_seed(int(seed))
-        kwargs["generator"] = generator
-    return DataLoader(**kwargs)
-
-
-def _dataset_kwargs(
-    *,
-    run_payload,
-    resolved_artifacts,
-    taxon_embedding: np.ndarray | None = None,
-    lazy_rows: bool = False,
-) -> dict[str, object]:
-    hparams = dict(run_payload["method_hparams"])
-    return {
-        "study_dir": resolved_artifacts["study_dir"],
-        "trajectories_path": resolved_artifacts["trajectories_path"],
-        "plan": resolved_artifacts["plan"],
-        "sampler_config": resolved_artifacts["sampler"],
-        "max_len": int(hparams["max_len"]),
-        "min_len": int(hparams["min_len"]),
-        "normalize_env": resolved_artifacts.get("normalization_stats_path") is not None,
-        "require_normalization_stats": False,
-        "subset_band_ids": [str(band_id) for band_id in run_payload["band_ids"]],
-        "taxon_embedding": taxon_embedding,
-        "lazy_rows": bool(lazy_rows),
-    }
-
-
 def _write_grid_predictions(
     *,
     run_payload,
@@ -673,32 +625,27 @@ def _write_grid_predictions(
     run_dir: Path,
     model: torch.nn.Module,
     train_dataset: MoveFormerPointStoreDataset,
-    dataset_kwargs: dict[str, object],
+    taxon_embedding: np.ndarray | None = None,
     device: torch.device,
 ) -> None:
     hparams = dict(run_payload["method_hparams"])
     batch_size = int(hparams["batch_size"])
     seed = int(run_payload["seed"])
-    point_stores = dict(resolved_artifacts["point_stores"])
+    splits = resolved_artifacts["splits"]
+    point_stores = splits["train"].inputs["point_stores"]
     pred_dir = Path(run_dir) / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    timescale = bench_config.resolve_timescale(
-        str(run_payload["timescale"]),
-        study_id=str(run_payload["study_id"]),
-    )
-    output_hw = tuple(int(value) for value in timescale["output_hw"])
-    prediction_dataset_kwargs = {
-        **dataset_kwargs,
-        "min_len": 1,
-        "allow_prediction_only_segments": True,
-        "lazy_rows": False,
-    }
+    output_hw = splits["train"].metadata["output_hw"]
     for split_key in run_payload["evaluation_split_keys"]:
         split_key = str(split_key)
-        prediction_dataset = MoveFormerPointStoreDataset(
-            split=split_key,
+        prediction_dataset = sequence_dataset(
+            splits[split_key],
+            max_len=int(hparams["max_len"]),
+            min_len=1,
             context_splits=["train", split_key],
-            **prediction_dataset_kwargs,
+            taxon_embedding=taxon_embedding,
+            allow_prediction_only_segments=True,
+            lazy_rows=False,
         )
         pred_path = pred_dir / f"{split_key}.pt"
         if pred_path.exists():
@@ -713,18 +660,8 @@ def _write_grid_predictions(
                     continue
             except Exception:
                 pass
-        selected_splits = selected_splits_from_manifest(
-            point_stores[split_key]["manifest"]
-        )
-        grid_dataset = make_grid_step_dataset(
-            study_dir=resolved_artifacts["study_dir"],
-            trajectories_path=resolved_artifacts["trajectories_path"],
-            split_key=split_key,
-            plan=prediction_dataset.plan,
-            sampler_config=resolved_artifacts["sampler"],
-            output_hw=output_hw,
-            selected_splits=selected_splits,
-            include_env=True,
+        grid = grid_dataset(
+            splits[split_key], plan=prediction_dataset.plan, include_env=True
         )
         step_batch_size = ssf_grid.scaled_step_batch_size(
             batch_size=batch_size,
@@ -737,14 +674,14 @@ def _write_grid_predictions(
         torch.save(
             _grid_prediction_payload(
                 model,
-                _loader(
+                sequence_loader(
                     prediction_dataset,
                     batch_size=batch_size,
                     shuffle=False,
                     seed=seed,
                 ),
                 split_key=split_key,
-                grid_dataset=grid_dataset,
+                grid_dataset=grid,
                 mov_vec_scale=float(train_dataset._mov_vec_scale),
                 step_batch_size=step_batch_size,
                 train_store_dir=point_stores["train"]["store_dir"],
@@ -779,20 +716,19 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     max_len = int(method_hparams["max_len"])
     seed = int(run_payload["seed"])
     early_stop_split_key = str(run_payload["early_stop_split_key"])
-    dataset_kwargs = _dataset_kwargs(
-        run_payload=run_payload,
-        resolved_artifacts=resolved_artifacts,
-    )
-    train_dataset = MoveFormerPointStoreDataset(
-        split="train",
+    splits = resolved_artifacts["splits"]
+    train_dataset = sequence_dataset(
+        splits["train"],
+        max_len=max_len,
+        min_len=int(method_hparams["min_len"]),
         context_splits=None,
         candidate_subset_size=16,
-        **dataset_kwargs,
     )
-    early_stop_dataset = MoveFormerPointStoreDataset(
-        split=early_stop_split_key,
+    early_stop_dataset = sequence_dataset(
+        splits[early_stop_split_key],
+        max_len=max_len,
+        min_len=int(method_hparams["min_len"]),
         context_splits=["train", early_stop_split_key],
-        **dataset_kwargs,
     )
     print("Moveformer train dataset length", len(train_dataset))
 
@@ -802,8 +738,10 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         max_len=max_len,
         **method_model,
     )
-    train_loader = _loader(train_dataset, batch_size=batch_size, shuffle=True, seed=seed)
-    train_eval_loader = _loader(
+    train_loader = sequence_loader(
+        train_dataset, batch_size=batch_size, shuffle=True, seed=seed
+    )
+    train_eval_loader = sequence_loader(
         train_dataset,
         batch_size=batch_size,
         shuffle=False,
@@ -811,7 +749,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
     )
     eval_loaders = {
         "train": train_eval_loader,
-        early_stop_split_key: _loader(
+        early_stop_split_key: sequence_loader(
             early_stop_dataset,
             batch_size=batch_size,
             shuffle=False,
@@ -880,7 +818,6 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         run_dir=run_dir,
         model=runtime.model,
         train_dataset=train_dataset,
-        dataset_kwargs=dataset_kwargs,
         device=device,
     )
 
@@ -892,7 +829,7 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         "train_metrics": _eval_metrics(runtime.model, train_eval_loader, device=device),
         "eval_metrics": _eval_metrics(
             runtime.model,
-            _loader(
+            sequence_loader(
                 early_stop_dataset,
                 batch_size=batch_size,
                 shuffle=False,
@@ -906,32 +843,20 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
 
 def _full_eval_dataset(
     *,
-    study_run: dict[str, object],
-    artifacts: dict[str, object],
-    dataset_kwargs: dict[str, object],
+    study: StudyTrainingData,
+    max_len: int,
+    min_len: int,
+    taxon_embedding: np.ndarray,
 ) -> MoveFormerPointStoreDataset | None:
-    split_candidates = list(
-        dict.fromkeys(
-            [
-                str(study_run["early_stop_split_key"]),
-                *[
-                    str(split_key)
-                    for split_key in study_run["evaluation_split_keys"]
-                ],
-                "test_temporal",
-                "test_individual",
-            ]
-        )
-    )
-    point_stores = dict(artifacts["point_stores"])
-    for split_key in split_candidates:
-        if split_key not in point_stores:
-            continue
+    for data in study.validation:
         try:
-            return MoveFormerPointStoreDataset(
-                split=split_key,
-                context_splits=["train", split_key],
-                **dataset_kwargs,
+            return sequence_dataset(
+                data,
+                max_len=max_len,
+                min_len=min_len,
+                context_splits=["train", data.split_key],
+                taxon_embedding=taxon_embedding,
+                lazy_rows=True,
             )
         except FileNotFoundError:
             continue
@@ -956,27 +881,24 @@ def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
     skipped_eval_study_ids: list[str] = []
     cov_dim: int | None = None
     taxon_dim: int | None = None
-    for study_bundle in resolved_artifacts["studies"]:
-        study_run = dict(study_bundle["run_payload"])
-        artifacts = dict(study_bundle["artifacts"])
-        study_id = str(study_run["study_id"])
+    training_data: SharedTrainingData = resolved_artifacts["train"]
+    for study in training_data.studies:
+        study_id = study.train.metadata["study_id"]
         taxon, taxon_meta = moveformer_taxon_for_study(study_id)
-        dataset_kwargs = _dataset_kwargs(
-            run_payload=study_run,
-            resolved_artifacts=artifacts,
+        train_dataset = sequence_dataset(
+            study.train,
+            max_len=int(hparams["max_len"]),
+            min_len=int(hparams["min_len"]),
+            context_splits=None,
+            candidate_subset_size=candidate_subset_size,
             taxon_embedding=taxon,
             lazy_rows=True,
         )
-        train_dataset = MoveFormerPointStoreDataset(
-            split="train",
-            context_splits=None,
-            candidate_subset_size=candidate_subset_size,
-            **dataset_kwargs,
-        )
         eval_dataset = _full_eval_dataset(
-            study_run=study_run,
-            artifacts=artifacts,
-            dataset_kwargs=dataset_kwargs,
+            study=study,
+            max_len=int(hparams["max_len"]),
+            min_len=int(hparams["min_len"]),
+            taxon_embedding=taxon,
         )
         train_datasets.append(train_dataset)
         train_eval_datasets.append(
@@ -1014,21 +936,21 @@ def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
         raise ValueError("No usable validation split for shared MoveFormer training")
     eval_dataset = ConcatDataset(eval_datasets)
     batch_size = int(hparams["batch_size"])
-    train_loader = _loader(
+    train_loader = sequence_loader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         seed=seed,
         num_workers=0,
     )
-    train_eval_loader = _loader(
+    train_eval_loader = sequence_loader(
         train_eval_dataset,
         batch_size=batch_size,
         shuffle=False,
         seed=seed,
         num_workers=0,
     )
-    eval_loader = _loader(
+    eval_loader = sequence_loader(
         eval_dataset,
         batch_size=batch_size,
         shuffle=False,
@@ -1109,19 +1031,12 @@ def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
                     "cov_dim": int(cov_dim),
                     "taxon_dim": int(taxon_dim),
                     "num_candidates_total": candidate_subset_size,
-                    "shared_training_signature": str(
-                        run_payload["shared_training_signature"]
-                    ),
-                    "shared_study_ids": list(run_payload["shared_study_ids"]),
-                    "shared_data_study_ids": list(
-                        run_payload.get(
-                            "shared_data_study_ids",
-                            run_payload["shared_study_ids"],
-                        )
-                    ),
-                    "shared_zero_step_studies": list(
-                        run_payload.get("shared_zero_step_studies", [])
-                    ),
+                    "shared_training_signature": training_data.training_signature,
+                    "shared_study_ids": list(training_data.requested_study_ids),
+                    "shared_data_study_ids": [
+                        study.train.metadata["study_id"] for study in training_data.studies
+                    ],
+                    "shared_zero_step_studies": list(training_data.zero_step_studies),
                     "taxa": taxon_rows,
                     "eval_split_by_study": eval_split_by_study,
                     "skipped_eval_study_ids": skipped_eval_study_ids,
@@ -1145,53 +1060,41 @@ def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
             eval_loader,
             device=device,
         ),
-        "shared_training_signature": str(
-            run_payload["shared_training_signature"]
-        ),
-        "shared_study_ids": list(run_payload["shared_study_ids"]),
-        "shared_data_study_ids": list(
-            run_payload.get(
-                "shared_data_study_ids",
-                run_payload["shared_study_ids"],
-            )
-        ),
-        "shared_zero_step_studies": list(
-            run_payload.get("shared_zero_step_studies", [])
-        ),
+        "shared_training_signature": training_data.training_signature,
+        "shared_study_ids": list(training_data.requested_study_ids),
+        "shared_data_study_ids": [
+            study.train.metadata["study_id"] for study in training_data.studies
+        ],
+        "shared_zero_step_studies": list(training_data.zero_step_studies),
         "eval_split_by_study": eval_split_by_study,
         "skipped_eval_study_ids": skipped_eval_study_ids,
         "schedule": schedule,
     }
 
 
-def score_full(*, run_payload, resolved_artifacts, run_dir, tracker):
+def score_full(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     del tracker
     run_dir = Path(run_dir)
     study_id = str(run_payload["study_id"])
     taxon, taxon_meta = moveformer_taxon_for_study(study_id)
-    dataset_kwargs = _dataset_kwargs(
-        run_payload=run_payload,
-        resolved_artifacts=resolved_artifacts,
+    train_dataset = sequence_dataset(
+        resolved_artifacts["splits"]["train"],
+        max_len=int(run_payload["method_hparams"]["max_len"]),
+        min_len=int(run_payload["method_hparams"]["min_len"]),
+        context_splits=None,
+        candidate_subset_size=int(run_payload["method_hparams"]["candidate_subset_size"]),
         taxon_embedding=taxon,
         lazy_rows=True,
     )
-    train_dataset = MoveFormerPointStoreDataset(
-        split="train",
-        context_splits=None,
-        candidate_subset_size=int(
-            run_payload["method_hparams"]["candidate_subset_size"]
-        ),
-        **dataset_kwargs,
-    )
 
     checkpoint = torch.load(
-        resolved_artifacts["shared_checkpoint_path"],
+        restore_from["checkpoint_path"],
         map_location="cpu",
     )
     checkpoint_meta = dict(checkpoint["meta"])
-    if checkpoint_meta.get("shared_training_signature") != run_payload.get(
-        "shared_training_signature"
-    ):
+    if checkpoint_meta.get("shared_training_signature") != restore_from[
+        "training_signature"
+    ]:
         raise ValueError("Shared MoveFormer checkpoint signature mismatch")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_moveformer_selection_model(
@@ -1207,7 +1110,7 @@ def score_full(*, run_payload, resolved_artifacts, run_dir, tracker):
         run_dir=run_dir,
         model=model,
         train_dataset=train_dataset,
-        dataset_kwargs=dataset_kwargs,
+        taxon_embedding=taxon,
         device=device,
     )
     shared_summary = dict(resolved_artifacts["shared_training_summary"])

@@ -5,16 +5,21 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.ssf_grid as ssf_grid
-from movebench.datasets.chips import make_grid_step_dataset, selected_splits_from_manifest
-from movebench.datasets.ssf import iSSFDataset
+from movebench.datasets import DataSplit
+from movebench.datasets.chips import grid_dataset
+from movebench.datasets.points import training_steps
+from movebench.datasets.ssf import (
+    candidate_dataset,
+    candidate_eval_loader,
+    candidate_loader,
+    iSSFDataset,
+)
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
 from movebench.training import TrainerConfig, run_training_loop
-from movebench.trajectories import fit_train_step_support, load_trajectories_csv
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -33,61 +38,6 @@ def _loss_step_select(logits: torch.Tensor) -> torch.Tensor:
         device=logits.device,
     )
     return F.cross_entropy(logits, target)
-
-
-def _base_dataset(ds):
-    return ds.dataset if isinstance(ds, Subset) else ds
-
-
-def _make_loader(
-    dataset,
-    *,
-    batch_size: int,
-    shuffle: bool,
-    num_workers: int,
-    device: torch.device,
-) -> DataLoader:
-    base = _base_dataset(dataset)
-    return DataLoader(
-        dataset,
-        batch_size=int(batch_size),
-        shuffle=bool(shuffle),
-        num_workers=int(num_workers),
-        collate_fn=base.collate,
-        drop_last=False,
-        pin_memory=device.type == "cuda",
-        persistent_workers=bool(num_workers > 0),
-    )
-
-
-def _subset_loader(
-    dataset: iSSFDataset,
-    *,
-    batch_size: int,
-    seed: int,
-    max_items: int | None,
-    num_workers: int,
-    device: torch.device,
-) -> DataLoader:
-    if max_items is None:
-        return _make_loader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            device=device,
-        )
-    k = min(int(max_items), int(len(dataset)))
-    g = torch.Generator(device="cpu")
-    g.manual_seed(int(seed))
-    subset = Subset(dataset, torch.randperm(len(dataset), generator=g)[:k].tolist())
-    return _make_loader(
-        subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        device=device,
-    )
 
 
 def _move_batch_to_device(
@@ -198,28 +148,14 @@ def _grid_prediction_payload(
     dataset: iSSFDataset,
     train_manifest,
     train_steps,
-    split_key: str,
-    selected_splits: list[str] | None,
-    study_dir: Path,
-    trajectories_path: Path,
-    sampler_config,
-    output_hw: tuple[int, int],
+    data: DataSplit,
     batch_size: int,
     prediction_num_workers: int,
     device: torch.device,
 ) -> dict[str, object]:
-    grid_dataset = make_grid_step_dataset(
-        study_dir=study_dir,
-        trajectories_path=trajectories_path,
-        split_key=str(split_key),
-        plan=dataset.plan,
-        sampler_config=sampler_config,
-        output_hw=output_hw,
-        selected_splits=selected_splits,
-        include_env=True,
-    )
+    grid = grid_dataset(data, plan=dataset.plan, include_env=True)
     return ssf_grid.build_ssf_grid_artifact(
-        grid_dataset=grid_dataset,
+        grid_dataset=grid,
         train_manifest=train_manifest,
         train_steps=train_steps,
         batch_size=batch_size,
@@ -245,7 +181,8 @@ def _run(
     device = torch.device("cpu")
 
     print("Using device", device)
-    point_stores = resolved_artifacts["point_stores"]
+    splits = resolved_artifacts["splits"]
+    point_stores = splits["train"].inputs["point_stores"]
     run_dir = Path(run_dir)
     run_key = str(run_payload.get("run_key", run_payload["method"]))
 
@@ -258,15 +195,7 @@ def _run(
         if method_hparams.get("max_eval_items") is None
         else int(method_hparams["max_eval_items"])
     )
-    output_hw = tuple(
-        int(v)
-        for v in bench_config.resolve_timescale(
-            str(run_payload["timescale"]),
-            study_id=str(run_payload["study_id"]),
-        )[
-            "output_hw"
-        ]
-    )
+    output_hw = splits["train"].metadata["output_hw"]
     model_cfg = dict(run_payload.get("method_model", {}))
     include_time = bool(model_cfg.get("include_time", False))
 
@@ -274,14 +203,8 @@ def _run(
 
     def _dataset_for(split_key: str) -> iSSFDataset:
         if split_key not in split_datasets:
-            split_datasets[split_key] = iSSFDataset(
-                study_dir=resolved_artifacts["study_dir"],
-                trajectories_path=resolved_artifacts["trajectories_path"],
-                plan=resolved_artifacts["plan"],
-                sampler_config=resolved_artifacts["sampler"],
-                split=str(split_key),
-                subset_band_ids=list(run_payload["band_ids"]),
-                include_time=include_time,
+            split_datasets[split_key] = candidate_dataset(
+                splits[split_key], include_time=include_time
             )
         return split_datasets[split_key]
 
@@ -292,7 +215,7 @@ def _run(
     eval_dataset = _dataset_for(eval_split_key)
 
     print("Creating train loader")
-    train_loader = _make_loader(
+    train_loader = candidate_loader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
@@ -300,7 +223,7 @@ def _run(
         device=device,
     )
     print("Creating eval loaders")
-    eval_train_loader = _subset_loader(
+    eval_train_loader = candidate_eval_loader(
         train_dataset,
         batch_size=batch_size,
         seed=int(run_payload["seed"]) + 0,
@@ -308,7 +231,7 @@ def _run(
         num_workers=train_num_workers,
         device=device,
     )
-    eval_loader = _subset_loader(
+    eval_loader = candidate_eval_loader(
         eval_dataset,
         batch_size=batch_size,
         seed=int(run_payload["seed"]) + 1,
@@ -407,7 +330,6 @@ def _run(
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    trajectories_df = None
     train_steps = None
     train_manifest = point_stores["train"]["manifest"]
     for split_key in run_payload["evaluation_split_keys"]:
@@ -427,16 +349,9 @@ def _run(
                     f"{run_key}: regenerating iSSF predictions split={split_key}: {exc}"
                 )
         print("Preds don't exist. Computing.")
-        if trajectories_df is None:
-            trajectories_df = load_trajectories_csv(
-                Path(resolved_artifacts["trajectories_path"])
-            )
-            _support, train_steps = fit_train_step_support(
-                trajectories_df,
-                step_spec=resolved_artifacts["plan"].step_spec,
-            )
+        if train_steps is None:
+            _support, train_steps = training_steps(splits["train"])
         dataset = _dataset_for(str(split_key))
-        split_manifest = point_stores[split_key]["manifest"]
         _log_progress(
             f"{run_key}: starting iSSF prediction split={split_key} "
             f"grid={output_hw[0]}x{output_hw[1]} workers={prediction_num_workers}"
@@ -447,12 +362,7 @@ def _run(
                 dataset=dataset,
                 train_manifest=train_manifest,
                 train_steps=train_steps,
-                split_key=str(split_key),
-                selected_splits=selected_splits_from_manifest(split_manifest),
-                study_dir=Path(resolved_artifacts["study_dir"]),
-                trajectories_path=Path(resolved_artifacts["trajectories_path"]),
-                sampler_config=resolved_artifacts["sampler"],
-                output_hw=output_hw,
+                data=splits[str(split_key)],
                 batch_size=batch_size,
                 prediction_num_workers=prediction_num_workers,
                 device=device,

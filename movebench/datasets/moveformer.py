@@ -9,8 +9,9 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
+from movebench.datasets import DataSplit
 from movebench.datasets.ssf import (
     _movement_stats_from_reader,
     _subset_plan_env_channels,
@@ -24,6 +25,9 @@ from movebench.features.points import (
 )
 from movebench.geometry import local_xy_m_from_lonlat
 from movebench.layers.plan import LayerPlan
+from movebench.lib.moveformer.geo_transformers.training_utils import (
+    collate_sequence_dicts,
+)
 from movebench.lib.moveformer.geo_transformers.trajectory import (
     SimpleTrajectoryProcessor,
 )
@@ -724,3 +728,55 @@ class MoveFormerPointStoreDataset(Dataset):
             candidate_y_m=candidate_y_m,
         )
         return encoded
+
+
+def sequence_dataset(
+    data: DataSplit,
+    *,
+    max_len: int,
+    min_len: int,
+    context_splits: list[str] | None = None,
+    candidate_subset_size: int | None = None,
+    taxon_embedding: np.ndarray | torch.Tensor | list[float] | None = None,
+    lazy_rows: bool = False,
+    allow_prediction_only_segments: bool = False,
+) -> MoveFormerPointStoreDataset:
+    return MoveFormerPointStoreDataset(
+        study_dir=data.inputs["study_dir"],
+        trajectories_path=data.inputs["trajectories_path"],
+        plan=data.inputs["plan"],
+        sampler_config=data.inputs["sampler"],
+        split=data.split_key,
+        max_len=int(max_len),
+        min_len=int(min_len),
+        normalize_env=data.inputs["normalization_stats_path"] is not None,
+        require_normalization_stats=False,
+        subset_band_ids=list(data.metadata["band_ids"]),
+        context_splits=context_splits,
+        candidate_subset_size=candidate_subset_size,
+        taxon_embedding=taxon_embedding,
+        lazy_rows=bool(lazy_rows),
+        allow_prediction_only_segments=allow_prediction_only_segments,
+    )
+
+
+def sequence_loader(
+    dataset: Dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
+    num_workers: int = 4,
+):
+    kwargs = {
+        "dataset": dataset,
+        "batch_size": int(batch_size),
+        "shuffle": bool(shuffle),
+        "num_workers": int(num_workers),
+        "collate_fn": collate_sequence_dicts,
+    }
+    if shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+        kwargs["generator"] = generator
+    return DataLoader(**kwargs)

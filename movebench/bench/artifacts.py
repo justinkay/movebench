@@ -8,6 +8,17 @@ from pathlib import Path
 import movebench.bench.config as bench_config
 import movebench.bench.run_state as bench_run_state
 import movebench.paths as paths
+from movebench.datasets import (
+    DataSplit,
+    GPUInputs,
+    PointInputs,
+    PointStoreInput,
+    SharedTrainingData,
+    SplitMetadata,
+    StudyTrainingData,
+    WDSCacheInput,
+    WDSInputs,
+)
 from movebench.datasets.deepssf_gpu import ALPHAEARTH_LAYER, AlphaEarthCatalog
 from movebench.datasets.deepssf_wds_cache import (
     list_deepssf_wds_shards,
@@ -20,6 +31,7 @@ from movebench.features.points import (
     point_store_manifest_path,
     point_store_train_stats_path,
 )
+from movebench.geometry import LOCAL_GEOMETRY
 from movebench.layers.plan import LayerPlan
 from movebench.study import Study
 from movebench.trajectories import (
@@ -429,6 +441,27 @@ def _blocked_reason(
     return reasons[0] if reasons else "missing prerequisites"
 
 
+def _resolved_splits(
+    run_payload: dict[str, object],
+    inputs: PointInputs | WDSInputs | GPUInputs,
+    output_hw: tuple[int, int],
+) -> dict[str, object]:
+    metadata: SplitMetadata = {
+        "study_id": str(run_payload["study_id"]),
+        "timescale": str(run_payload["timescale"]),
+        "band_ids": tuple(str(band_id) for band_id in run_payload["band_ids"]),
+        "geometry": LOCAL_GEOMETRY,
+        "output_hw": tuple(int(value) for value in output_hw),
+    }
+    return {
+        "status": "resolved",
+        "splits": {
+            str(split): DataSplit(str(split), metadata, inputs)
+            for split in ["train", *run_payload["evaluation_split_keys"]]
+        },
+    }
+
+
 def _resolve_point_artifacts(
     run_payload: dict[str, object],
     *,
@@ -446,7 +479,7 @@ def _resolve_point_artifacts(
         }
     band_indices = [all_band_ids.index(band_id) for band_id in band_ids]
 
-    point_stores: dict[str, dict[str, object]] = {}
+    point_stores: dict[str, PointStoreInput] = {}
     for split in ["train", *list(run_payload["evaluation_split_keys"])]:
         store_dir = point_store_dir(
             study_dir=study_dir,
@@ -537,19 +570,18 @@ def _resolve_point_artifacts(
                 "reason": f"invalid normalization stats for train: {exc}",
             }
 
-    return {
-        "status": "resolved",
-        "artifact_requirement": "points",
+    inputs: PointInputs = {
+        "kind": "points",
         "study_dir": study_dir,
         "trajectories_path": study_dir / "trajectories.csv",
         "plan": timescale["plan"],
         "sampler": timescale["sampler"],
         "all_band_ids": all_band_ids,
-        "band_ids": band_ids,
         "band_indices": band_indices,
         "normalization_stats_path": normalization_stats_path,
         "point_stores": point_stores,
     }
+    return _resolved_splits(run_payload, inputs, timescale["output_hw"])
 
 
 def _resolve_deepssf_cache_artifacts(
@@ -570,11 +602,11 @@ def _resolve_deepssf_cache_artifacts(
     channel_indices = [all_band_ids.index(band_id) for band_id in band_ids]
 
     requested_splits = ["train", *list(run_payload["evaluation_split_keys"])]
-    cache_manifests: dict[str, dict[str, object]] = {}
+    cache_manifests: dict[str, WDSCacheInput] = {}
     reference_output_hw: tuple[int, int] | None = None
     reference_pixel_size_m: float | None = None
     exact_failure_reason: str | None = None
-    exact_cache_manifests: dict[str, dict[str, object]] = {}
+    exact_cache_manifests: dict[str, WDSCacheInput] = {}
     for split in requested_splits:
         cache_hash = bench_config.deepssf_cache_hash_for_split(
             str(run_payload["timescale"]),
@@ -725,15 +757,14 @@ def _resolve_deepssf_cache_artifacts(
             ),
         }
 
-    return {
-        "status": "resolved",
-        "artifact_requirement": "deepssf_cache",
+    inputs: WDSInputs = {
+        "kind": "wds",
         "study_dir": paths.study_dir(str(run_payload["study_id"])),
         "all_band_ids": all_band_ids,
-        "band_ids": band_ids,
         "channel_indices": channel_indices,
         "cache_manifests": cache_manifests,
     }
+    return _resolved_splits(run_payload, inputs, reference_output_hw)
 
 
 def _resolve_deepssf_gpu_artifacts(
@@ -797,20 +828,19 @@ def _resolve_deepssf_gpu_artifacts(
             "reason": f"invalid or missing AlphaEarth tiles: {exc}",
         }
 
-    return {
-        "status": "resolved",
-        "artifact_requirement": "deepssf_gpu",
+    inputs: GPUInputs = {
+        "kind": "gpu",
         "study_dir": study_dir,
         "trajectories_path": trajectories_path,
         "plan": _subset_layer_plan(timescale["plan"], alphaearth_band_ids),
         "catalog": catalog,
         "all_band_ids": alphaearth_band_ids,
-        "band_ids": band_ids,
         "channel_indices": [
             alphaearth_band_ids.index(band_id) for band_id in band_ids
         ],
-        "output_hw": output_hw,
+        "selected_splits": tuple(str(split) for split in run_payload["selected_splits"]),
     }
+    return _resolved_splits(run_payload, inputs, output_hw)
 
 
 def _resolve_shared_point_artifacts(
@@ -818,7 +848,7 @@ def _resolve_shared_point_artifacts(
     *,
     method: dict[str, object],
 ) -> dict[str, object]:
-    studies: list[dict[str, object]] = []
+    studies: list[StudyTrainingData] = []
     for descriptor in run_payload["shared_studies"]:
         study_run = {**run_payload, **dict(descriptor)}
         study_run["shared_training_run"] = False
@@ -836,16 +866,29 @@ def _resolve_shared_point_artifacts(
                 "status": "blocked",
                 "reason": f"{study_run['study_id']}: {resolved['reason']}",
             }
+        splits = resolved["splits"]
+        validation_keys = dict.fromkeys(
+            [
+                str(study_run["early_stop_split_key"]),
+                *[str(split) for split in study_run["evaluation_split_keys"]],
+                "test_temporal",
+                "test_individual",
+            ]
+        )
         studies.append(
-            {
-                "run_payload": study_run,
-                "artifacts": resolved,
-            }
+            StudyTrainingData(
+                train=splits["train"],
+                validation=tuple(splits[key] for key in validation_keys if key in splits),
+            )
         )
     return {
         "status": "resolved",
-        "artifact_requirement": "points",
-        "studies": studies,
+        "train": SharedTrainingData(
+            studies=tuple(studies),
+            requested_study_ids=tuple(run_payload["shared_study_ids"]),
+            zero_step_studies=tuple(run_payload.get("shared_zero_step_studies", ())),
+            training_signature=str(run_payload["shared_training_signature"]),
+        ),
     }
 
 

@@ -246,12 +246,20 @@ def _execute_run(
     try:
         try:
             executor = _load_executor(str(run_payload["executor"]))
+            executor_kwargs = {}
+            if "shared_checkpoint_path" in resolved:
+                executor_kwargs["restore_from"] = {
+                    "checkpoint_path": resolved["shared_checkpoint_path"],
+                    "training_run_key": str(run_payload["shared_checkpoint_run_key"]),
+                    "training_signature": str(run_payload["shared_training_signature"]),
+                }
             summary = dict(
                 executor(
                     run_payload=run_payload,
                     resolved_artifacts=resolved,
                     run_dir=run_dir,
                     tracker=tracker,
+                    **executor_kwargs,
                 )
             )
             summary.setdefault("status", "completed")

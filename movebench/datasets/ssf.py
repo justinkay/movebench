@@ -8,8 +8,9 @@ from typing import Any
 
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
+from movebench.datasets import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (
@@ -451,20 +452,46 @@ class iSSFDataset(Dataset):
         if self.include_individual_id:
             shared_keys.append("individual_id")
         shared = self.reader.load_shared_rows(keys=shared_keys, row_idxs=idxs)
+        return self.make_model_batch(
+            env=env,
+            valid=valid,
+            step_length_m=shared["step_length_m"],
+            turn_angle_rad=shared["turn_angle_rad"],
+            timestamp_ns=shared.get("timestamp_ns"),
+            individual_ids=shared.get("individual_id"),
+        )
+
+    def make_model_batch(
+        self,
+        *,
+        env: torch.Tensor,
+        valid: torch.Tensor,
+        step_length_m: torch.Tensor,
+        turn_angle_rad: torch.Tensor,
+        timestamp_ns: torch.Tensor | None = None,
+        individual_ids: Any = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Assemble CPU features without normalizing environmental values again.
+
+        env/valid are prepared float32/bool [N,C,P]; distances/angles are [N,P].
+        Optional time and individual features use int64 timestamps [N] and a
+        one-dimensional ID array [N]. Returns env, valid, move [N,3,P], time
+        [N,4] or None, and training-mapped individual_idx [N] or None.
+        """
         batch: dict[str, torch.Tensor | None] = {
             "env": env,
             "valid": valid,
             "move": self._movement_tensor(
-                step_length_m=shared["step_length_m"],
-                turn_angle_rad=shared["turn_angle_rad"],
+                step_length_m=step_length_m,
+                turn_angle_rad=turn_angle_rad,
             ),
             "time": None,
             "individual_idx": None,
         }
         if self.include_time:
-            batch["time"] = self._time_tensor(shared["timestamp_ns"])
+            batch["time"] = self._time_tensor(timestamp_ns)
         if self.include_individual_id:
-            batch["individual_idx"] = self._individual_idx_tensor(shared["individual_id"])
+            batch["individual_idx"] = self._individual_idx_tensor(individual_ids)
         return batch
 
     def __getitem__(self, idx: int) -> int:
@@ -472,3 +499,73 @@ class iSSFDataset(Dataset):
 
     def collate(self, indices: list[int] | torch.Tensor) -> dict[str, torch.Tensor | None]:
         return self.load_batch(indices)
+
+
+def candidate_dataset(
+    data: DataSplit, *, include_time: bool = False, include_individual_id: bool = False
+) -> iSSFDataset:
+    return iSSFDataset(
+        study_dir=data.inputs["study_dir"],
+        trajectories_path=data.inputs["trajectories_path"],
+        plan=data.inputs["plan"],
+        sampler_config=data.inputs["sampler"],
+        split=data.split_key,
+        subset_band_ids=list(data.metadata["band_ids"]),
+        include_time=include_time,
+        include_individual_id=include_individual_id,
+    )
+
+
+def _base_dataset(ds):
+    return ds.dataset if isinstance(ds, Subset) else ds
+
+
+def candidate_loader(
+    dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    device: torch.device,
+) -> DataLoader:
+    base = _base_dataset(dataset)
+    return DataLoader(
+        dataset,
+        batch_size=int(batch_size),
+        shuffle=bool(shuffle),
+        num_workers=int(num_workers),
+        collate_fn=base.collate,
+        drop_last=False,
+        pin_memory=device.type == "cuda",
+        persistent_workers=bool(num_workers > 0),
+    )
+
+
+def candidate_eval_loader(
+    dataset: iSSFDataset,
+    *,
+    batch_size: int,
+    seed: int,
+    max_items: int | None,
+    num_workers: int,
+    device: torch.device,
+) -> DataLoader:
+    if max_items is None:
+        return candidate_loader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            device=device,
+        )
+    k = min(int(max_items), int(len(dataset)))
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed))
+    subset = Subset(dataset, torch.randperm(len(dataset), generator=g)[:k].tolist())
+    return candidate_loader(
+        subset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        device=device,
+    )

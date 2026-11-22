@@ -21,6 +21,12 @@ class BenchmarkImportsTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_input_records_do_not_import_dataset_implementations(self):
+        self._check_imports(
+            ["movebench.datasets"],
+            ["torch", "movebench.datasets.ssf", "movebench.datasets.deepssf_gpu"],
+        )
+
     def test_read_only_modules_do_not_import_execution(self):
         for name in ("run_state", "artifacts", "planning", "results", "report", "summary"):
             with self.subTest(module=name):
@@ -41,6 +47,8 @@ class BenchmarkImportsTest(unittest.TestCase):
             "movebench.datasets.moveformer",
             "movebench.datasets.deepssf",
             "movebench.datasets.deepssf_gpu",
+            "movebench.datasets.rasters",
+            "movebench.datasets.points",
             "movebench.models.ssf",
             "movebench.models.moveformer",
             "movebench.models.deepssf",

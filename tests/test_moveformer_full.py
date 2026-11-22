@@ -14,6 +14,8 @@ import movebench.bench.executors.moveformer as moveformer_executor
 import movebench.bench.moveformer_taxa as moveformer_taxa
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
+import movebench.datasets.moveformer as moveformer_data
+from movebench.datasets import DataSplit, SharedTrainingData, StudyTrainingData
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset, _StepRecord
 from movebench.lib.moveformer.geo_transformers.trajectory import (
     SimpleTrajectoryProcessor,
@@ -181,6 +183,37 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
             {tuple(run["shared_study_ids"]) for run in runs},
             {("land-a", "land-b"), ("marine",)},
         )
+
+    def test_resolver_accepts_planned_cohort_without_zero_step_studies(self):
+        _experiment, runs = self._expand(
+            method="moveformer-full-trainonly",
+            studies=["a", "b"],
+        )
+        self.assertEqual(len(runs), 1)
+        payload = runs[0]
+        self.assertNotIn("shared_zero_step_studies", payload)
+        before = json.dumps(payload, sort_keys=True)
+
+        def resolve_points(study_run, **_kwargs):
+            return bench_artifacts._resolved_splits(study_run, {}, (101, 101))
+
+        with (
+            patch.object(bench_artifacts.bench_config, "resolve_timescale"),
+            patch.object(
+                bench_artifacts, "_resolve_point_artifacts", side_effect=resolve_points
+            ),
+        ):
+            resolved = bench_artifacts._resolve_artifacts_for_run(payload)
+
+        self.assertEqual(resolved["status"], "resolved")
+        data = resolved["train"]
+        self.assertEqual(data.zero_step_studies, ())
+        self.assertEqual(data.requested_study_ids, ("a", "b"))
+        self.assertEqual(
+            [study.train.metadata["study_id"] for study in data.studies], ["a", "b"]
+        )
+        self.assertEqual(data.training_signature, payload["shared_training_signature"])
+        self.assertEqual(json.dumps(payload, sort_keys=True), before)
 
     def test_shared_training_does_not_silently_drop_blocked_study(self):
         def resolve(run):
@@ -488,6 +521,31 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             "candidate_subset_size": 16,
         }
 
+    @staticmethod
+    def _study_data(study_id, validation=("test_temporal",)):
+        inputs = {
+            "kind": "points",
+            "study_dir": Path(study_id),
+            "trajectories_path": Path(study_id) / "trajectories.csv",
+            "plan": object(),
+            "sampler": object(),
+            "all_band_ids": ["alphaearth.A00"],
+            "band_indices": [0],
+            "normalization_stats_path": None,
+            "point_stores": {},
+        }
+        metadata = {
+            "study_id": study_id,
+            "timescale": "1h",
+            "band_ids": ("alphaearth.A00",),
+            "geometry": "local_aeqd",
+            "output_hw": (101, 101),
+        }
+        return StudyTrainingData(
+            DataSplit("train", metadata, inputs),
+            tuple(DataSplit(key, metadata, inputs) for key in validation),
+        )
+
     def test_train_full_is_lazy_and_writes_only_shared_checkpoint(self):
         hparams = self._hparams()
         run_payload = {
@@ -499,45 +557,19 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             "shared_training_signature": "signature",
             "shared_study_ids": ["a", "b"],
         }
-        studies = []
-        for study_id in ["a", "b"]:
-            study_run = {
-                **run_payload,
-                "study_id": study_id,
-                "band_ids": ["alphaearth.A00"],
-                "early_stop_split_key": "test_temporal",
-                "evaluation_split_keys": ["test_temporal"],
-            }
-            studies.append(
-                {
-                    "run_payload": study_run,
-                    "artifacts": {
-                        "study_dir": Path(study_id),
-                        "trajectories_path": Path(study_id) / "trajectories.csv",
-                        "plan": object(),
-                        "sampler": object(),
-                    },
-                }
-            )
+        studies = tuple(self._study_data(study_id) for study_id in ("a", "b"))
+        training_data = SharedTrainingData(studies, ("a", "b"), (), "signature")
 
         def taxon(study_id):
             return np.ones(4, dtype=np.float32), {"species": study_id}
-
-        def eval_dataset(**kwargs):
-            return _FakeDataset(split="test_temporal", **kwargs["dataset_kwargs"])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             with (
                 patch.object(
-                    moveformer_executor,
+                    moveformer_data,
                     "MoveFormerPointStoreDataset",
                     _FakeDataset,
-                ),
-                patch.object(
-                    moveformer_executor,
-                    "_full_eval_dataset",
-                    side_effect=eval_dataset,
                 ),
                 patch.object(
                     moveformer_executor,
@@ -546,7 +578,7 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                 ),
                 patch.object(
                     moveformer_executor,
-                    "_loader",
+                    "sequence_loader",
                     side_effect=lambda dataset, **_kwargs: _FakeLoader(dataset),
                 ),
                 patch.object(
@@ -569,7 +601,7 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             ):
                 summary = moveformer_executor.train_full(
                     run_payload=run_payload,
-                    resolved_artifacts={"studies": studies},
+                    resolved_artifacts={"train": training_data},
                     run_dir=run_dir,
                     tracker=object(),
                 )
@@ -583,13 +615,60 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
         )
         predict.assert_not_called()
 
-    def test_full_validation_falls_back_from_empty_preferred_split(self):
-        study_run = {
-            "study_id": "study",
-            "early_stop_split_key": "test_temporal",
-            "evaluation_split_keys": ["test_temporal", "test_individual"],
+    def test_shared_input_records_keep_validation_and_requested_membership(self):
+        requested = ["a", "b", "zero"]
+        zero_steps = [{"study_id": "zero", "reason": "zero training steps"}]
+        payload = {
+            "timescale": "1h",
+            "band_ids": ["alphaearth.A00"],
+            "shared_study_ids": requested,
+            "shared_zero_step_studies": zero_steps,
+            "shared_training_signature": "signature",
+            "shared_studies": [
+                {
+                    "study_id": "a",
+                    "early_stop_split_key": "test_individual",
+                    "evaluation_split_keys": ["test_temporal", "test_individual"],
+                },
+                {
+                    "study_id": "b",
+                    "early_stop_split_key": None,
+                    "evaluation_split_keys": [],
+                },
+            ],
         }
 
+        def resolve(study_run, **_kwargs):
+            return bench_artifacts._resolved_splits(
+                study_run,
+                self._study_data(study_run["study_id"]).train.inputs,
+                (101, 101),
+            )
+
+        with (
+            patch.object(bench_artifacts.bench_config, "resolve_timescale"),
+            patch.object(bench_artifacts, "_resolve_point_artifacts", side_effect=resolve),
+        ):
+            data = bench_artifacts._resolve_shared_point_artifacts(payload, method={})[
+                "train"
+            ]
+
+        self.assertEqual(data.requested_study_ids, tuple(requested))
+        self.assertEqual(data.zero_step_studies, tuple(zero_steps))
+        self.assertEqual(data.training_signature, "signature")
+        self.assertEqual(
+            [study.train.metadata["study_id"] for study in data.studies], ["a", "b"]
+        )
+        self.assertEqual(
+            [split.split_key for split in data.studies[0].validation],
+            ["test_individual", "test_temporal"],
+        )
+        self.assertEqual(data.studies[1].validation, ())
+        for split in data.studies[0].validation:
+            self.assertIs(split.inputs, data.studies[0].train.inputs)
+            self.assertIs(split.metadata, data.studies[0].train.metadata)
+
+    def test_full_validation_falls_back_from_empty_preferred_split(self):
         def dataset(*, split, **kwargs):
             if split == "test_temporal":
                 raise ValueError(
@@ -598,19 +677,15 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             return _FakeDataset(split=split, **kwargs)
 
         with patch.object(
-            moveformer_executor,
+            moveformer_data,
             "MoveFormerPointStoreDataset",
             side_effect=dataset,
         ):
             result = moveformer_executor._full_eval_dataset(
-                study_run=study_run,
-                artifacts={
-                    "point_stores": {
-                        "test_temporal": object(),
-                        "test_individual": object(),
-                    }
-                },
-                dataset_kwargs={},
+                study=self._study_data("study", ("test_temporal", "test_individual")),
+                max_len=64,
+                min_len=1,
+                taxon_embedding=np.ones(4, dtype=np.float32),
             )
 
         self.assertEqual(result.split, "test_individual")
@@ -639,17 +714,14 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                 "shared_training_signature": "signature",
                 "shared_checkpoint_run_key": "train-key",
             }
+            study = self._study_data("study")
             artifacts = {
-                "study_dir": Path("study"),
-                "trajectories_path": Path("study/trajectories.csv"),
-                "plan": object(),
-                "sampler": object(),
-                "shared_checkpoint_path": checkpoint_path,
+                "splits": {"train": study.train},
                 "shared_training_summary": {"train_steps": 9},
             }
             with (
                 patch.object(
-                    moveformer_executor,
+                    moveformer_data,
                     "MoveFormerPointStoreDataset",
                     _FakeDataset,
                 ),
@@ -672,6 +744,11 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                 summary = moveformer_executor.score_full(
                     run_payload=run_payload,
                     resolved_artifacts=artifacts,
+                    restore_from={
+                        "checkpoint_path": checkpoint_path,
+                        "training_run_key": "train-key",
+                        "training_signature": "signature",
+                    },
                     run_dir=Path(tmpdir) / "score",
                     tracker=object(),
                 )
