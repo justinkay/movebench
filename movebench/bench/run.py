@@ -16,7 +16,7 @@ import movebench.bench.report as bench_report
 import movebench.bench.run_state as bench_run_state
 import movebench.bench.summary as bench_summary
 import movebench.paths as paths
-from movebench.training import RunTracker
+from movebench.training import RestorationReference, RunTracker, seed_everything
 
 _SUPPORTED_METHODS = {
     str(method_key)
@@ -156,21 +156,41 @@ def _resolved_manifest_path(
     )
 
 
-def _clear_runtime_outputs(run_dir: Path) -> None:
-    bench_run_state.remove_active_run(run_dir)
-    for path in (
-        run_dir / "training_summary.json",
-        run_dir / "history.json",
-        run_dir / "checkpoint_best.pt",
-    ):
-        if path.exists():
-            path.unlink()
+def _clear_prediction_outputs(run_dir: Path) -> None:
+    summary_path = run_dir / "training_summary.json"
+    if summary_path.exists():
+        summary_path.unlink()
     predictions_dir = run_dir / "predictions"
     if predictions_dir.exists():
         shutil.rmtree(predictions_dir)
     final_metrics_dir = run_dir / "final_metrics"
     if final_metrics_dir.exists():
         shutil.rmtree(final_metrics_dir)
+
+
+def _clear_runtime_outputs(run_dir: Path) -> None:
+    _clear_prediction_outputs(run_dir)
+    bench_run_state.remove_active_run(run_dir)
+    for path in (run_dir / "history.json", run_dir / "checkpoint_best.pt"):
+        if path.exists():
+            path.unlink()
+
+
+def _clear_shared_dependents(training_run_key: str) -> None:
+    runs_root = bench_run_state.run_dir(training_run_key).parent
+    dependents = [
+        path.parent
+        for path in sorted(runs_root.glob("*/resolved_run.json"))
+        if _load_json(path).get("shared_checkpoint_run_key") == training_run_key
+    ]
+    active = [path.name for path in dependents if bench_run_state.active_run_is_live(path)]
+    if active:
+        raise RuntimeError(
+            f"Cannot replace shared trainer {training_run_key}: active scorers {active}. "
+            "Retry training after scoring finishes."
+        )
+    for path in dependents:
+        _clear_prediction_outputs(path)
 
 
 def _write_blocked_run(
@@ -213,6 +233,13 @@ def _execute_run(
         except Exception:
             resume_run = False
 
+    checkpoint_path = run_dir / "checkpoint_best.pt"
+    replacing_shared = bool(run_payload.get("shared_training_run")) and (
+        not resume_run or not checkpoint_path.exists()
+    )
+    if replacing_shared:
+        _clear_shared_dependents(str(run_payload["run_key"]))
+
     if resume_run:
         training_summary_path = run_dir / "training_summary.json"
         if training_summary_path.exists():
@@ -239,20 +266,40 @@ def _execute_run(
             reason=str(resolved["reason"]),
         )
 
+    restore_from: RestorationReference | None = None
+    trains = bool(bench_config.METHODS[str(run_payload["method"])]["trains"])
+    if "shared_checkpoint_path" in resolved:
+        restore_from = {
+            "checkpoint_path": resolved["shared_checkpoint_path"],
+            "training_run_key": str(run_payload["shared_checkpoint_run_key"]),
+            "training_signature": str(run_payload["shared_training_signature"]),
+        }
+    elif trains:
+        if resume_run and checkpoint_path.exists():
+            restore_from = {
+                "checkpoint_path": checkpoint_path,
+                "training_run_key": (
+                    str(run_payload["run_key"])
+                    if run_payload.get("shared_training_run") else None
+                ),
+                "training_signature": run_payload.get("shared_training_signature"),
+            }
+        else:
+            if run_payload.get("shared_training_run") and not replacing_shared:
+                _clear_shared_dependents(str(run_payload["run_key"]))
+            _clear_runtime_outputs(run_dir)
+
     _log_progress(f"{run_payload['run_key']}: starting executor {run_payload['method']}")
     tracker = RunTracker(run_dir)
     bench_run_state.write_active_run(run_dir)
     previous_handlers = _install_interrupt_handlers()
     try:
         try:
+            seed_everything(int(run_payload["seed"]))
             executor = _load_executor(str(run_payload["executor"]))
             executor_kwargs = {}
-            if "shared_checkpoint_path" in resolved:
-                executor_kwargs["restore_from"] = {
-                    "checkpoint_path": resolved["shared_checkpoint_path"],
-                    "training_run_key": str(run_payload["shared_checkpoint_run_key"]),
-                    "training_signature": str(run_payload["shared_training_signature"]),
-                }
+            if trains or "shared_checkpoint_path" in resolved:
+                executor_kwargs["restore_from"] = restore_from
             summary = dict(
                 executor(
                     run_payload=run_payload,

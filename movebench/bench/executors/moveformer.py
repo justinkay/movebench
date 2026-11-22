@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 from dataclasses import dataclass
 from functools import lru_cache
@@ -32,7 +31,7 @@ from movebench.geometry import (
 )
 from movebench.lib.moveformer.geo_transformers.geo_utils import gcs_to_n_vector
 from movebench.models.moveformer import build_moveformer_selection_model
-from movebench.training import TrainerConfig, run_training_loop
+from movebench.training import TrainerConfig, fit_or_restore, read_checkpoint
 
 
 def _batch_to_device(
@@ -473,22 +472,6 @@ def _grid_prediction_payload(
     }
 
 
-def _completed_steps_from_history(run_dir: Path, *, fallback: int = 0) -> int:
-    history_path = Path(run_dir) / "history.json"
-    if not history_path.exists():
-        return int(fallback)
-    try:
-        history_payload = json.loads(history_path.read_text(encoding="utf-8"))
-    except Exception:
-        return int(fallback)
-    steps = [
-        int(float(entry["step"]))
-        for entry in history_payload
-        if isinstance(entry, dict) and "step" in entry
-    ]
-    return max(steps) if steps else int(fallback)
-
-
 @dataclass
 class _MoveFormerRuntime:
     model: torch.nn.Module
@@ -708,7 +691,7 @@ def _limited_subset(
     return Subset(dataset, [int(index) for index in indices])
 
 
-def run(*, run_payload, resolved_artifacts, run_dir, tracker):
+def run(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     run_dir = Path(run_dir)
     method_model = dict(run_payload.get("method_model", {}))
     method_hparams = dict(run_payload.get("method_hparams", {}))
@@ -772,45 +755,18 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         warmup_steps=int(method_hparams["warmup_steps"]),
         lr_gamma=float(method_hparams["lr_gamma"]),
     )
-    checkpoint_path = run_dir / "checkpoint_best.pt"
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
-        best_step = int(dict(checkpoint.get("meta", {})).get("best_step", 0))
-        fit = {
-            "completed_steps": _completed_steps_from_history(
-                run_dir,
-                fallback=best_step,
-            ),
-            "best_step": int(best_step),
-        }
-    else:
-        fit = run_training_loop(
-            runtime,
-            TrainerConfig(
-                max_steps=int(schedule["max_steps"]),
-                eval_every_steps=int(schedule["eval_every_steps"]),
-                patience_evals=int(schedule["patience_evals"]),
-                seed=seed,
-            ),
-            tracker,
-        )
-        torch.save(
-            {
-                "state_dict": {
-                    key: value.detach().cpu()
-                    for key, value in runtime.model.state_dict().items()
-                },
-                "meta": {
-                    "method": str(run_payload["method"]),
-                    "best_step": int(fit["best_step"]),
-                    "covariate_set": str(run_payload["covariate_set"]),
-                    "cov_dim": int(train_dataset.cov_dim),
-                    "num_candidates_total": int(train_dataset.num_candidates_total),
-                },
-            },
-            checkpoint_path,
-        )
+    fit = fit_or_restore(
+        runtime,
+        TrainerConfig(
+            max_steps=int(schedule["max_steps"]),
+            eval_every_steps=int(schedule["eval_every_steps"]),
+            patience_evals=int(schedule["patience_evals"]),
+        ),
+        tracker,
+        work_dir=run_dir,
+        restore_from=restore_from,
+        schedule=schedule,
+    )
 
     _write_grid_predictions(
         run_payload=run_payload,
@@ -826,18 +782,9 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         "train_steps": int(fit["completed_steps"]),
         "best_step": int(fit["best_step"]),
         "early_stop_split_key": early_stop_split_key,
-        "train_metrics": _eval_metrics(runtime.model, train_eval_loader, device=device),
-        "eval_metrics": _eval_metrics(
-            runtime.model,
-            sequence_loader(
-                early_stop_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                seed=seed,
-            ),
-            device=device,
-        ),
-        "schedule": dict(schedule),
+        "train_metrics": dict(fit["train_metrics"]),
+        "eval_metrics": dict(fit["eval_metrics"]),
+        "schedule": dict(fit["schedule"]),
     }
 
 
@@ -866,7 +813,7 @@ def _full_eval_dataset(
     return None
 
 
-def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
+def train_full(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     run_dir = Path(run_dir)
     hparams = dict(run_payload["method_hparams"])
     seed = int(run_payload["seed"])
@@ -991,84 +938,45 @@ def train_full(*, run_payload, resolved_artifacts, run_dir, tracker):
         warmup_steps=int(hparams["warmup_steps"]),
         lr_gamma=float(hparams["lr_gamma"]),
     )
-    checkpoint_path = run_dir / "checkpoint_best.pt"
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        if dict(checkpoint["meta"]).get("shared_training_signature") != run_payload.get(
-            "shared_training_signature"
-        ):
-            raise ValueError("Shared MoveFormer checkpoint signature mismatch")
-        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
-        best_step = int(dict(checkpoint["meta"]).get("best_step", 0))
-        fit = {
-            "completed_steps": _completed_steps_from_history(
-                run_dir,
-                fallback=best_step,
-            ),
-            "best_step": best_step,
-        }
-    else:
-        fit = run_training_loop(
-            runtime,
-            TrainerConfig(
-                max_steps=int(schedule["max_steps"]),
-                eval_every_steps=int(schedule["eval_every_steps"]),
-                patience_evals=int(schedule["patience_evals"]),
-                seed=seed,
-            ),
-            tracker,
-        )
-        torch.save(
-            {
-                "state_dict": {
-                    key: value.detach().cpu()
-                    for key, value in runtime.model.state_dict().items()
-                },
-                "meta": {
-                    "method": str(run_payload["method"]),
-                    "best_step": int(fit["best_step"]),
-                    "covariate_set": str(run_payload["covariate_set"]),
-                    "cov_dim": int(cov_dim),
-                    "taxon_dim": int(taxon_dim),
-                    "num_candidates_total": candidate_subset_size,
-                    "shared_training_signature": training_data.training_signature,
-                    "shared_study_ids": list(training_data.requested_study_ids),
-                    "shared_data_study_ids": [
-                        study.train.metadata["study_id"] for study in training_data.studies
-                    ],
-                    "shared_zero_step_studies": list(training_data.zero_step_studies),
-                    "taxa": taxon_rows,
-                    "eval_split_by_study": eval_split_by_study,
-                    "skipped_eval_study_ids": skipped_eval_study_ids,
-                },
-            },
-            checkpoint_path,
-        )
+    fit = fit_or_restore(
+        runtime,
+        TrainerConfig(
+            max_steps=int(schedule["max_steps"]),
+            eval_every_steps=int(schedule["eval_every_steps"]),
+            patience_evals=int(schedule["patience_evals"]),
+        ),
+        tracker,
+        work_dir=run_dir,
+        restore_from=restore_from,
+        schedule=schedule,
+        model_metadata={
+            "shared_training_signature": training_data.training_signature,
+            "shared_study_ids": list(training_data.requested_study_ids),
+            "shared_data_study_ids": [
+                study.train.metadata["study_id"] for study in training_data.studies
+            ],
+            "shared_zero_step_studies": list(training_data.zero_step_studies),
+            "taxa": taxon_rows,
+            "eval_split_by_study": eval_split_by_study,
+            "skipped_eval_study_ids": skipped_eval_study_ids,
+        },
+    )
+    metadata = fit["model_metadata"]
 
     return {
         "status": "completed",
         "train_steps": int(fit["completed_steps"]),
         "best_step": int(fit["best_step"]),
         "early_stop_split_key": "shared_eval",
-        "train_metrics": _eval_metrics(
-            runtime.model,
-            train_eval_loader,
-            device=device,
-        ),
-        "eval_metrics": _eval_metrics(
-            runtime.model,
-            eval_loader,
-            device=device,
-        ),
-        "shared_training_signature": training_data.training_signature,
-        "shared_study_ids": list(training_data.requested_study_ids),
-        "shared_data_study_ids": [
-            study.train.metadata["study_id"] for study in training_data.studies
-        ],
-        "shared_zero_step_studies": list(training_data.zero_step_studies),
-        "eval_split_by_study": eval_split_by_study,
-        "skipped_eval_study_ids": skipped_eval_study_ids,
-        "schedule": schedule,
+        "train_metrics": dict(fit["train_metrics"]),
+        "eval_metrics": dict(fit["eval_metrics"]),
+        "shared_training_signature": metadata["shared_training_signature"],
+        "shared_study_ids": metadata["shared_study_ids"],
+        "shared_data_study_ids": metadata["shared_data_study_ids"],
+        "shared_zero_step_studies": metadata["shared_zero_step_studies"],
+        "eval_split_by_study": metadata["eval_split_by_study"],
+        "skipped_eval_study_ids": metadata["skipped_eval_study_ids"],
+        "schedule": dict(fit["schedule"]),
     }
 
 
@@ -1087,15 +995,7 @@ def score_full(*, run_payload, resolved_artifacts, run_dir, tracker, restore_fro
         lazy_rows=True,
     )
 
-    checkpoint = torch.load(
-        restore_from["checkpoint_path"],
-        map_location="cpu",
-    )
-    checkpoint_meta = dict(checkpoint["meta"])
-    if checkpoint_meta.get("shared_training_signature") != restore_from[
-        "training_signature"
-    ]:
-        raise ValueError("Shared MoveFormer checkpoint signature mismatch")
+    checkpoint = read_checkpoint(restore_from)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_moveformer_selection_model(
         cov_dim=int(train_dataset.cov_dim),
@@ -1103,7 +1003,7 @@ def score_full(*, run_payload, resolved_artifacts, run_dir, tracker, restore_fro
         max_len=int(run_payload["method_hparams"]["max_len"]),
         **dict(run_payload["method_model"]),
     ).to(device)
-    model.load_state_dict(dict(checkpoint["state_dict"]))
+    model.load_state_dict(checkpoint["model_state"])
     _write_grid_predictions(
         run_payload=run_payload,
         resolved_artifacts=resolved_artifacts,
@@ -1113,14 +1013,11 @@ def score_full(*, run_payload, resolved_artifacts, run_dir, tracker, restore_fro
         taxon_embedding=taxon,
         device=device,
     )
-    shared_summary = dict(resolved_artifacts["shared_training_summary"])
     return {
         "status": "completed",
-        "train_steps": int(shared_summary.get("train_steps", 0)),
-        "best_step": int(checkpoint_meta.get("best_step", 0)),
+        "train_steps": int(checkpoint["completed_steps"]),
+        "best_step": int(checkpoint["best_step"]),
         "early_stop_split_key": str(run_payload["early_stop_split_key"]),
-        "shared_checkpoint_run_key": str(
-            run_payload["shared_checkpoint_run_key"]
-        ),
+        "shared_checkpoint_run_key": restore_from["training_run_key"],
         "taxon": taxon_meta,
     }

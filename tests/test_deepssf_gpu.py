@@ -313,6 +313,7 @@ class DeepSSFGPUExecutorTest(unittest.TestCase):
                     resolved_artifacts=resolved_artifacts,
                     run_dir=Path(tmpdir),
                     tracker=object(),
+                    restore_from=None,
                 )
             self.assertEqual(result["status"], "completed")
             gpu_cache.assert_called_once()

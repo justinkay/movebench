@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import torch
@@ -19,7 +18,7 @@ from movebench.datasets.ssf import (
     iSSFDataset,
 )
 from movebench.models.ssf import LinearStepSelect, MLPStepSelect
-from movebench.training import TrainerConfig, run_training_loop
+from movebench.training import RestorationReference, TrainerConfig, fit_or_restore
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -173,6 +172,7 @@ def _run(
     run_dir,
     tracker,
     model_kind: str,
+    restore_from: RestorationReference | None,
 ) -> dict[str, object]:
 
     # TODO: specify in config?
@@ -273,60 +273,20 @@ def _run(
         lr=float(method_hparams["lr"]),
         weight_decay=float(method_hparams["weight_decay"]),
     )
-    checkpoint_path = run_dir / "checkpoint_best.pt"
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
-        best_step = int(dict(checkpoint.get("meta", {})).get("best_step", 0))
-        train_steps_completed = best_step
-        history_path = run_dir / "history.json"
-        if history_path.exists():
-            history_payload = json.loads(history_path.read_text(encoding="utf-8"))
-            history_steps = [
-                int(float(entry["step"]))
-                for entry in history_payload
-                if isinstance(entry, dict) and "step" in entry
-            ]
-            if history_steps:
-                train_steps_completed = max(history_steps)
-        fit = {
-            "completed_steps": int(train_steps_completed),
-            "best_step": int(best_step),
-            "train_metrics": {},
-            "eval_metrics": {},
-        }
-        _log_progress(
-            f"{run_key}: reusing iSSF checkpoint best_step={fit['best_step']}"
-        )
-    else:
-        print("Entering training loop")
-        fit = run_training_loop(
-            runtime,
-            TrainerConfig(
-                max_steps=int(method_hparams["max_steps"]),
-                eval_every_steps=int(method_hparams["eval_every_steps"]),
-                patience_evals=int(method_hparams["patience_evals"]),
-                seed=int(run_payload["seed"]),
-            ),
-            tracker,
-        )
-        _log_progress(
-            f"{run_key}: finished iSSF training steps={fit['completed_steps']} best_step={fit['best_step']}"
-        )
-        torch.save(
-            {
-                "state_dict": {
-                    key: value.detach().cpu()
-                    for key, value in runtime.model.state_dict().items()
-                },
-                "meta": {
-                    "method": str(run_payload["method"]),
-                    "best_step": int(fit["best_step"]),
-                    "covariate_set": str(run_payload["covariate_set"]),
-                },
-            },
-            checkpoint_path,
-        )
+    fit = fit_or_restore(
+        runtime,
+        TrainerConfig(
+            max_steps=int(method_hparams["max_steps"]),
+            eval_every_steps=int(method_hparams["eval_every_steps"]),
+            patience_evals=int(method_hparams["patience_evals"]),
+        ),
+        tracker,
+        work_dir=run_dir,
+        restore_from=restore_from,
+    )
+    _log_progress(
+        f"{run_key}: fitted iSSF steps={fit['completed_steps']} best_step={fit['best_step']}"
+    )
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
@@ -381,21 +341,23 @@ def _run(
     }
 
 
-def run_linear(*, run_payload, resolved_artifacts, run_dir, tracker):
+def run_linear(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     return _run(
         run_payload=run_payload,
         resolved_artifacts=resolved_artifacts,
         run_dir=run_dir,
         tracker=tracker,
         model_kind="linear",
+        restore_from=restore_from,
     )
 
 
-def run_mlp(*, run_payload, resolved_artifacts, run_dir, tracker):
+def run_mlp(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     return _run(
         run_payload=run_payload,
         resolved_artifacts=resolved_artifacts,
         run_dir=run_dir,
         tracker=tracker,
         model_kind="mlp",
+        restore_from=restore_from,
     )

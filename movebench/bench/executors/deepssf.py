@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import torch
@@ -10,7 +9,7 @@ import movebench.bench.evaluation.runner as evaluation_runner
 from movebench.datasets.rasters import prepare_rasters
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.models.deepssf import DeepSSF
-from movebench.training import TrainerConfig, run_training_loop
+from movebench.training import TrainerConfig, fit_or_restore
 
 
 def _slice_spatial(
@@ -148,22 +147,6 @@ def _prediction_payload(
         "scores": torch.cat(scores_chunks, dim=0),
         "pixel_size_m": float(pixel_size_m),
     }
-
-
-def _completed_steps_from_history(run_dir: Path, *, fallback: int = 0) -> int:
-    history_path = Path(run_dir) / "history.json"
-    if not history_path.exists():
-        return int(fallback)
-    try:
-        history_payload = json.loads(history_path.read_text(encoding="utf-8"))
-    except Exception:
-        return int(fallback)
-    steps = [
-        int(float(entry["step"]))
-        for entry in history_payload
-        if isinstance(entry, dict) and "step" in entry
-    ]
-    return max(steps) if steps else int(fallback)
 
 
 def _device_for_backend(backend: str) -> torch.device:
@@ -312,7 +295,7 @@ class _DeepSSFRuntime:
             self.lr_schedulers[key].load_state_dict(dict(scheduler_states[key]))
 
 
-def run(*, run_payload, resolved_artifacts, run_dir, tracker):
+def run(*, run_payload, resolved_artifacts, run_dir, tracker, restore_from):
     run_dir = Path(run_dir)
     method_hparams = dict(run_payload.get("method_hparams", {}))
     batch_size = int(method_hparams["batch_size"])
@@ -359,9 +342,6 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         ),
     }
     channel_indices = rasters.channel_indices
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
     model = DeepSSF(
         len(channel_indices),
         image_dim=image_dim,
@@ -388,48 +368,18 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         channel_indices=channel_indices,
         eval_max_items=eval_max_items,
     )
-    checkpoint_path = run_dir / "checkpoint_best.pt"
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        runtime.model.load_state_dict(dict(checkpoint["state_dict"]))
-        best_step = int(dict(checkpoint.get("meta", {})).get("best_step", 0))
-        fit = {
-            "completed_steps": _completed_steps_from_history(
-                run_dir,
-                fallback=best_step,
-            ),
-            "best_step": int(best_step),
-            "train_metrics": {},
-            "eval_metrics": {},
-        }
-    else:
-        fit = run_training_loop(
-            runtime,
-            TrainerConfig(
-                max_steps=int(schedule["max_steps"]),
-                eval_every_steps=int(schedule["eval_every_steps"]),
-                patience_evals=int(schedule["patience_evals"]),
-                seed=seed,
-            ),
-            tracker,
-        )
-        torch.save(
-            {
-                "state_dict": {
-                    key: value.detach().cpu()
-                    for key, value in runtime.model.state_dict().items()
-                },
-                "meta": {
-                    "method": str(run_payload["method"]),
-                    "best_step": int(fit["best_step"]),
-                    "covariate_set": str(run_payload["covariate_set"]),
-                    "env_channels": len(channel_indices),
-                    "image_dim": image_dim,
-                    "pixel_size_m": pixel_size_m,
-                },
-            },
-            checkpoint_path,
-        )
+    fit = fit_or_restore(
+        runtime,
+        TrainerConfig(
+            max_steps=int(schedule["max_steps"]),
+            eval_every_steps=int(schedule["eval_every_steps"]),
+            patience_evals=int(schedule["patience_evals"]),
+        ),
+        tracker,
+        work_dir=run_dir,
+        restore_from=restore_from,
+        schedule=schedule,
+    )
 
     pred_dir = run_dir / "predictions"
     pred_dir.mkdir(parents=True, exist_ok=True)
@@ -464,5 +414,5 @@ def run(*, run_payload, resolved_artifacts, run_dir, tracker):
         "early_stop_split_key": early_stop_split_key,
         "train_metrics": dict(fit["train_metrics"]),
         "eval_metrics": dict(fit["eval_metrics"]),
-        "schedule": dict(schedule),
+        "schedule": dict(fit["schedule"]),
     }

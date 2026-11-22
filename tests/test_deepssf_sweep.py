@@ -144,7 +144,6 @@ class TrainingScheduleTest(unittest.TestCase):
                 max_steps=12,
                 eval_every_steps=4,
                 patience_evals=3,
-                seed=0,
             ),
             object(),
         )

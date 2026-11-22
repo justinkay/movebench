@@ -210,6 +210,18 @@ def _terminal_record(
 ) -> dict[str, object]:
     tags = _payload_tags(run_key, run_payload)
     raw_status = str(training_summary.get("status", "")).strip()
+    if (
+        raw_status == "completed"
+        and run_payload.get("shared_training_run")
+        and not (run_dir / "checkpoint_best.pt").exists()
+    ):
+        return _synthetic_record(
+            run_key,
+            run_dir=run_dir,
+            run_payload=run_payload,
+            status="failed",
+            failure_reason="missing checkpoint_best.pt",
+        )
     record_status = raw_status
     if raw_status == "interrupted":
         record_status = "failed"

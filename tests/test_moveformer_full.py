@@ -317,6 +317,10 @@ class MoveFormerFullPlannerTest(unittest.TestCase):
                 (run_dir / "training_summary.json").write_text(
                     json.dumps({"status": "completed"})
                 )
+                self.assertEqual(
+                    bench_artifacts._resolve_shared_checkpoint(payload)["status"],
+                    "blocked",
+                )
                 (run_dir / "checkpoint_best.pt").write_bytes(b"checkpoint")
                 resolved = bench_artifacts._resolve_shared_checkpoint(payload)
         self.assertEqual(resolved["status"], "resolved")
@@ -587,16 +591,16 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                     return_value=torch.nn.Linear(1, 1),
                 ),
                 patch.object(moveformer_executor, "_MoveFormerRuntime", _FakeRuntime),
-                patch.object(
-                    moveformer_executor,
-                    "run_training_loop",
-                    return_value={"completed_steps": 4, "best_step": 3},
-                ),
-                patch.object(
-                    moveformer_executor,
-                    "_eval_metrics",
-                    return_value={"nll": 1.0, "nce": 1.0, "num_tokens": 1.0},
-                ),
+                patch(
+                    "movebench.training.run_training_loop",
+                    return_value={
+                        "completed_steps": 4,
+                        "best_step": 3,
+                        "train_metrics": {"nll": 2.0},
+                        "eval_metrics": {"nll": 3.0},
+                    },
+                ) as fit,
+                patch.object(moveformer_executor, "_eval_metrics") as evaluate,
                 patch.object(moveformer_executor, "_write_grid_predictions") as predict,
             ):
                 summary = moveformer_executor.train_full(
@@ -604,16 +608,47 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                     resolved_artifacts={"train": training_data},
                     run_dir=run_dir,
                     tracker=object(),
+                    restore_from=None,
                 )
+                reference = {
+                    "checkpoint_path": run_dir / "checkpoint_best.pt",
+                    "training_run_key": "trainer",
+                    "training_signature": "signature",
+                }
+                restored = moveformer_executor.train_full(
+                    run_payload={
+                        **run_payload,
+                        "method_hparams": {**hparams, "max_epochs": 99},
+                    },
+                    resolved_artifacts={"train": training_data},
+                    run_dir=run_dir,
+                    tracker=object(),
+                    restore_from=reference,
+                )
+                self.assertEqual(restored, summary)
+                with self.assertRaisesRegex(ValueError, "signature mismatch"):
+                    moveformer_executor.train_full(
+                        run_payload=run_payload,
+                        resolved_artifacts={"train": training_data},
+                        run_dir=run_dir,
+                        tracker=object(),
+                        restore_from={**reference, "training_signature": "wrong"},
+                    )
+                fit.assert_called_once()
             checkpoint = torch.load(run_dir / "checkpoint_best.pt", map_location="cpu")
 
         self.assertEqual(summary["schedule"]["max_steps"], 6)
         self.assertEqual(summary["schedule"]["eval_every_steps"], 2)
-        self.assertEqual(checkpoint["meta"]["shared_study_ids"], ["a", "b"])
+        self.assertEqual(checkpoint["model_metadata"]["shared_study_ids"], ["a", "b"])
+        self.assertEqual(summary["train_metrics"], {"nll": 2.0})
+        self.assertEqual(summary["eval_metrics"], {"nll": 3.0})
+        self.assertEqual(checkpoint["train_metrics"], summary["train_metrics"])
+        self.assertEqual(checkpoint["eval_metrics"], summary["eval_metrics"])
         self.assertTrue(
             all(dataset.kwargs["lazy_rows"] for dataset in _FakeDataset.calls)
         )
         predict.assert_not_called()
+        evaluate.assert_not_called()
 
     def test_shared_input_records_keep_validation_and_requested_membership(self):
         requested = ["a", "b", "zero"]
@@ -696,10 +731,20 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             checkpoint_path = Path(tmpdir) / "checkpoint.pt"
             torch.save(
                 {
-                    "state_dict": model.state_dict(),
-                    "meta": {
-                        "best_step": 7,
+                    "model_state": model.state_dict(),
+                    "best_step": 7,
+                    "completed_steps": 9,
+                    "train_metrics": {"nll": 2.0},
+                    "eval_metrics": {"nll": 3.0},
+                    "schedule": {},
+                    "model_metadata": {
                         "shared_training_signature": "signature",
+                        "shared_study_ids": ["study"],
+                        "shared_data_study_ids": ["study"],
+                        "shared_zero_step_studies": [],
+                        "taxa": {"study": {"species": "species"}},
+                        "eval_split_by_study": {"study": "test_temporal"},
+                        "skipped_eval_study_ids": [],
                     },
                 },
                 checkpoint_path,
@@ -717,7 +762,6 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
             study = self._study_data("study")
             artifacts = {
                 "splits": {"train": study.train},
-                "shared_training_summary": {"train_steps": 9},
             }
             with (
                 patch.object(
@@ -739,7 +783,9 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                     return_value=model,
                 ),
                 patch.object(moveformer_executor, "_write_grid_predictions") as predict,
-                patch.object(moveformer_executor, "run_training_loop") as train,
+                patch("movebench.training.run_training_loop") as train,
+                patch.object(moveformer_executor, "_MoveFormerRuntime") as runtime,
+                patch.object(moveformer_executor, "sequence_loader") as loader,
             ):
                 summary = moveformer_executor.score_full(
                     run_payload=run_payload,
@@ -752,11 +798,25 @@ class MoveFormerFullExecutorTest(unittest.TestCase):
                     run_dir=Path(tmpdir) / "score",
                     tracker=object(),
                 )
+                with self.assertRaisesRegex(ValueError, "signature mismatch"):
+                    moveformer_executor.score_full(
+                        run_payload=run_payload,
+                        resolved_artifacts=artifacts,
+                        restore_from={
+                            "checkpoint_path": checkpoint_path,
+                            "training_run_key": "train-key",
+                            "training_signature": "wrong",
+                        },
+                        run_dir=Path(tmpdir) / "score",
+                        tracker=object(),
+                    )
 
         self.assertEqual(summary["train_steps"], 9)
         self.assertTrue(_FakeDataset.calls[0].kwargs["lazy_rows"])
         predict.assert_called_once()
         train.assert_not_called()
+        runtime.assert_not_called()
+        loader.assert_not_called()
 
 
 class MoveFormerTaxonAssetTest(unittest.TestCase):

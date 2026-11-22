@@ -322,16 +322,16 @@ class MoveFormerConfigurationTest(unittest.TestCase):
                 "_MoveFormerRuntime",
                 return_value=runtime,
             ),
-            patch.object(
-                moveformer_executor,
-                "run_training_loop",
-                return_value={"completed_steps": 10, "best_step": 10},
+            patch(
+                "movebench.training.run_training_loop",
+                return_value={
+                    "completed_steps": 10,
+                    "best_step": 10,
+                    "train_metrics": metrics,
+                    "eval_metrics": metrics,
+                },
             ),
-            patch.object(
-                moveformer_executor,
-                "_eval_metrics",
-                return_value=metrics,
-            ),
+            patch.object(moveformer_executor, "_eval_metrics") as evaluate,
             patch.object(
                 moveformer_executor.torch.cuda,
                 "is_available",
@@ -344,6 +344,7 @@ class MoveFormerConfigurationTest(unittest.TestCase):
                 resolved_artifacts=resolved_artifacts,
                 run_dir=run_dir,
                 tracker=object(),
+                restore_from=None,
             )
 
         build_model.assert_called_once_with(
@@ -354,6 +355,9 @@ class MoveFormerConfigurationTest(unittest.TestCase):
             var_len_training_v2=False,
         )
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["train_metrics"], metrics)
+        self.assertEqual(result["eval_metrics"], metrics)
+        evaluate.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

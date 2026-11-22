@@ -5,7 +5,9 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -30,14 +32,103 @@ class TrainerConfig:
     max_steps: int
     eval_every_steps: int
     patience_evals: int
-    seed: int
 
 
-def _seed_everything(seed: int) -> None:
+class RestorationReference(TypedDict):
+    checkpoint_path: Path
+    training_run_key: str | None
+    training_signature: str | None
+
+
+def seed_everything(seed: int) -> None:
     random.seed(int(seed))
+    np.random.seed(int(seed))
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
+
+
+def read_checkpoint(restore_from: RestorationReference) -> dict[str, object]:
+    """Read a completed model on CPU, without training machinery or history."""
+    checkpoint = torch.load(
+        restore_from["checkpoint_path"], map_location="cpu", weights_only=True
+    )
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Expected a completed checkpoint dictionary")
+    for key in ("model_state", "train_metrics", "eval_metrics", "schedule", "model_metadata"):
+        if not isinstance(checkpoint.get(key), dict):
+            raise ValueError(f"Checkpoint requires {key!r} as a dictionary")
+    for key in ("best_step", "completed_steps"):
+        if type(checkpoint.get(key)) is not int:
+            raise ValueError(f"Checkpoint requires {key!r} as an integer")
+    if not 0 <= checkpoint["best_step"] <= checkpoint["completed_steps"]:
+        raise ValueError("Checkpoint has inconsistent best/completed steps")
+    signature = restore_from["training_signature"]
+    if signature is not None:
+        metadata = checkpoint["model_metadata"]
+        if metadata.get("shared_training_signature") != signature:
+            raise ValueError("Shared checkpoint training signature mismatch")
+        required = {
+            "shared_study_ids",
+            "shared_data_study_ids",
+            "shared_zero_step_studies",
+            "taxa",
+            "eval_split_by_study",
+            "skipped_eval_study_ids",
+        }
+        missing = required.difference(metadata)
+        if missing:
+            raise ValueError(f"Shared checkpoint is missing metadata: {sorted(missing)}")
+    return checkpoint
+
+
+def save_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    fit: dict[str, object],
+    schedule: dict[str, object],
+    model_metadata: dict[str, object],
+) -> dict[str, object]:
+    checkpoint = {
+        "model_state": {
+            key: value.detach().cpu() for key, value in model.state_dict().items()
+        },
+        "best_step": int(fit["best_step"]),
+        "completed_steps": int(fit["completed_steps"]),
+        "train_metrics": dict(fit["train_metrics"]),
+        "eval_metrics": dict(fit["eval_metrics"]),
+        "schedule": dict(schedule),
+        "model_metadata": dict(model_metadata),
+    }
+    torch.save(checkpoint, path)
+    return checkpoint
+
+
+def fit_or_restore(
+    runtime: object,
+    config: TrainerConfig,
+    tracker: object,
+    *,
+    work_dir: Path,
+    restore_from: RestorationReference | None,
+    schedule: dict[str, object] | None = None,
+    model_metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Honor the runner's fitting choice; a failed restoration never retrains."""
+    if restore_from is not None:
+        checkpoint = read_checkpoint(restore_from)
+        runtime.model.load_state_dict(checkpoint["model_state"])
+    else:
+        fit = run_training_loop(runtime, config, tracker)
+        checkpoint = save_checkpoint(
+            Path(work_dir) / "checkpoint_best.pt",
+            model=runtime.model,
+            fit=fit,
+            schedule=schedule or {},
+            model_metadata=model_metadata or {},
+        )
+    return {key: value for key, value in checkpoint.items() if key != "model_state"}
 
 
 def _log_metrics(tracker: object, metrics: dict[str, float], *, step: int) -> None:
@@ -67,8 +158,6 @@ def run_training_loop(
         raise ValueError(
             f"patience_evals must be > 0, got {config.patience_evals!r}"
         )
-
-    _seed_everything(int(config.seed))
 
     early_stop_split_key = str(
         getattr(runtime, "early_stop_split_key", "test_temporal")
