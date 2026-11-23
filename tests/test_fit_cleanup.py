@@ -120,7 +120,7 @@ class FitCleanupTest(unittest.TestCase):
             (directory / "checkpoint_best.pt").unlink()
             return self.restore(**kwargs)
 
-        with patch("movebench.training.run_training_loop") as fit:
+        with patch("movebench.training.simple_training_loop") as fit:
             result = self.execute(payload, delete_then_restore)
         self.assertEqual(result["status"], "failed")
         fit.assert_not_called()
@@ -138,7 +138,7 @@ class FitCleanupTest(unittest.TestCase):
             raise RuntimeError("prediction failed")
 
         self.assertEqual(self.execute(payload, fail_prediction)["status"], "failed")
-        with patch("movebench.training.run_training_loop") as fit:
+        with patch("movebench.training.simple_training_loop") as fit:
             result = self.execute(payload, self.restore)
         self.assertEqual(result["train_steps"], 3)
         fit.assert_not_called()
@@ -148,7 +148,7 @@ class FitCleanupTest(unittest.TestCase):
         directory = self.results(payload)
         self.checkpoint(directory)
         (directory / "history.json").write_text("damaged")
-        with patch("movebench.training.run_training_loop") as fit:
+        with patch("movebench.training.simple_training_loop") as fit:
             result = self.execute(payload, self.restore)
         self.assertEqual(result["train_steps"], 3)
         self.assertTrue((directory / "predictions" / "old").exists())
@@ -224,7 +224,7 @@ class FitCleanupTest(unittest.TestCase):
         payload, trainer, dependents, unrelated = self.shared_results()
         self.checkpoint(trainer, shared=True)
         (trainer / "training_summary.json").unlink()
-        with patch("movebench.training.run_training_loop") as fit:
+        with patch("movebench.training.simple_training_loop") as fit:
             result = self.execute(payload, self.restore)
         self.assertEqual(result["train_steps"], 3)
         for directory in [*dependents, unrelated]:

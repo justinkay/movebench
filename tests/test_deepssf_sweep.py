@@ -10,7 +10,7 @@ import movebench.bench.config as bench_config
 import movebench.models.deepssf as deepssf_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
-from movebench.training import TrainerConfig, run_training_loop
+from movebench.training import Runtime, TrainerConfig, simple_training_loop
 from movebench.datasets.deepssf_wds_cache import steps_per_epoch_from_manifest
 
 
@@ -61,9 +61,18 @@ class DeepSSFObjectiveTest(unittest.TestCase):
                     "habitat": [self.habitat],
                 }
 
+            def forward(self, _inputs):
+                scores = torch.stack((self.habitat, self.movement))
+                return torch.stack((torch.zeros_like(scores), scores)).view(1, 1, 2, 2)
+
+        target = torch.tensor([[[0.0, 1.0]]])
+        batch = (
+            torch.zeros((1, 1, 1, 2)), torch.zeros((1, 4)),
+            torch.zeros((1, 1)), target, torch.tensor([1]),
+        )
         runtime = deepssf_model._DeepSSFRuntime(
             model=TwoPartModel(),
-            train_loader=[],
+            train_loader=[batch],
             eval_loaders={},
             early_stop_split_key="test_temporal",
             device=torch.device("cpu"),
@@ -76,20 +85,18 @@ class DeepSSFObjectiveTest(unittest.TestCase):
             channel_indices=[],
             eval_max_items=None,
         )
-        runtime.step_lr_schedulers(
-            {"nll_movement": 1.0, "nll_habitat": 1.0}
-        )
-        rates = runtime.step_lr_schedulers(
-            {"nll_movement": 1.1, "nll_habitat": 0.9}
-        )
-        self.assertAlmostEqual(rates["lr_movement"], 1e-4)
-        self.assertAlmostEqual(rates["lr_habitat"], 1e-2)
-        self.assertTrue(runtime.lr_scheduler_due(3))
-        self.assertFalse(runtime.lr_scheduler_due(4))
-        self.assertEqual(
-            set(runtime.state_dict()),
-            {"model", "optimizers", "lr_schedulers"},
-        )
+        with patch.object(runtime, "evaluate", side_effect=[
+            {"nll_movement": 1.0, "nll_habitat": 1.0},
+            {"nll_movement": 1.1, "nll_habitat": 0.9},
+        ]) as evaluate:
+            for step in range(1, 7):
+                if step == 4:
+                    target.zero_()  # Scheduler timing also covers skipped updates.
+                runtime.train_step(step)
+                self.assertEqual(evaluate.call_count, step // 3)
+            evaluate.assert_called_with("test_temporal")
+        self.assertAlmostEqual(runtime.optimizers["movement"].param_groups[0]["lr"], 1e-4)
+        self.assertAlmostEqual(runtime.optimizers["habitat"].param_groups[0]["lr"], 1e-2)
 
     def test_wds_epoch_size_uses_manifest_sample_count(self):
         self.assertEqual(
@@ -99,46 +106,28 @@ class DeepSSFObjectiveTest(unittest.TestCase):
 
 
 class TrainingScheduleTest(unittest.TestCase):
-    def test_scheduler_events_share_evaluation_and_do_not_advance_patience(self):
-        class Runtime:
-            early_stop_metric = "nll"
+    def test_runtime_scheduler_events_do_not_advance_patience_or_add_history(self):
+        class ScheduledRuntime(Runtime):
             early_stop_split_key = "test_temporal"
 
             def __init__(self):
-                self.step = 0
-                self.final = False
+                self.model = torch.nn.Linear(1, 1, bias=False)
                 self.evaluate_calls = []
                 self.scheduler_steps = []
-                self.state_dict_calls = 0
 
             def train_step(self, step):
-                self.step = step
-                return {"loss": 0.0}
-
-            def lr_scheduler_due(self, step):
-                return step % 3 == 0
-
-            def step_lr_schedulers(self, _metrics):
-                self.scheduler_steps.append(self.step)
-                return {"lr_movement": 1e-5, "lr_habitat": 1e-4}
+                with torch.no_grad():
+                    self.model.weight.fill_(step)
+                if step % 3 == 0:
+                    self.evaluate(self.early_stop_split_key)
+                    self.scheduler_steps.append(step)
 
             def evaluate(self, split):
-                self.evaluate_calls.append((self.step, split, self.final))
-                return {
-                    "nll": 1.0,
-                    "nll_movement": 0.4,
-                    "nll_habitat": 0.6,
-                }
+                self.evaluate_calls.append((int(self.model.weight.item()), split))
+                return {"nll": 1.0}
 
-            def state_dict(self):
-                self.state_dict_calls += 1
-                return {"step": self.step}
-
-            def load_state_dict(self, _state):
-                self.final = True
-
-        runtime = Runtime()
-        result = run_training_loop(
+        runtime = ScheduledRuntime()
+        result = simple_training_loop(
             runtime,
             TrainerConfig(
                 max_steps=12,
@@ -152,15 +141,10 @@ class TrainingScheduleTest(unittest.TestCase):
         self.assertEqual(runtime.scheduler_steps, [3, 6, 9, 12])
         self.assertEqual(
             [int(entry["step"]) for entry in result["history"]],
-            [3, 4, 6, 8, 9, 12],
+            [4, 8, 12],
         )
-        training_calls = [
-            (step, split)
-            for step, split, final in runtime.evaluate_calls
-            if not final
-        ]
         self.assertEqual(
-            training_calls,
+            runtime.evaluate_calls,
             [
                 (3, "test_temporal"),
                 (4, "train"),
@@ -169,11 +153,13 @@ class TrainingScheduleTest(unittest.TestCase):
                 (8, "train"),
                 (8, "test_temporal"),
                 (9, "test_temporal"),
+                (12, "test_temporal"),
                 (12, "train"),
                 (12, "test_temporal"),
+                (4, "train"),
+                (4, "test_temporal"),
             ],
         )
-        self.assertEqual(runtime.state_dict_calls, 1)
 
 
 class DeepSSFSweepTest(unittest.TestCase):

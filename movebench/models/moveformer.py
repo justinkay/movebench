@@ -36,7 +36,7 @@ from movebench.lib.moveformer.geo_transformers.models.any_horizon_forecast_trans
     AnyHorizonForecastTransformer,
     SelectionHead,
 )
-from movebench.training import TrainerConfig, fit_or_restore, read_checkpoint
+from movebench.training import Runtime, TrainerConfig, fit_or_restore, read_checkpoint
 
 
 def build_moveformer_selection_model(
@@ -531,7 +531,7 @@ def _grid_prediction_payload(
 
 
 @dataclass
-class _MoveFormerRuntime:
+class _MoveFormerRuntime(Runtime):
     model: torch.nn.Module
     train_loader: object
     eval_loaders: dict[str, object]
@@ -541,8 +541,6 @@ class _MoveFormerRuntime:
     weight_decay: float
     warmup_steps: int
     lr_gamma: float
-
-    early_stop_metric = "nll"
 
     def __post_init__(self) -> None:
         self.model = self.model.to(self.device)
@@ -618,7 +616,7 @@ class _MoveFormerRuntime:
             }
         return None
 
-    def train_step(self, step: int) -> dict[str, float]:
+    def train_step(self, step: int) -> None:
         batch = self._next_batch()
         features = _batch_to_device(batch, self.device)
         kwargs = self._attention_mask(features) or {}
@@ -629,11 +627,6 @@ class _MoveFormerRuntime:
         self.optimizer.step()
         self._steps_done += 1
         self._set_lr()
-        token_mask = features.get("loss_mask", features["mask"])
-        return {
-            "loss/train_step": float(loss.item()),
-            "num_tokens/train_step": float(token_mask.sum().item()),
-        }
 
     def evaluate(self, split_key: str) -> dict[str, float]:
         return _eval_metrics(
@@ -641,22 +634,6 @@ class _MoveFormerRuntime:
             self.eval_loaders[str(split_key)],
             device=self.device,
         )
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "model": {
-                key: value.detach().cpu().clone()
-                for key, value in self.model.state_dict().items()
-            },
-            "optimizer": self.optimizer.state_dict(),
-            "steps_done": int(self._steps_done),
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        self.model.load_state_dict(dict(state["model"]))
-        self.optimizer.load_state_dict(dict(state["optimizer"]))
-        self._steps_done = int(state["steps_done"])
-        self._set_lr()
 
 
 def _limited_subset(

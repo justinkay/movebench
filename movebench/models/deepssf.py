@@ -22,7 +22,7 @@ from movebench.lib.deepSSF.deepSSF_model import (
     ConvJointModel,
     ModelParams,
 )
-from movebench.training import TrainerConfig, fit_or_restore
+from movebench.training import Runtime, TrainerConfig, fit_or_restore
 
 
 def _infer_dense_dim_in_all(
@@ -336,9 +336,7 @@ def _device_for_backend(backend: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class _DeepSSFRuntime:
-    early_stop_metric = "nll"
-
+class _DeepSSFRuntime(Runtime):
     def __init__(
         self,
         *,
@@ -401,7 +399,7 @@ class _DeepSSFRuntime:
             self._train_iter = iter(self.train_loader)
             return next(self._train_iter)
 
-    def train_step(self, step: int) -> dict[str, float]:
+    def train_step(self, step: int) -> None:
         spatial, scalars, bearing, target, _point_id_start = self._next_train_batch()
         spatial = _slice_spatial(
             spatial.to(device=self.device, dtype=torch.float32),
@@ -413,33 +411,21 @@ class _DeepSSFRuntime:
 
         self.model.train()
         packed = _grid_logits_and_targets(self.model((spatial, scalars, bearing)), target)
-        if packed is None:
-            return {"loss/train_step": 0.0, "n_valid/train_step": 0.0}
+        if packed is not None:
+            logits, true_idx = packed
+            for optimizer in self.optimizers.values():
+                optimizer.zero_grad(set_to_none=True)
+            loss = F.cross_entropy(logits["nll"], true_idx, reduction="mean")
+            if not bool(torch.isfinite(loss).item()):
+                raise FloatingPointError(f"deepSSF loss became non-finite at step {step}")
+            loss.backward()
+            for optimizer in self.optimizers.values():
+                optimizer.step()
 
-        logits, true_idx = packed
-        for optimizer in self.optimizers.values():
-            optimizer.zero_grad(set_to_none=True)
-        loss = F.cross_entropy(logits["nll"], true_idx, reduction="mean")
-        if not bool(torch.isfinite(loss).item()):
-            raise FloatingPointError(f"deepSSF loss became non-finite at step {step}")
-        loss.backward()
-        for optimizer in self.optimizers.values():
-            optimizer.step()
-        return {
-            "loss/train_step": float(loss.item()),
-            "n_valid/train_step": float(true_idx.shape[0]),
-        }
-
-    def lr_scheduler_due(self, step: int) -> bool:
-        return int(step) % self.steps_per_epoch == 0
-
-    def step_lr_schedulers(self, eval_metrics: dict[str, float]) -> dict[str, float]:
-        self.lr_schedulers["movement"].step(float(eval_metrics["nll_movement"]))
-        self.lr_schedulers["habitat"].step(float(eval_metrics["nll_habitat"]))
-        return {
-            f"lr_{key}": float(optimizer.param_groups[0]["lr"])
-            for key, optimizer in self.optimizers.items()
-        }
+        if int(step) % self.steps_per_epoch == 0:
+            eval_metrics = self.evaluate(self.early_stop_split_key)
+            for key, scheduler in self.lr_schedulers.items():
+                scheduler.step(float(eval_metrics[f"nll_{key}"]))
 
     def evaluate(self, split_key: str) -> dict[str, float]:
         loader = self.eval_loaders[str(split_key)]
@@ -450,30 +436,6 @@ class _DeepSSFRuntime:
             channel_indices=self._channel_indices,
             max_items=self.eval_max_items,
         )
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "model": {
-                key: value.detach().cpu().clone()
-                for key, value in self.model.state_dict().items()
-            },
-            "optimizers": {
-                key: optimizer.state_dict()
-                for key, optimizer in self.optimizers.items()
-            },
-            "lr_schedulers": {
-                key: scheduler.state_dict()
-                for key, scheduler in self.lr_schedulers.items()
-            },
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        self.model.load_state_dict(dict(state["model"]))
-        optimizer_states = dict(state["optimizers"])
-        scheduler_states = dict(state["lr_schedulers"])
-        for key, optimizer in self.optimizers.items():
-            optimizer.load_state_dict(dict(optimizer_states[key]))
-            self.lr_schedulers[key].load_state_dict(dict(scheduler_states[key]))
 
 
 class DeepSSFMethod:

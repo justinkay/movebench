@@ -1,4 +1,3 @@
-import copy
 import json
 import tempfile
 import unittest
@@ -9,11 +8,12 @@ from unittest.mock import Mock, patch
 import torch
 
 from movebench.training import (
+    Runtime,
     TrainerConfig,
     fit_or_restore,
     read_checkpoint,
-    run_training_loop,
     save_checkpoint,
+    simple_training_loop,
 )
 
 
@@ -49,7 +49,7 @@ class CheckpointTest(unittest.TestCase):
 
     def test_round_trip_uses_saved_statistics_without_history_or_training(self):
         runtime = SimpleNamespace(model=self.model)
-        with patch("movebench.training.run_training_loop", return_value=self.fit) as fit:
+        with patch("movebench.training.simple_training_loop", return_value=self.fit) as fit:
             result = fit_or_restore(
                 runtime, self.config, work_dir=self.directory,
                 restore_from=None, schedule=self.schedule,
@@ -71,7 +71,7 @@ class CheckpointTest(unittest.TestCase):
                 with torch.no_grad():
                     self.model.weight.fill_(-10)
                 with (
-                    patch("movebench.training.run_training_loop") as fit,
+                    patch("movebench.training.simple_training_loop") as fit,
                     patch.object(Path, "read_text", side_effect=AssertionError("history read")),
                 ):
                     restored = fit_or_restore(
@@ -102,7 +102,7 @@ class CheckpointTest(unittest.TestCase):
                     path.write_bytes(checkpoint)
                 elif checkpoint is not None:
                     torch.save(checkpoint, path)
-                with patch("movebench.training.run_training_loop") as fit:
+                with patch("movebench.training.simple_training_loop") as fit:
                     with self.assertRaises(Exception):
                         fit_or_restore(
                             SimpleNamespace(model=self.model), self.config,
@@ -124,7 +124,7 @@ class CheckpointTest(unittest.TestCase):
         for candidate in (metadata, {"shared_training_signature": "expected"}):
             self.save(candidate)
             self.assertEqual(read_checkpoint(self.reference)["model_metadata"], candidate)
-            with patch("movebench.training.run_training_loop") as fit:
+            with patch("movebench.training.simple_training_loop") as fit:
                 restored = fit_or_restore(
                     SimpleNamespace(model=self.model), self.config,
                     work_dir=self.directory, restore_from=self.reference,
@@ -136,7 +136,7 @@ class CheckpointTest(unittest.TestCase):
                 self.save(candidate)
                 with self.assertRaises(ValueError):
                     read_checkpoint(self.reference)
-                with patch("movebench.training.run_training_loop") as fit:
+                with patch("movebench.training.simple_training_loop") as fit:
                     with self.assertRaises(ValueError):
                         fit_or_restore(
                             SimpleNamespace(model=self.model), self.config,
@@ -146,57 +146,55 @@ class CheckpointTest(unittest.TestCase):
 
     def test_controlled_fit_saves_best_weights_and_actual_completed_steps(self):
         model = self.model
+        model.register_buffer("marker", torch.tensor(0.0))
         calls = []
 
-        class Runtime:
+        class ControlledRuntime(Runtime):
+            early_stop_split_key = "test_individual"
+            early_stop_metric = "objective"
+
             def __init__(self):
                 self.model = model
                 self.step = 0
-                self.closed = False
 
             def train_step(self, step):
                 self.step = step
                 with torch.no_grad():
                     self.model.weight.fill_(step)
-                return {"loss": float(step)}
+                    self.model.marker.fill_(step)
 
             def evaluate(self, split):
-                calls.append((self.step, split))
-                return {"nll": 100.0 + self.step if split == "train" else {2: 3., 4: 2., 6: 2.}[self.step]}
+                step = int(self.model.weight.item())
+                calls.append((step, split))
+                return {"objective": 100.0 + step if split == "train" else {2: 3., 4: 2., 6: 2.}[step]}
 
-            def state_dict(self):
-                return {"step": self.step, "model": copy.deepcopy(self.model.state_dict())}
-
-            def load_state_dict(self, state):
-                self.step = state["step"]
-                self.model.load_state_dict(state["model"])
-
-            def close(self):
-                self.closed = True
-
-        runtime = Runtime()
+        runtime = ControlledRuntime()
         result = fit_or_restore(
             runtime, self.config,
             work_dir=self.directory, restore_from=None,
         )
         self.assertEqual(result["best_step"], 4)
         self.assertEqual(result["completed_steps"], 6)
-        self.assertEqual(result["train_metrics"], {"nll": 104.0})
-        self.assertEqual(result["eval_metrics"], {"nll": 2.0})
-        self.assertEqual(float(read_checkpoint(self.reference)["model_state"]["weight"].item()), 4.0)
-        self.assertEqual(calls, [(step, split) for step in (2, 4, 6, 4) for split in ("train", "test_temporal")])
+        self.assertEqual(runtime.step, 6)
+        self.assertEqual(result["train_metrics"], {"objective": 104.0})
+        self.assertEqual(result["eval_metrics"], {"objective": 2.0})
+        checkpoint = read_checkpoint(self.reference)
+        self.assertEqual(float(checkpoint["model_state"]["weight"].item()), 4.0)
+        self.assertEqual(float(checkpoint["model_state"]["marker"].item()), 4.0)
+        self.assertEqual(calls, [(step, split) for step in (2, 4, 6, 4) for split in ("train", "test_individual")])
         history = json.loads((self.directory / "history.json").read_text())
         self.assertEqual([entry["step"] for entry in history], [2., 4., 6.])
-        self.assertTrue(runtime.closed)
 
-    def test_loop_closes_runtime_on_failure_or_interruption(self):
+    def test_loop_propagates_failure_or_interruption(self):
         for error in (RuntimeError("update failed"), KeyboardInterrupt()):
             with self.subTest(error=type(error)):
-                runtime = Mock()
+                runtime = Mock(
+                    early_stop_split_key="test_temporal", early_stop_metric="nll"
+                )
                 runtime.train_step.side_effect = error
                 with self.assertRaises(type(error)):
-                    run_training_loop(runtime, self.config)
-                runtime.close.assert_called_once()
+                    simple_training_loop(runtime, self.config)
+                runtime.evaluate.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from movebench.datasets.ssf import (
     candidate_eval_loader,
     candidate_loader,
 )
-from movebench.training import TrainerConfig, fit_or_restore
+from movebench.training import Runtime, TrainerConfig, fit_or_restore
 
 
 def _require_batch_tensor(
@@ -232,9 +232,7 @@ def _eval_step_select_loader(
     return {"nll": float(total_nll / float(total))}
 
 
-class _ISSFRuntime:
-    early_stop_metric = "nll"
-
+class _ISSFRuntime(Runtime):
     def __init__(
         self,
         *,
@@ -268,7 +266,7 @@ class _ISSFRuntime:
             batch = next(self._train_iter)
         return ssf_grid._move_batch_to_device(batch, self.device)
 
-    def train_step(self, step: int) -> dict[str, float]:
+    def train_step(self, step: int) -> None:
         del step
         batch = self._next_batch()
         self.model.train()
@@ -277,7 +275,6 @@ class _ISSFRuntime:
         loss = _loss_step_select(logits)
         loss.backward()
         self.optimizer.step()
-        return {"loss/train_step": float(loss.item())}
 
     def evaluate(self, split_key: str) -> dict[str, float]:
         if split_key == "train":
@@ -287,19 +284,6 @@ class _ISSFRuntime:
         if split_key != self.early_stop_split_key:
             raise KeyError(f"Unknown split for iSSF runtime: {split_key!r}")
         return _eval_step_select_loader(self.model, self.eval_loader, self.device)
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "model": {
-                key: value.detach().cpu().clone()
-                for key, value in self.model.state_dict().items()
-            },
-            "optimizer": self.optimizer.state_dict(),
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        self.model.load_state_dict(dict(state["model"]))
-        self.optimizer.load_state_dict(dict(state["optimizer"]))
 
 
 class ISSFMethod:

@@ -581,7 +581,7 @@ class MoveFormerFullMethodTest(unittest.TestCase):
                 ),
                 patch.object(moveformer_model, "_MoveFormerRuntime", _FakeRuntime),
                 patch(
-                    "movebench.training.run_training_loop",
+                    "movebench.training.simple_training_loop",
                     return_value={
                         "completed_steps": 4,
                         "best_step": 3,
@@ -750,7 +750,7 @@ class MoveFormerFullMethodTest(unittest.TestCase):
                     return_value=model,
                 ),
                 patch.object(moveformer_model.MoveFormerMethod, "predict") as predict,
-                patch("movebench.training.run_training_loop") as train,
+                patch("movebench.training.simple_training_loop") as train,
                 patch.object(moveformer_model, "_MoveFormerRuntime") as runtime,
                 patch.object(moveformer_model, "sequence_loader") as loader,
             ):

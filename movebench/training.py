@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import copy
 import json
 import random
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -10,6 +10,27 @@ from typing import TypedDict
 import numpy as np
 import torch
 from tqdm import tqdm
+
+
+class Runtime(ABC):
+    """Training operations for the shared loop; lower metric values are better."""
+
+    model: torch.nn.Module
+    early_stop_split_key: str
+    early_stop_metric: str = "nll"
+
+    @abstractmethod
+    def train_step(self, step: int) -> None:
+        """Perform one training step, including method-specific scheduling."""
+        ...
+
+    @abstractmethod
+    def evaluate(self, split_key: str) -> dict[str, float]:
+        """Return split metrics without optimizer or scheduler updates.
+
+        Early-stop split metrics must include early_stop_metric.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -80,7 +101,7 @@ def save_checkpoint(
 
 
 def fit_or_restore(
-    runtime: object,
+    runtime: Runtime,
     config: TrainerConfig,
     *,
     work_dir: Path,
@@ -93,7 +114,7 @@ def fit_or_restore(
         checkpoint = read_checkpoint(restore_from)
         runtime.model.load_state_dict(checkpoint["model_state"])
     else:
-        fit = run_training_loop(runtime, config)
+        fit = simple_training_loop(runtime, config)
         (Path(work_dir) / "history.json").write_text(
             json.dumps(fit["history"], indent=2, sort_keys=True), encoding="utf-8"
         )
@@ -107,8 +128,8 @@ def fit_or_restore(
     return {key: value for key, value in checkpoint.items() if key != "model_state"}
 
 
-def run_training_loop(
-    runtime: object,
+def simple_training_loop(
+    runtime: Runtime,
     config: TrainerConfig,
 ) -> dict[str, object]:
     if int(config.max_steps) <= 0:
@@ -122,12 +143,8 @@ def run_training_loop(
             f"patience_evals must be > 0, got {config.patience_evals!r}"
         )
 
-    early_stop_split_key = str(
-        getattr(runtime, "early_stop_split_key", "test_temporal")
-    )
-    early_stop_metric = str(getattr(runtime, "early_stop_metric", "nll"))
-    scheduler_due_fn = getattr(runtime, "lr_scheduler_due", None)
-    scheduler_step_fn = getattr(runtime, "step_lr_schedulers", None)
+    early_stop_split_key = runtime.early_stop_split_key
+    early_stop_metric = runtime.early_stop_metric
 
     best_state: dict[str, object] | None = None
     best_metric = float("inf")
@@ -138,96 +155,79 @@ def run_training_loop(
     last_eval_step = 0
     stopped_early = False
 
-    try:
-        for step in tqdm(range(1, int(config.max_steps) + 1), desc=f"Training..."):
-            completed_steps = int(step)
-            runtime.train_step(step)
+    for step in tqdm(range(1, int(config.max_steps) + 1), desc=f"Training..."):
+        completed_steps = int(step)
+        runtime.train_step(step)
 
-            should_eval = step % int(config.eval_every_steps) == 0
-            early_stop_due = should_eval or step == int(config.max_steps)
-            scheduler_due = callable(scheduler_due_fn) and bool(
-                scheduler_due_fn(step)
-            )
-            if not early_stop_due and not scheduler_due:
-                continue
+        should_eval = step % int(config.eval_every_steps) == 0
+        if not should_eval and step != int(config.max_steps):
+            continue
 
-            train_metrics: dict[str, float] = {}
-            if early_stop_due:
-                train_metrics = {
-                    str(key): float(value)
-                    for key, value in dict(runtime.evaluate("train")).items()
-                }
-            eval_metrics = {
-                str(key): float(value)
-                for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
-            }
-            scheduler_metrics: dict[str, float] = {}
-            if scheduler_due:
-                scheduler_metrics = {
-                    str(key): float(value)
-                    for key, value in dict(scheduler_step_fn(eval_metrics)).items()
-                }
-            if early_stop_due:
-                last_eval_step = int(step)
-            if early_stop_due:
-                print("Train:", train_metrics)
-            print("Eval:", eval_metrics)
-
-            history_entry: dict[str, float] = {"step": float(step)}
-            history_entry.update(
-                {f"train/{key}": value for key, value in train_metrics.items()}
-            )
-            history_entry.update(
-                {
-                    f"{early_stop_split_key}/{key}": value
-                    for key, value in eval_metrics.items()
-                }
-            )
-            history_entry.update(scheduler_metrics)
-            history.append(history_entry)
-
-            if not early_stop_due:
-                continue
-
-            metric_value = float(eval_metrics[early_stop_metric])
-            if metric_value < best_metric:
-                best_metric = metric_value
-                best_step = int(step)
-                best_state = copy.deepcopy(dict(runtime.state_dict()))
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= int(config.patience_evals):
-                    stopped_early = True
-                    break
-
-        print("Training done; loading best state")
-        if best_state is None:
-            best_step = int(last_eval_step or completed_steps)
-            best_state = copy.deepcopy(dict(runtime.state_dict()))
-
-        print("Computing final train and eval metrics")
-        runtime.load_state_dict(best_state)
-        final_train_metrics = {
+        train_metrics = {
             str(key): float(value)
             for key, value in dict(runtime.evaluate("train")).items()
         }
-        final_eval_metrics = {
+        eval_metrics = {
             str(key): float(value)
             for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
         }
-        print("Train final:", final_train_metrics)
-        print("Eval final:", final_eval_metrics)
-        return {
-            "best_step": int(best_step),
-            "completed_steps": int(completed_steps),
-            "stopped_early": bool(stopped_early),
-            "early_stop_split_key": early_stop_split_key,
-            "train_metrics": final_train_metrics,
-            "eval_metrics": final_eval_metrics,
-            "history": history,
+        last_eval_step = int(step)
+        print("Train:", train_metrics)
+        print("Eval:", eval_metrics)
+
+        history_entry: dict[str, float] = {"step": float(step)}
+        history_entry.update(
+            {f"train/{key}": value for key, value in train_metrics.items()}
+        )
+        history_entry.update(
+            {
+                f"{early_stop_split_key}/{key}": value
+                for key, value in eval_metrics.items()
+            }
+        )
+        history.append(history_entry)
+
+        metric_value = float(eval_metrics[early_stop_metric])
+        if metric_value < best_metric:
+            best_metric = metric_value
+            best_step = int(step)
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in runtime.model.state_dict().items()
+            }
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= int(config.patience_evals):
+                stopped_early = True
+                break
+
+    print("Training done; loading best state")
+    if best_state is None:
+        best_step = int(last_eval_step or completed_steps)
+        best_state = {
+            key: value.detach().cpu().clone()
+            for key, value in runtime.model.state_dict().items()
         }
-    finally:
-        close_fn = getattr(runtime, "close", None)
-        if callable(close_fn):
-            close_fn()
+
+    print("Computing final train and eval metrics")
+    runtime.model.load_state_dict(best_state)
+    final_train_metrics = {
+        str(key): float(value)
+        for key, value in dict(runtime.evaluate("train")).items()
+    }
+    final_eval_metrics = {
+        str(key): float(value)
+        for key, value in dict(runtime.evaluate(early_stop_split_key)).items()
+    }
+    print("Train final:", final_train_metrics)
+    print("Eval final:", final_eval_metrics)
+    return {
+        "best_step": int(best_step),
+        "completed_steps": int(completed_steps),
+        "stopped_early": bool(stopped_early),
+        "early_stop_split_key": early_stop_split_key,
+        "train_metrics": final_train_metrics,
+        "eval_metrics": final_eval_metrics,
+        "history": history,
+    }

@@ -41,6 +41,25 @@ def _format_energy_score(value: float) -> str:
 
 def build_table_lines() -> list[str]:
     roster = pd.read_csv(STUDY_CITATIONS_PATH, keep_default_na=False)
+    duplicate_citations = roster["citation"].duplicated(keep=False)
+    duplicate_citation_species = roster.duplicated(
+        ["citation", "species"], keep=False
+    )
+    short_ids = roster["study_id"].str.extract(
+        r"(?:^|_)([0-9a-f]{8})(?:_|$)", expand=False
+    )
+    roster.loc[duplicate_citations, "citation"] = (
+        roster.loc[duplicate_citations, "citation"]
+        + r" (\textit{"
+        + roster.loc[duplicate_citations, "species"]
+        + "})"
+    )
+    roster.loc[duplicate_citation_species, "citation"] = (
+        roster.loc[duplicate_citation_species, "citation"].str[:-1]
+        + r"; \texttt{"
+        + short_ids[duplicate_citation_species]
+        + "})"
+    )
     results = load_plot_results()
     scores = results[results["n_steps_scored"] > 0].pivot(
         index=["study_id", "method"],

@@ -358,7 +358,7 @@ Once your method can load a saved model this way, add `fit_reuse="checkpoint"` t
 
 To include training results in the run summary, set `self.training_summary_` in `fit`. The candidate example shows the fields for step counts and training and validation scores. MoveBench saves this information before prediction, so a later prediction failure does not erase the training record.
 
-You can write your own training loop, use another library, or use MoveBench's `fit_or_restore` helper. For the helper, supply an object that holds the model and defines how to perform one training step, evaluate it, and save and load its state. `TrainerConfig` sets the training limit and when to evaluate; the helper saves the training history in `work_dir/history.json`. See `ISSFMethod` in [models/ssf.py](movebench/models/ssf.py) for a complete example.
+You can write your own training loop, use another library, or use MoveBench's `fit_or_restore` helper. For the helper, supply an object that holds the model and defines how to perform one training step and evaluate it. `TrainerConfig` sets the training limit and when to evaluate; the helper saves the training history in `work_dir/history.json`. See `ISSFMethod` in [models/ssf.py](movebench/models/ssf.py) for a complete example.
 
 ### Train one model on several studies
 

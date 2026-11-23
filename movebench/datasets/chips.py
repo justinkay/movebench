@@ -578,6 +578,8 @@ def selected_splits_from_manifest(manifest) -> list[str] | None:
 
 
 class SSFGridStepDataset(Dataset):
+    """Combine step information (incoming length, turn angle, etc.) with
+    environmental rasters."""
     def __init__(self, chips: ChipDataset, *, include_env: bool) -> None:
         if getattr(chips, "mode", None) != "steps":
             raise ValueError("SSFGridStepDataset requires ChipDataset(mode='steps')")

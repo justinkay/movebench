@@ -323,7 +323,7 @@ class MoveFormerConfigurationTest(unittest.TestCase):
                 return_value=runtime,
             ),
             patch(
-                "movebench.training.run_training_loop",
+                "movebench.training.simple_training_loop",
                 return_value={
                     "history": [],
                     "completed_steps": 10,

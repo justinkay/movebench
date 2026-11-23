@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import numpy as np
 import pandas as pd
@@ -368,15 +369,19 @@ def count_plot_individuals(
         normalized[["split_key", "panel", "study_id", "individual_id"]]
         .drop_duplicates()
         .groupby(["split_key", "panel"], as_index=False)
-        .size()
-        .rename(columns={"size": "n_individuals"})
+        .agg(
+            n_studies=("study_id", "nunique"),
+            n_individuals=("individual_id", "size"),
+        )
     )
     average_counts = (
         normalized[["split_key", "study_id", "individual_id"]]
         .drop_duplicates()
         .groupby("split_key", as_index=False)
-        .size()
-        .rename(columns={"size": "n_individuals"})
+        .agg(
+            n_studies=("study_id", "nunique"),
+            n_individuals=("individual_id", "size"),
+        )
         .assign(panel=AVERAGE_PANEL)
     )
     return pd.concat([panel_counts, average_counts], ignore_index=True)
@@ -465,28 +470,56 @@ def write_outputs(
     aggregate: pd.DataFrame,
     individual_counts: pd.DataFrame,
     output_stem: Path,
+    *,
+    title: str = r"$\bf{Method~comparison:}$ Energy score (↓) on MoveBench",
+    auto_ylim: bool = False,
+    rows_by_method: bool = False,
+    panel_order: list[str] | None = None,
+    show_study_counts: bool = False,
 ) -> None:
+    panel_order = PANEL_ORDER if panel_order is None else panel_order
     sns.set_theme(style="whitegrid", context="talk")
+    method_colors = dict(METHOD_COLORS)
+    if rows_by_method:
+        method_colors["baseline_randomwalk"] = "#e69f00"
     available_methods = set(aggregate["method"].astype(str))
     plot_methods = [
-        *PLOT_METHODS,
-        *[method for method in OPTIONAL_PLOT_METHODS if method in available_methods],
+        method
+        for method in [*PLOT_METHODS, *OPTIONAL_PLOT_METHODS]
+        if method in available_methods
     ]
+    split_order = aggregate["split_key"].drop_duplicates().tolist()
+    split_labels = aggregate.set_index("split_key")["split_label"].to_dict()
+    row_order = ["issf_linear", "deepssf"] if rows_by_method else split_order
+    row_labels = (
+        {"issf_linear": "iSSF Linear", "deepssf": "deepSSF"}
+        if rows_by_method
+        else split_labels
+    )
+    figure_height = 2.5 * len(row_order) + 2
+    if auto_ylim:
+        mean = aggregate["normalized_energy_score_mean"]
+        sem = aggregate["normalized_energy_score_sem"]
+        limits = (
+            min(1.0, (mean - sem).min()) * 0.9,
+            max(1.0, (mean + sem).max()) * 1.1,
+        )
     x_index = {timescale: index for index, timescale in enumerate(TIMESCALE_ORDER)}
     count_map = {
-        (row.split_key, row.panel): int(row.n_individuals)
+        (row.split_key, row.panel): row
         for row in individual_counts.itertuples(index=False)
     }
     fig, axes = plt.subplots(
-        len(SPLIT_ORDER),
-        len(PANEL_ORDER),
-        figsize=(17.5, 7),
+        len(row_order),
+        len(panel_order),
+        figsize=(2.5 * len(panel_order), figure_height),
         sharex=True,
         squeeze=False,
     )
 
-    for row_index, split_key in enumerate(SPLIT_ORDER):
-        for column_index, panel in enumerate(PANEL_ORDER):
+    for row_index, row_key in enumerate(row_order):
+        count_split = split_order[0] if rows_by_method else row_key
+        for column_index, panel in enumerate(panel_order):
             ax = axes[row_index, column_index]
             ax.axhline(
                 1.0,
@@ -496,13 +529,17 @@ def write_outputs(
                 label="don't move",
             )
             subset = aggregate[
-                (aggregate["split_key"] == split_key)
-                & (aggregate["panel"] == panel)
+                (aggregate["panel"] == panel)
+                & aggregate["method"].isin(
+                    ["baseline_randomwalk", row_key] if rows_by_method else plot_methods
+                )
             ]
-            for method in plot_methods:
-                method_rows = subset[subset["method"] == method].copy()
-                if method_rows.empty:
-                    continue
+            if not rows_by_method:
+                subset = subset[subset["split_key"] == row_key]
+            for (method, split_key), method_rows in subset.groupby(
+                ["method", "split_key"], sort=False
+            ):
+                method_rows = method_rows.copy()
                 method_rows["x"] = method_rows["timescale"].map(x_index)
                 method_rows = method_rows.sort_values("x")
                 x = method_rows["x"].to_numpy(dtype=float)
@@ -512,65 +549,105 @@ def write_outputs(
                 sem = method_rows["normalized_energy_score_sem"].to_numpy(
                     dtype=float
                 )
+                linestyle = "--" if "baseline" in method else None
+                if rows_by_method:
+                    linestyle = "--" if split_key == "cross_population" else "-"
                 ax.plot(
                     x,
                     mean,
                     marker=None if "baseline" in method else "o",
                     linewidth=2.0,
-                    color=METHOD_COLORS[method],
+                    color=method_colors[method],
                     label=_method_label(method),
-                    linestyle="--" if "baseline" in method else None,
+                    linestyle=linestyle,
                 )
                 ax.fill_between(
                     x,
                     mean - sem,
                     mean + sem,
-                    color=METHOD_COLORS[method],
+                    color=method_colors[method],
                     alpha=0.1,
                 )
 
             ax.set_xticks(range(len(TIMESCALE_ORDER)), TIMESCALE_ORDER)
-            if split_key == "test_temporal":
+            if auto_ylim:
+                ax.set_ylim(*limits)
+            elif row_key == "test_temporal":
                 ax.set_ylim(0.65, 1.2)
             else:
                 ax.set_ylim(0.7, 1.35)
 
             ax.set_yscale("log")
-            ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4]))
+            ax.yaxis.set_major_locator(FixedLocator([0.7, 1, 2, 4, 8]))
             ax.yaxis.set_major_formatter(
                 FuncFormatter(lambda value, _: f"{value:g}")
             )
             ax.yaxis.set_minor_locator(FixedLocator([]))
             ax.grid(True, linewidth=0.4, alpha=0.4)
 
+            counts = count_map.get((count_split, panel))
+            count_label = (
+                f"studies={counts.n_studies}\nindiv={counts.n_individuals}"
+                if show_study_counts and counts
+                else f"n={counts.n_individuals if counts else 0}"
+            )
             if row_index == 0:
-                ax.set_title(PANEL_TITLES[panel])
+                panel_title = PANEL_TITLES[panel]
+                if show_study_counts:
+                    panel_title = f"{panel_title}\n{count_label}"
+                ax.set_title(panel_title)
             if column_index != 0:
                 ax.set_yticks([])
-            ax.text(
-                0.03,
-                0.95,
-                f"n={count_map.get((split_key, panel), 0)}",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-            )
+            if not show_study_counts:
+                ax.text(
+                    0.03,
+                    0.95,
+                    count_label,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                )
             if column_index == 0:
-                ax.set_ylabel(f"Norm ES ↓\n{SPLIT_LABELS[split_key]}")
+                ax.set_ylabel(f"Norm ES ↓\n{row_labels[row_key]}")
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
+    if rows_by_method:
+        handles = [handles[0]] + [
+            Line2D(
+                [],
+                [],
+                color=method_colors[method],
+                linewidth=2.0,
+                marker=None if "baseline" in method else "o",
+                label=_method_label(method),
+            )
+            for method in plot_methods
+        ]
+        labels = [handle.get_label() for handle in handles]
     fig.legend(
         handles,
         labels,
         loc="upper center",
         ncol=len(plot_methods) + 1,
         frameon=False,
-        bbox_to_anchor=(0.5, 0.91),
+        bbox_to_anchor=(0.29 if rows_by_method else 0.5, 1 - 0.63 / figure_height),
     )
-    fig.suptitle(
-        r"$\bf{Method~comparison:}$ Energy score (↓) on MoveBench", y=0.95
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    if rows_by_method:
+        fig.legend(
+            handles=[
+                Line2D([], [], color="black", linewidth=2.0, linestyle=style, label=label)
+                for style, label in [
+                    ("-", "Within-population"),
+                    ("--", "Cross-population"),
+                ]
+            ],
+            loc="upper center",
+            ncol=2,
+            frameon=False,
+            bbox_to_anchor=(0.78, 1 - 0.63 / figure_height),
+        )
+    fig.suptitle(title, y=1 - 0.35 / figure_height)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.42 / figure_height))
     fig.canvas.draw()
 
     for average_ax in axes[:, -1]:
