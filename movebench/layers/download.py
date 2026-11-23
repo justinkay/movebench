@@ -271,23 +271,9 @@ def _tile_plan_errors(
     df: pd.DataFrame,
     *,
     tile_bounds_latlon: list[tuple[float, float, float, float]],
-    grid_tiles_reported: int,
-    grid_tiles_effective: int,
     max_examples: int = 5,
 ) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
-
-    if int(grid_tiles_effective) != int(grid_tiles_reported):
-        errors.append(
-            {
-                "stage": "plan",
-                "error": (
-                    "tile_grid_incomplete: "
-                    f"reported={int(grid_tiles_reported)} "
-                    f"effective={int(grid_tiles_effective)}"
-                ),
-            }
-        )
 
     uncovered_points: list[dict[str, Any]] = []
     cols = [POINT_ID_COL, LON_COL, LAT_COL, SET_COL]
@@ -967,47 +953,6 @@ def _tile_index_is_complete(tile_dir: Path, idx_path: Path) -> tuple[bool, int]:
     return (True, len(tiles))
 
 
-def _build_tile_meta(
-    tile_index: int,
-    bounds_latlon: tuple[float, float, float, float],
-    *,
-    year: int | None = None,
-) -> dict[str, Any]:
-    return {
-        "file": _tile_filename(tile_index, year=year),
-        "tile_index": int(tile_index),
-        "bounds": {
-            "min_lon": float(bounds_latlon[0]),
-            "min_lat": float(bounds_latlon[1]),
-            "max_lon": float(bounds_latlon[2]),
-            "max_lat": float(bounds_latlon[3]),
-        },
-    }
-
-
-def _build_geometry_errors(
-    geometry_errors: list[dict[str, Any]],
-    *,
-    year: int | None = None,
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for e in geometry_errors:
-        if "tile_index" in e:
-            out.append(
-                {
-                    "tile_index": int(e["tile_index"]),
-                    "file": _tile_filename(int(e["tile_index"]), year=year),
-                    "error": str(e["error"]),
-                }
-            )
-            continue
-        item = {str(k): v for k, v in e.items()}
-        if "error" in item:
-            item["error"] = str(item["error"])
-        out.append(item)
-    return out
-
-
 def _empty_tile_stats(
     *, total: int, failed: int = 0, index_path: Path | None = None
 ) -> dict[str, Any]:
@@ -1020,57 +965,6 @@ def _empty_tile_stats(
     if index_path is not None:
         stats["index_path"] = str(index_path)
     return stats
-
-
-def _record_tile_result(
-    stats: dict[str, Any],
-    tile_meta: dict[str, Any],
-    info: dict[str, Any] | None,
-) -> None:
-    if info is None:
-        stats["failed"] += 1
-        tile_meta["error"] = "tile_missing_result"
-        return
-
-    status = str(info.get("status", "failed"))
-    if status == "downloaded":
-        stats["downloaded"] += 1
-    elif status == "existing":
-        stats["existing"] += 1
-    else:
-        stats["failed"] += 1
-        tile_meta["error"] = str(info.get("error", "unknown"))
-
-
-def _build_tile_index_payload(
-    *,
-    layer: str,
-    layer_scale: float,
-    num_bands: int,
-    tiles_out: list[dict[str, Any]],
-    errors_out: list[dict[str, Any]],
-    n_tiles_reported: int,
-    n_tiles_effective: int,
-    temporal: str | None = None,
-    year: int | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "layer": layer,
-        "scale": float(layer_scale),
-        "num_bands": int(num_bands),
-        "tiles": tiles_out,
-    }
-    if temporal is not None:
-        payload["temporal"] = temporal
-    if year is not None:
-        payload["year"] = int(year)
-    if errors_out:
-        payload["errors"] = errors_out
-        payload["n_tiles_reported"] = int(n_tiles_reported)
-    if int(n_tiles_effective) != int(n_tiles_reported):
-        payload["n_tiles_reported"] = int(n_tiles_reported)
-        payload["n_tiles_effective"] = int(n_tiles_effective)
-    return payload
 
 
 def _expected_chip_group_meta(
@@ -1172,80 +1066,58 @@ def _download_tile_worker(args: tuple[TileRequest, dict[str, Any]]) -> dict[str,
         }
 
 
-def _run_tile_workers(
-    reqs: list[TileRequest],
-    ctx: dict[str, Any],
-    *,
-    desc: str,
-    n_workers: int,
-    pool: mp.Pool | None = None,
-) -> tuple[dict[int, dict[str, Any]], mp.Pool | None]:
-    if not reqs:
-        return {}, pool
-
-    worker_args = [(req, ctx) for req in reqs]
-    if pool is not None:
-        results = list(
-            tqdm(
-                pool.imap_unordered(_download_tile_worker, worker_args),
-                total=len(reqs),
-                desc=desc,
-                unit="tile",
-                dynamic_ncols=True,
-            )
-        )
-        return {int(r["tile_index"]): r for r in results}, pool
-
-    with mp.Pool(int(n_workers)) as local_pool:
-        results = list(
-            tqdm(
-                local_pool.imap_unordered(_download_tile_worker, worker_args),
-                total=len(reqs),
-                desc=desc,
-                unit="tile",
-                dynamic_ncols=True,
-            )
-        )
-    return {int(r["tile_index"]): r for r in results}, pool
-
-
 def _build_tile_index_result(
     *,
-    tile_indices: list[int],
     tile_bounds_latlon: list[tuple[float, float, float, float]],
     results_by_index: dict[int, dict[str, Any]],
     geometry_errors: list[dict[str, Any]],
     layer: str,
     layer_scale: float,
     num_bands: int,
-    n_tiles_reported: int,
-    n_tiles_effective: int,
     index_path: Path,
     year: int | None = None,
 ) -> dict[str, Any]:
-    errors_out = _build_geometry_errors(geometry_errors, year=year)
     stats = _empty_tile_stats(
-        total=n_tiles_reported, failed=len(errors_out), index_path=index_path
+        total=len(tile_bounds_latlon),
+        failed=len(geometry_errors),
+        index_path=index_path,
     )
     tiles_out: list[dict[str, Any]] = []
+    for tile_index, bounds in enumerate(tile_bounds_latlon):
+        tile = {
+            "file": _tile_filename(tile_index, year=year),
+            "tile_index": tile_index,
+            "bounds": {
+                "min_lon": float(bounds[0]),
+                "min_lat": float(bounds[1]),
+                "max_lon": float(bounds[2]),
+                "max_lat": float(bounds[3]),
+            },
+        }
+        info = results_by_index.get(tile_index)
+        status = str(info.get("status", "failed")) if info is not None else "failed"
+        if status in {"downloaded", "existing"}:
+            stats[status] += 1
+        else:
+            stats["failed"] += 1
+            tile["error"] = (
+                str(info.get("error", "unknown"))
+                if info is not None
+                else "tile_missing_result"
+            )
+        tiles_out.append(tile)
 
-    for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon):
-        tile_meta = _build_tile_meta(int(tile_index), bounds_latlon, year=year)
-        _record_tile_result(stats, tile_meta, results_by_index.get(int(tile_index)))
-        tiles_out.append(tile_meta)
-
-    stats["total"] = int(n_tiles_effective)
-    payload = _build_tile_index_payload(
-        layer=layer,
-        layer_scale=float(layer_scale),
-        num_bands=num_bands,
-        temporal="annual" if year is not None else None,
-        year=year,
-        tiles_out=tiles_out,
-        errors_out=errors_out,
-        n_tiles_reported=n_tiles_reported,
-        n_tiles_effective=n_tiles_effective,
-    )
+    payload = {
+        "layer": layer,
+        "scale": float(layer_scale),
+        "num_bands": int(num_bands),
+        "tiles": tiles_out,
+    }
+    if year is not None:
+        payload.update(temporal="annual", year=year)
+    if geometry_errors:
+        payload["errors"] = geometry_errors
+        payload["n_tiles_reported"] = len(tile_bounds_latlon)
     _write_json_atomic(index_path, payload, sort_keys=False)
     return stats
 
@@ -1990,131 +1862,79 @@ def download_tile_layer(
         rect_bounds,
         grid_size_m=float(grid_size_m),
     )
-    tile_indices = list(range(len(tile_bounds_latlon)))
     geometry_errors = _tile_plan_errors(
         df,
         tile_bounds_latlon=tile_bounds_latlon,
-        grid_tiles_reported=len(tile_bounds_latlon),
-        grid_tiles_effective=len(tile_bounds_latlon),
     )
-    n_tiles_reported = len(tile_indices)
-    n_tiles_effective = len(tile_indices)
-
-    if is_annual:
-        years_out: dict[int, dict[str, Any]] = {}
-        reqs = [
-            TileRequest(tile_index=int(tile_index), bounds_latlon=bounds_latlon)
-            for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon)
-        ]
-        ctx_base = {
-            "study_dir": str(study_dir),
-            "rasters_hash": str(plan.rasters_hash),
-            "layer": str(layer),
-            "scale": float(layer_scale),
-            "num_bands": int(len(spec.bands)),
-            "crs": str(crs),
-            "skip_existing": bool(skip_existing),
-            "registry": registry,
-        }
-
-        pending_years: list[int] = []
-        worker_args: list[tuple[TileRequest, dict[str, Any]]] = []
-        for year in resolved_years:
-            idx_path_y = tile_dir / f"index_{int(year)}.json"
-            if skip_existing and idx_path_y.exists():
-                ok, n_existing = _tile_index_is_complete(tile_dir, idx_path_y)
-                if ok:
-                    years_out[int(year)] = _empty_tile_stats(
-                        total=n_existing, index_path=idx_path_y
-                    )
-                    years_out[int(year)]["existing"] = int(n_existing)
-                    continue
-
-            pending_years.append(int(year))
-            ctx_y = {**ctx_base, "year": int(year)}
-            worker_args.extend((req, ctx_y) for req in reqs)
-
-        results_by_year: dict[int, dict[int, dict[str, Any]]] = {}
-        if worker_args:
-            with mp.Pool(int(n_workers)) as pool:
-                results = list(
-                    tqdm(
-                        pool.imap_unordered(_download_tile_worker, worker_args),
-                        total=len(worker_args),
-                        desc=f"Downloading tiles ({layer}) ({os.path.basename(study_dir)})",
-                        unit="tile",
-                        dynamic_ncols=True,
-                    )
-                )
-            for result in results:
-                year = result.get("year")
-                if year is None:
-                    continue
-                year_results = results_by_year.setdefault(int(year), {})
-                year_results[int(result["tile_index"])] = result
-
-        for year in pending_years:
-            idx_path_y = tile_dir / f"index_{int(year)}.json"
-            years_out[int(year)] = _build_tile_index_result(
-                tile_indices=tile_indices,
-                tile_bounds_latlon=tile_bounds_latlon,
-                results_by_index=results_by_year.get(int(year), {}),
-                geometry_errors=geometry_errors,
-                layer=layer,
-                layer_scale=float(layer_scale),
-                num_bands=len(spec.bands),
-                n_tiles_reported=n_tiles_reported,
-                n_tiles_effective=n_tiles_effective,
-                index_path=idx_path_y,
-                year=int(year),
-            )
-
-        # Compatibility index.json used for bounds-only lookups.
-        if resolved_years:
-            _write_compat_index(
-                index_path, tile_dir / f"index_{int(resolved_years[0])}.json"
-            )
-
-        return {
-            "temporal": "annual",
-            "years": years_out,
-            "index_path": str(index_path),
-        }
-
     reqs = [
         TileRequest(tile_index=int(tile_index), bounds_latlon=bounds_latlon)
-        for tile_index, bounds_latlon in zip(tile_indices, tile_bounds_latlon)
+        for tile_index, bounds_latlon in enumerate(tile_bounds_latlon)
     ]
-    ctx = {
+    ctx_base = {
         "study_dir": str(study_dir),
         "rasters_hash": str(plan.rasters_hash),
         "layer": str(layer),
-        "year": None,
         "scale": float(layer_scale),
         "num_bands": int(len(spec.bands)),
         "crs": str(crs),
         "skip_existing": bool(skip_existing),
         "registry": registry,
     }
+    years_out: dict[int | None, dict[str, Any]] = {}
+    pending_years: dict[int | None, Path] = {}
+    worker_args: list[tuple[TileRequest, dict[str, Any]]] = []
+    for year in (resolved_years if is_annual else [None]):
+        year_index_path = (
+            tile_dir / f"index_{year}.json" if year is not None else index_path
+        )
+        if year is not None and skip_existing and year_index_path.exists():
+            ok, count = _tile_index_is_complete(tile_dir, year_index_path)
+            if ok:
+                years_out[year] = _empty_tile_stats(
+                    total=count, index_path=year_index_path
+                )
+                years_out[year]["existing"] = count
+                continue
+        pending_years[year] = year_index_path
+        context = {**ctx_base, "year": year}
+        worker_args.extend((req, context) for req in reqs)
 
-    results_by_index, _ = _run_tile_workers(
-        reqs,
-        ctx,
-        desc=f"Downloading tiles ({layer}) ({os.path.basename(study_dir)})",
-        n_workers=n_workers,
-    )
-    return _build_tile_index_result(
-        tile_indices=tile_indices,
-        tile_bounds_latlon=tile_bounds_latlon,
-        results_by_index=results_by_index,
-        geometry_errors=geometry_errors,
-        layer=layer,
-        layer_scale=float(layer_scale),
-        num_bands=len(spec.bands),
-        n_tiles_reported=n_tiles_reported,
-        n_tiles_effective=n_tiles_effective,
-        index_path=index_path,
-    )
+    results_by_year = {year: {} for year in pending_years}
+    if worker_args:
+        with mp.Pool(n_workers) as pool:
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_download_tile_worker, worker_args),
+                    total=len(worker_args),
+                    desc=f"Downloading tiles ({layer}) ({os.path.basename(study_dir)})",
+                    unit="tile",
+                    dynamic_ncols=True,
+                )
+            )
+        for result in results:
+            results_by_year[result["year"]][int(result["tile_index"])] = result
+        del worker_args, results
+
+    for year, year_index_path in pending_years.items():
+        years_out[year] = _build_tile_index_result(
+            tile_bounds_latlon=tile_bounds_latlon,
+            results_by_index=results_by_year[year],
+            geometry_errors=geometry_errors,
+            layer=layer,
+            layer_scale=float(layer_scale),
+            num_bands=len(spec.bands),
+            index_path=year_index_path,
+            year=year,
+        )
+
+    if not is_annual:
+        return years_out[None]
+    _write_compat_index(index_path, tile_dir / f"index_{resolved_years[0]}.json")
+    return {
+        "temporal": "annual",
+        "years": years_out,
+        "index_path": str(index_path),
+    }
 
 
 def download_tiles(
