@@ -18,7 +18,7 @@ from typing import Literal
 from movebench.layers.config import LayersConfig, rasters_hash
 from movebench.layers.plan import Channel, LayerPlan
 
-LayerSource = Literal["gee_chip", "gee_tile", "local_hdf", "local_tiff", "derived"]
+LayerSource = Literal["gee_chip", "gee_tile", "local_tiff", "derived"]
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,6 @@ class LayerSpec:
     gee_collection: str = ""
     temporal: str = ""
     path_pattern: str = ""
-    hdf_path_suffix: str = ""
     year_bounds: tuple[int, int] | None = None
 
     categorical: bool = False
@@ -141,52 +140,6 @@ LAYERS: dict[str, LayerSpec] = {
         gee_collection="MODIS/MCD43A4_006_BAI",
         temporal="daily",
     ),
-    # "modis_lc": LayerSpec( # note: implemented as a local HDF file
-    #     name="modis_lc",
-    #     source="local_hdf",
-    #     bands=["LC_Type1"],
-    #     native_scale_m=500.0,
-    #     temporal="annual",
-    #     path_pattern="{modis_lc}/MCD12Q1.A{year}001.h{h:02d}v{v:02d}.061.*.hdf",
-    #     hdf_path_suffix=":MCD12Q1:LC_Type1",
-    #     year_bounds=(2015, 2025),
-    #     categorical=True,
-    #     num_classes=18,
-    #     normalize=False,
-    # ),
-    # "modis_cvf_tree": LayerSpec( # note: implemented as a local HDF file
-    #     name="modis_cvf_tree",
-    #     source="local_hdf",
-    #     bands=["Percent_Tree_Cover"],
-    #     native_scale_m=250.0,
-    #     temporal="annual",
-    #     path_pattern="{modis_cvf}/MOD44B.A{year}065.h{h:02d}v{v:02d}.061.*.hdf",
-    #     hdf_path_suffix=":MOD44B_250m_GRID:Percent_Tree_Cover",
-    #     year_bounds=(2015, 2025),
-    #     valid_range=(0.0, 100.0),
-    # ),
-    # "modis_cvf_nontree": LayerSpec( # note: implemented as a local HDF file
-    #     name="modis_cvf_nontree",
-    #     source="local_hdf",
-    #     bands=["Percent_NonTree_Vegetation"],
-    #     native_scale_m=250.0,
-    #     temporal="annual",
-    #     path_pattern="{modis_cvf}/MOD44B.A{year}065.h{h:02d}v{v:02d}.061.*.hdf",
-    #     hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonTree_Vegetation",
-    #     year_bounds=(2015, 2025),
-    #     valid_range=(0.0, 100.0),
-    # ),
-    # "modis_cvf_nonveg": LayerSpec( # note: implemented as a local HDF file
-    #     name="modis_cvf_nonveg",
-    #     source="local_hdf",
-    #     bands=["Percent_NonVegetated"],
-    #     native_scale_m=250.0,
-    #     temporal="annual",
-    #     path_pattern="{modis_cvf}/MOD44B.A{year}065.h{h:02d}v{v:02d}.061.*.hdf",
-    #     hdf_path_suffix=":MOD44B_250m_GRID:Percent_NonVegetated",
-    #     year_bounds=(2015, 2025),
-    #     valid_range=(0.0, 100.0),
-    # ),
     "modis_lc": LayerSpec(
         name="modis_lc",
         source="gee_tile",

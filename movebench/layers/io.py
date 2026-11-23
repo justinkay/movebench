@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import glob
 import json
-import os
 import warnings
-from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +19,6 @@ from movebench.layers.plan import LayerPlan
 from movebench.layers.registry import REGISTRY, LayerRegistry
 from movebench.rasters import (
     Raster,
-    merge_hdf_window,
     read_geotiff,
     read_geotiff_window,
 )
@@ -57,64 +52,6 @@ def _clamp_year(year: int, year_bounds: tuple[int, int] | None) -> int:
     return max(min(year, hi), lo)
 
 
-@lru_cache(maxsize=1)
-def _modis_grid_rows() -> list[tuple[int, int, float, float, float, float]]:
-    """Rows from sn_bound_10deg.txt as (h, v, lon_min, lon_max, lat_min, lat_max)."""
-
-    grid_path = paths.get_path("modis_grid")
-    rows: list[tuple[int, int, float, float, float, float]] = []
-    with open(grid_path, "r") as f:
-        for line in f:
-            s = line.strip()
-            if not s or not s[0].isdigit():
-                continue
-            parts = s.split()
-            if len(parts) < 6:
-                continue
-            v = int(parts[0])
-            h = int(parts[1])
-            lon_min = float(parts[2])
-            lon_max = float(parts[3])
-            lat_min = float(parts[4])
-            lat_max = float(parts[5])
-            rows.append((h, v, lon_min, lon_max, lat_min, lat_max))
-    return rows
-
-
-def _modis_tiles_for_bounds(
-    bounds_latlon: tuple[float, float, float, float],
-) -> list[tuple[int, int]]:
-    lon_min, lat_min, lon_max, lat_max = bounds_latlon
-    out: list[tuple[int, int]] = []
-    for h, v, lo0, lo1, la0, la1 in _modis_grid_rows():
-        if lo0 <= lon_max and lo1 >= lon_min and la0 <= lat_max and la1 >= lat_min:
-            out.append((h, v))
-    out.sort(key=lambda hv: (hv[1], hv[0]))
-    return out
-
-
-@dataclass
-class _ModisFileIndex:
-    base_dir: Path
-    product_prefix: str
-
-    def __post_init__(self) -> None:
-        self._index: dict[tuple[int, int, int], str] = {}
-        pattern = str(self.base_dir / f"{self.product_prefix}.A*.h*v*.hdf")
-        for path in glob.glob(pattern):
-            fname = os.path.basename(path)
-            try:
-                year = int(fname.split(".A")[1][:4])
-                h = int(fname.split(".h")[1][:2])
-                v = int(fname.split("v")[1][:2])
-            except (IndexError, ValueError):
-                continue
-            self._index[(year, h, v)] = path
-
-    def get_path(self, year: int, h: int, v: int) -> str | None:
-        return self._index.get((year, h, v))
-
-
 class LayerIO:
     """Loads rasters for a study + LayerPlan.
 
@@ -131,7 +68,6 @@ class LayerIO:
 
         self._tile_index_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
         self._tile_index_years_cache: dict[str, list[int]] = {}
-        self._hdf_index_cache: dict[str, _ModisFileIndex] = {}
 
         self._chip_group_layer_slices = self._build_chip_group_layer_slices()
 
@@ -191,13 +127,6 @@ class LayerIO:
                     f"bounds_latlon is required to load local_tiff layer {layer!r}"
                 )
             return self._load_local_tiff_layer(layer, bounds_latlon, timestamp)
-
-        if spec.source == "local_hdf":
-            if bounds_latlon is None:
-                raise ValueError(
-                    f"bounds_latlon is required to load local_hdf layer {layer!r}"
-                )
-            return self._load_local_hdf_layer(layer, bounds_latlon, timestamp)
 
         if spec.source == "derived":
             return self._load_derived_layer(
@@ -585,91 +514,6 @@ class LayerIO:
             max_window_hw=max_window_hw,
             resampling=Resampling.bilinear,
         )
-        return Raster(
-            array=r.array,
-            transform=r.transform,
-            crs=r.crs,
-            nodata=r.nodata,
-            bounds=r.bounds,
-            band_ids=[f"{layer}.{b}" for b in spec.bands],
-        )
-
-    def _hdf_index_for_layer(self, layer: str) -> _ModisFileIndex:
-        cached = self._hdf_index_cache.get(layer)
-        if cached is not None:
-            return cached
-
-        spec = self.registry.get(layer)
-        if not spec.path_pattern:
-            raise ValueError(f"local_hdf layer {layer!r} missing spec.path_pattern")
-
-        # Built-in patterns begin with "{paths_key}/...".
-        if spec.path_pattern.startswith("{"):
-            end = spec.path_pattern.find("}")
-            root_key = spec.path_pattern[1:end]
-            base_dir = paths.get_path(root_key)
-        else:
-            base_dir = Path(os.path.dirname(spec.path_pattern))
-
-        filename_pattern = spec.path_pattern.split("/")[-1]
-        product_prefix = filename_pattern.split(".")[0]
-
-        idx = _ModisFileIndex(base_dir=Path(base_dir), product_prefix=product_prefix)
-        self._hdf_index_cache[layer] = idx
-        return idx
-
-    def _load_local_hdf_layer(
-        self,
-        layer: str,
-        bounds_latlon: tuple[float, float, float, float],
-        timestamp: Any | None,
-    ) -> Raster:
-        spec = self.registry.get(layer)
-        if not spec.hdf_path_suffix:
-            raise ValueError(f"local_hdf layer {layer!r} missing spec.hdf_path_suffix")
-
-        def _missing_raster() -> Raster:
-            min_lon, min_lat, max_lon, max_lat = bounds_latlon
-            transform = from_bounds(min_lon, min_lat, max_lon, max_lat, 2, 2)
-            arr = np.full((len(spec.bands), 2, 2), np.nan, dtype=np.float32)
-            return Raster(
-                array=arr,
-                transform=transform,
-                crs=WGS84_CRS,
-                nodata=float("nan"),
-                bounds=bounds_latlon,
-                band_ids=[f"{layer}.{b}" for b in spec.bands],
-            )
-
-        year = _clamp_year(_year_from_timestamp(timestamp), spec.year_bounds)
-        hvs = _modis_tiles_for_bounds(bounds_latlon)
-
-        idx = self._hdf_index_for_layer(layer)
-
-        subdataset_paths: list[str] = []
-        for h, v in hvs:
-            hdf_path = idx.get_path(year, int(h), int(v))
-            if hdf_path is None:
-                warnings.warn(
-                    f"Missing MODIS file for layer={layer!r} year={year} h={h} v={v}; proceeding with remaining tiles.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                continue
-            subdataset_paths.append(
-                f"HDF4_EOS:EOS_GRID:{hdf_path}{spec.hdf_path_suffix}"
-            )
-
-        if not subdataset_paths:
-            warnings.warn(
-                f"NO MODIS files found for layer={layer!r} year={year} under {idx.base_dir}; "
-                "returning all-NaN raster (samples become invalid).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return _missing_raster()
-
-        r = merge_hdf_window(tuple(subdataset_paths), bounds_latlon)
         return Raster(
             array=r.array,
             transform=r.transform,

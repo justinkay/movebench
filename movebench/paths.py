@@ -43,7 +43,7 @@ def paths_config() -> dict[str, str]:
             raise ValueError(f"paths config values must be strings. Got {k!r}: {v!r}")
         cfg[k] = str(v)
 
-    required = {"modis_grid", "modis_lc", "modis_cvf", "hii", "bioclim"}
+    required = {"hii", "bioclim"}
     missing = sorted(required - set(cfg.keys()))
     if missing:
         raise ValueError(f"paths config missing required key(s): {missing}. File: {p}")

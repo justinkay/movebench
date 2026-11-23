@@ -3,12 +3,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
-from rasterio.merge import merge
 from rasterio.transform import (
     from_bounds as transform_from_bounds,
     from_origin,
@@ -149,84 +148,6 @@ def read_geotiff_window(
             bounds=win_bounds,
             band_ids=band_ids,
         )
-
-
-def merge_hdf_window(
-    subdataset_paths: Iterable[str], bounds_latlon: tuple[float, float, float, float]
-) -> Raster:
-    """Load and merge multiple HDF subdatasets for an EPSG:4326 bounds box."""
-    paths = list(subdataset_paths)
-    if not paths:
-        raise ValueError("merge_hdf_window requires at least one subdataset path")
-
-    datasets = [rasterio.open(p) for p in paths]
-    try:
-        crs = datasets[0].crs
-        if crs is None:
-            raise ValueError(
-                "HDF subdataset has no CRS; cannot window by lat/lon bounds"
-            )
-
-        nodata_val = datasets[0].nodata
-        if nodata_val is None:
-            nodata_val = 255
-
-        min_lon, min_lat, max_lon, max_lat = bounds_latlon
-        left, bottom, right, top = transform_bounds(
-            WGS84_CRS, crs, min_lon, min_lat, max_lon, max_lat
-        )
-        # Snap to >=2-pixel integer bounds in the dataset CRS so downstream
-        # derived layers have enough spatial support for gradient calculations.
-        win = from_bounds(
-            float(left),
-            float(bottom),
-            float(right),
-            float(top),
-            transform=datasets[0].transform,
-        )
-        col0 = int(math.floor(win.col_off))
-        row0 = int(math.floor(win.row_off))
-        col1 = int(math.ceil(win.col_off + win.width))
-        row1 = int(math.ceil(win.row_off + win.height))
-        if col1 <= col0 + 1:
-            col1 = col0 + 2
-        if row1 <= row0 + 1:
-            row1 = row0 + 2
-        win_i = Window(col0, row0, col1 - col0, row1 - row0)
-        b = window_bounds(win_i, datasets[0].transform)
-        win_bounds = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
-
-        mosaic, out_transform = merge(
-            datasets,
-            bounds=win_bounds,
-            nodata=nodata_val,
-            resampling=Resampling.nearest,
-        )
-
-        descriptions = datasets[0].descriptions
-        band_ids = (
-            list(descriptions)
-            if descriptions and any(descriptions)
-            else [f"band_{i + 1}" for i in range(mosaic.shape[0])]
-        )
-
-        # Ensure nodata uses a float NaN when appropriate for downstream math.
-        if isinstance(nodata_val, (int, float)) and np.isfinite(nodata_val):
-            nodata_out = nodata_val
-        else:
-            nodata_out = np.nan
-
-        return Raster(
-            array=mosaic,
-            transform=out_transform,
-            crs=crs,
-            nodata=nodata_out,
-            bounds=win_bounds,
-            band_ids=band_ids,
-        )
-    finally:
-        for ds in datasets:
-            ds.close()
 
 
 def _nodata_key(value: Any) -> Any:
