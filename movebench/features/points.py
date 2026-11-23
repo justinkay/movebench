@@ -7,6 +7,7 @@ import json
 import multiprocessing as mp
 import os
 import shutil
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +29,7 @@ from movebench.geometry import (
 )
 from movebench.features.manifest import (
     PointFeatureManifest,
+    _SHARED_FIELD_SPECS,
     read_manifest,
     utc_now_iso,
     write_manifest,
@@ -747,22 +749,7 @@ def _extract_one_step(
     plan: LayerPlan,
     layer_slices: dict[str, tuple[int, int]],
     sampler_state: dict[str, Any],
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    int,
-    int,
-    int,
-    int,
-    float,
-    float,
-]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     cand = _compute_candidates(req, sampler_state=sampler_state)
     points_per_step = int(len(cand.lons))
     n_channels = int(plan.num_channels())
@@ -823,22 +810,24 @@ def _extract_one_step(
         env[start:end] = vals
         valid[start:end] = vmask
     env = torch.where(valid, env, torch.zeros_like(env))
-    return (
-        env.numpy(),
-        valid.numpy(),
-        cand.lons.astype(np.float32, copy=False),
-        cand.lats.astype(np.float32, copy=False),
-        cand.x_m,
-        cand.y_m,
-        cand.step_lengths_m,
-        cand.turn_angles_rad,
-        int(req.point_id_start),
-        int(req.point_id_end),
-        _ensure_timestamp_ns(req.timestamp),
-        _ensure_timestamp_ns(req.timestamp_end),
-        float(req.actual_step_time_s),
-        float(req.step_time_error_s),
-    )
+    return env.numpy(), valid.numpy(), {
+        "candidate_lon": cand.lons.astype(np.float32, copy=False),
+        "candidate_lat": cand.lats.astype(np.float32, copy=False),
+        "candidate_x_m": cand.x_m,
+        "candidate_y_m": cand.y_m,
+        "step_length_m": cand.step_lengths_m,
+        "turn_angle_rad": cand.turn_angles_rad,
+        "start_lon": float(req.start_lon),
+        "start_lat": float(req.start_lat),
+        "burst_id": int(req.burst_id),
+        "individual_id": str(req.individual_id),
+        "point_id_start": int(req.point_id_start),
+        "point_id_end": int(req.point_id_end),
+        "timestamp_ns": _ensure_timestamp_ns(req.timestamp),
+        "timestamp_end_ns": _ensure_timestamp_ns(req.timestamp_end),
+        "actual_step_time_s": float(req.actual_step_time_s),
+        "step_time_error_s": float(req.step_time_error_s),
+    }
 
 
 _W_IO = None
@@ -858,23 +847,7 @@ def _worker_init(ctx: dict[str, Any]) -> None:
 
 def _worker_run(
     args: tuple[int, _StepRequest],
-) -> tuple[
-    int,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    int,
-    int,
-    int,
-    int,
-    float,
-    float,
-]:
+) -> tuple[int, np.ndarray, np.ndarray, dict[str, Any]]:
     idx, req = args
     out = _extract_one_step(
         req,
@@ -945,130 +918,59 @@ def _extract_env_block(
     reqs: list[_StepRequest],
     sampler_state: dict[str, Any],
     n_workers: int,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    shared_out: np.ndarray | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     n_steps = int(len(reqs))
     points_per_step = int(sampler_state["num_candidates"]) + 1
     n_channels = int(plan.num_channels())
     env = torch.zeros((n_steps, n_channels, points_per_step), dtype=torch.float32)
     valid = torch.zeros((n_steps, n_channels, points_per_step), dtype=torch.bool)
-    shared = {
-        "candidate_lon": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "candidate_lat": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "candidate_x_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "candidate_y_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "step_length_m": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "turn_angle_rad": torch.zeros((n_steps, points_per_step), dtype=torch.float32),
-        "start_lon": torch.zeros((n_steps,), dtype=torch.float32),
-        "start_lat": torch.zeros((n_steps,), dtype=torch.float32),
-        "burst_id": torch.zeros((n_steps,), dtype=torch.int64),
-        "individual_id": ["" for _ in range(n_steps)],
-        "point_id_start": torch.zeros((n_steps,), dtype=torch.int64),
-        "point_id_end": torch.zeros((n_steps,), dtype=torch.int64),
-        "timestamp_ns": torch.zeros((n_steps,), dtype=torch.int64),
-        "timestamp_end_ns": torch.zeros((n_steps,), dtype=torch.int64),
-        "actual_step_time_s": torch.zeros((n_steps,), dtype=torch.float32),
-        "step_time_error_s": torch.zeros((n_steps,), dtype=torch.float32),
-    }
     layer_slices = {layer: plan.layer_slice(layer) for layer in plan.layers_in_order}
 
-    if n_workers <= 1:
-        LayerIO, _Raster, _Transformer = _extraction_runtime()
-        io = LayerIO(study_dir=Path(study_dir), plan=plan)
-        for i, req in enumerate(reqs):
-            (
-                e,
-                v,
-                lons,
-                lats,
-                x_m,
-                y_m,
-                sl,
-                ta,
-                pid_start,
-                pid_end,
-                ts_start,
-                ts_end,
-                actual_step_time_s,
-                step_time_error_s,
-            ) = _extract_one_step(
-                req,
-                io=io,
-                plan=plan,
-                layer_slices=layer_slices,
-                sampler_state=sampler_state,
+    with ExitStack() as stack:
+        if n_workers <= 1:
+            LayerIO, _Raster, _Transformer = _extraction_runtime()
+            io = LayerIO(study_dir=Path(study_dir), plan=plan)
+            results = (
+                (
+                    idx,
+                    *_extract_one_step(
+                        req,
+                        io=io,
+                        plan=plan,
+                        layer_slices=layer_slices,
+                        sampler_state=sampler_state,
+                    ),
+                )
+                for idx, req in enumerate(reqs)
             )
-            env[i] = torch.from_numpy(e)
-            valid[i] = torch.from_numpy(v)
-            shared["candidate_lon"][i] = torch.from_numpy(lons)
-            shared["candidate_lat"][i] = torch.from_numpy(lats)
-            shared["candidate_x_m"][i] = torch.from_numpy(x_m)
-            shared["candidate_y_m"][i] = torch.from_numpy(y_m)
-            shared["step_length_m"][i] = torch.from_numpy(sl)
-            shared["turn_angle_rad"][i] = torch.from_numpy(ta)
-            shared["start_lon"][i] = float(req.start_lon)
-            shared["start_lat"][i] = float(req.start_lat)
-            shared["burst_id"][i] = int(req.burst_id)
-            shared["individual_id"][i] = str(req.individual_id)
-            shared["point_id_start"][i] = int(pid_start)
-            shared["point_id_end"][i] = int(pid_end)
-            shared["timestamp_ns"][i] = int(ts_start)
-            shared["timestamp_end_ns"][i] = int(ts_end)
-            shared["actual_step_time_s"][i] = float(actual_step_time_s)
-            shared["step_time_error_s"][i] = float(step_time_error_s)
-    else:
-        ctx = mp.get_context("spawn")
-        init_ctx = {
-            "study_dir": str(study_dir),
-            "plan_dict": plan.to_dict(),
-            "layer_slices": {k: list(v) for k, v in layer_slices.items()},
-            "sampler_state": sampler_state,
-        }
-        with ctx.Pool(
-            processes=int(n_workers),
-            initializer=_worker_init,
-            initargs=(init_ctx,),
-            maxtasksperchild=200,
-        ) as pool:
-            for (
-                idx,
-                e,
-                v,
-                lons,
-                lats,
-                x_m,
-                y_m,
-                sl,
-                ta,
-                pid_start,
-                pid_end,
-                ts_start,
-                ts_end,
-                actual_step_time_s,
-                step_time_error_s,
-            ) in pool.imap_unordered(
+        else:
+            ctx = mp.get_context("spawn")
+            init_ctx = {
+                "study_dir": str(study_dir),
+                "plan_dict": plan.to_dict(),
+                "layer_slices": {k: list(v) for k, v in layer_slices.items()},
+                "sampler_state": sampler_state,
+            }
+            pool = stack.enter_context(
+                ctx.Pool(
+                    processes=int(n_workers),
+                    initializer=_worker_init,
+                    initargs=(init_ctx,),
+                    maxtasksperchild=200,
+                )
+            )
+            results = pool.imap_unordered(
                 _worker_run, list(enumerate(reqs)), chunksize=10
-            ):
-                env[idx] = torch.from_numpy(e)
-                valid[idx] = torch.from_numpy(v)
-                shared["candidate_lon"][idx] = torch.from_numpy(lons)
-                shared["candidate_lat"][idx] = torch.from_numpy(lats)
-                shared["candidate_x_m"][idx] = torch.from_numpy(x_m)
-                shared["candidate_y_m"][idx] = torch.from_numpy(y_m)
-                shared["step_length_m"][idx] = torch.from_numpy(sl)
-                shared["turn_angle_rad"][idx] = torch.from_numpy(ta)
-                req = reqs[idx]
-                shared["start_lon"][idx] = float(req.start_lon)
-                shared["start_lat"][idx] = float(req.start_lat)
-                shared["burst_id"][idx] = int(req.burst_id)
-                shared["individual_id"][idx] = str(req.individual_id)
-                shared["point_id_start"][idx] = int(pid_start)
-                shared["point_id_end"][idx] = int(pid_end)
-                shared["timestamp_ns"][idx] = int(ts_start)
-                shared["timestamp_end_ns"][idx] = int(ts_end)
-                shared["actual_step_time_s"][idx] = float(actual_step_time_s)
-                shared["step_time_error_s"][idx] = float(step_time_error_s)
+            )
+        for idx, e, v, shared_row in results:
+            env[idx] = torch.from_numpy(e)
+            valid[idx] = torch.from_numpy(v)
+            if shared_out is not None:
+                for name, value in shared_row.items():
+                    shared_out[name][idx] = value
 
-    return env, valid, shared
+    return env, valid
 
 
 def _manifest_matches_store_recipe(
@@ -1096,66 +998,24 @@ def _manifest_matches_store_recipe(
     )
 
 
-def _shared_structured_array(
-    shared: dict[str, Any],
+def _empty_shared_array(
+    reqs: list[_StepRequest],
     *,
     points_per_step: int,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    n_rows = int(len(shared["individual_id"]))
-    max_chars = (
-        max(1, max(len(str(x)) for x in shared["individual_id"]))
-        if n_rows > 0
-        else 1
-    )
-    dtype = np.dtype(
-        [
-            ("candidate_lon", np.float32, (points_per_step,)),
-            ("candidate_lat", np.float32, (points_per_step,)),
-            ("candidate_x_m", np.float32, (points_per_step,)),
-            ("candidate_y_m", np.float32, (points_per_step,)),
-            ("step_length_m", np.float32, (points_per_step,)),
-            ("turn_angle_rad", np.float32, (points_per_step,)),
-            ("start_lon", np.float32),
-            ("start_lat", np.float32),
-            ("burst_id", np.int64),
-            ("individual_id", f"U{max_chars}"),
-            ("point_id_start", np.int64),
-            ("point_id_end", np.int64),
-            ("timestamp_ns", np.int64),
-            ("timestamp_end_ns", np.int64),
-            ("actual_step_time_s", np.float32),
-            ("step_time_error_s", np.float32),
-        ]
-    )
-    out = np.zeros((n_rows,), dtype=dtype)
-    fields_meta: dict[str, Any] = {}
-    for key, value in shared.items():
-        if key == "individual_id":
-            arr = np.asarray([str(x) for x in value], dtype=f"U{max_chars}")
-            fields_meta[key] = {
-                "dtype": "unicode",
-                "shape": [],
-                "max_chars": int(max_chars),
-            }
-        else:
-            arr = (
-                value.detach().cpu().numpy()
-                if torch.is_tensor(value)
-                else np.asarray(value)
-            )
-            arr = np.array(arr, copy=False)
-            fields_meta[key] = {
-                "dtype": "float32"
-                if arr.dtype == np.float32
-                else "int64"
-                if arr.dtype == np.int64
-                else str(arr.dtype),
-                "shape": [points_per_step] if arr.ndim == 2 else [],
-            }
-        out[key] = arr
-    return out, {
+    max_chars = max(1, max((len(str(req.individual_id)) for req in reqs), default=0))
+    fields = []
+    fields_meta = {}
+    for name, spec in _SHARED_FIELD_SPECS.items():
+        shape = [points_per_step] if spec["shape"] == "points" else []
+        dtype = f"U{max_chars}" if spec["dtype"] == "unicode" else spec["dtype"]
+        fields.append((name, dtype, tuple(shape)))
+        fields_meta[name] = {"dtype": spec["dtype"], "shape": shape}
+        if spec["dtype"] == "unicode":
+            fields_meta[name]["max_chars"] = max_chars
+    return np.zeros(len(reqs), dtype=fields), {
         "path": "shared/shared.npy",
-        "shape": [n_rows],
+        "shape": [len(reqs)],
         "dtype": "structured",
         "fields": fields_meta,
     }
@@ -1260,7 +1120,7 @@ def extract_split_feature_store(
                 if set(missing_plan.layers_in_order).isdisjoint(
                     set(existing_manifest.layers.keys())
                 ):
-                    env, valid, _shared_data = _extract_env_block(
+                    env, valid = _extract_env_block(
                         study_id=study_id,
                         study_dir=study_dir,
                         plan=missing_plan,
@@ -1307,17 +1167,17 @@ def extract_split_feature_store(
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    env, valid, shared_data = _extract_env_block(
+    shared_array, shared_meta = _empty_shared_array(
+        reqs, points_per_step=points_per_step
+    )
+    env, valid = _extract_env_block(
         study_id=study_id,
         study_dir=study_dir,
         plan=plan,
         reqs=reqs,
         sampler_state=sampler_state,
         n_workers=n_workers,
-    )
-    shared_array, shared_meta = _shared_structured_array(
-        shared_data,
-        points_per_step=points_per_step,
+        shared_out=shared_array,
     )
     _atomic_save_npy(shared_array, out_dir / "shared" / "shared.npy")
     layers_meta, bands_meta = _layer_store_meta(
