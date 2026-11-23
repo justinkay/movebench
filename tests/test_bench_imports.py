@@ -45,7 +45,7 @@ sharing.assert_not_called()
 
     def test_input_records_do_not_import_dataset_implementations(self):
         self._check_imports(
-            ["movebench.datasets"],
+            ["movebench.datasets.types"],
             ["torch", "movebench.datasets.ssf", "movebench.datasets.deepssf_gpu"],
         )
 

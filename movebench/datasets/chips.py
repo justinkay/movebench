@@ -21,7 +21,7 @@ from rasterio.warp import calculate_default_transform
 from torch.utils.data import DataLoader, Dataset
 
 import movebench.layers.derived as derived
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.geometry import (

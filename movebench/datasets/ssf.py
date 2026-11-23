@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (

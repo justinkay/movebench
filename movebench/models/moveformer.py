@@ -18,13 +18,13 @@ from x_transformers.x_transformers import AttentionLayers
 
 import movebench.ssf_grid as ssf_grid
 from movebench.bench.moveformer_taxa import moveformer_taxon_for_study
-from movebench.datasets import SharedTrainingData, StudyTrainingData
 from movebench.datasets.chips import grid_dataset
 from movebench.datasets.moveformer import (
     MoveFormerPointStoreDataset,
     sequence_dataset,
     sequence_loader,
 )
+from movebench.datasets.types import SharedTrainingData, StudyTrainingData
 from movebench.features.points import PointStoreReader
 from movebench.geometry import (
     LOCAL_GEOMETRY,

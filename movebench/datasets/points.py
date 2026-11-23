@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.features.points import PointStoreReader
 from movebench.trajectories import (
     INDIVIDUAL_COL,

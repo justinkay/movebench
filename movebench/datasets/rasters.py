@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import torch
 
-from movebench.datasets import DataSplit
 from movebench.datasets.deepssf_gpu import (
     AlphaEarthGPUCache,
     build_deepssf_gpu_datasets,
@@ -14,6 +13,7 @@ from movebench.datasets.deepssf_wds_cache import (
     make_deepssf_wds_loader,
     steps_per_epoch_from_manifest,
 )
+from movebench.datasets.types import DataSplit
 
 
 class PreparedRasters:

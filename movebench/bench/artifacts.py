@@ -8,7 +8,12 @@ from pathlib import Path
 import movebench.bench.config as bench_config
 import movebench.bench.run_state as bench_run_state
 import movebench.paths as paths
-from movebench.datasets import (
+from movebench.datasets.deepssf_gpu import ALPHAEARTH_LAYER, AlphaEarthCatalog
+from movebench.datasets.deepssf_wds_cache import (
+    list_deepssf_wds_shards,
+    read_deepssf_wds_manifest,
+)
+from movebench.datasets.types import (
     DataSplit,
     GPUInputs,
     PointInputs,
@@ -18,11 +23,6 @@ from movebench.datasets import (
     StudyTrainingData,
     WDSCacheInput,
     WDSInputs,
-)
-from movebench.datasets.deepssf_gpu import ALPHAEARTH_LAYER, AlphaEarthCatalog
-from movebench.datasets.deepssf_wds_cache import (
-    list_deepssf_wds_shards,
-    read_deepssf_wds_manifest,
 )
 from movebench.features.manifest import read_manifest
 from movebench.features.normalization import load_points_normalization_mean_std

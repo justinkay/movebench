@@ -305,7 +305,7 @@ If you use PyTorch, keep the network on your method object, such as `self.model_
 
 ### Load the data your method needs
 
-For a method trained on one study, `train`, `validation`, and `data` are [DataSplit](movebench/datasets/__init__.py) objects. A split is one part of a study's data, such as its training observations or its temporal test set. `validation` can be `None` if the method does not need it.
+For a method trained on one study, `train`, `validation`, and `data` are [DataSplit](movebench/datasets/types.py) objects. A split is one part of a study's data, such as its training observations or its temporal test set. `validation` can be `None` if the method does not need it.
 
 Each object tells you which split it describes (`split_key`), the study and environmental variables it uses (`metadata`), and where to find the prepared data (`inputs`). It does not load all the observations into memory. Use the helpers in `movebench.datasets` to read the data in the form your model needs:
 

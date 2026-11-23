@@ -15,7 +15,6 @@ import movebench.models.deepssf as deepssf_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
 import movebench.datasets.rasters as raster_data
-from movebench.datasets import DataSplit
 from movebench.datasets.chips import ChipDataset
 from movebench.datasets.deepssf import DeepSSFDataset
 from movebench.datasets.deepssf_gpu import (
@@ -28,6 +27,7 @@ from movebench.datasets.deepssf_gpu import (
     alphaearth_query_geometry,
     build_deepssf_gpu_datasets,
 )
+from movebench.datasets.types import DataSplit
 from movebench.geometry import lonlat_from_local_xy_m
 from movebench.layers import REGISTRY
 from movebench.layers.config import FixedStepSpec, load_layers_config

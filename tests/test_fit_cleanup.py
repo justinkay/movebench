@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from movebench.bench import artifacts, planning, run, run_state
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.training import TrainerConfig, fit_or_restore, save_checkpoint
 
 

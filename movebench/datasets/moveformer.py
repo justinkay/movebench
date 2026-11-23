@@ -11,11 +11,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from movebench.datasets import DataSplit
 from movebench.datasets.ssf import (
     _movement_stats_from_reader,
     _subset_plan_env_channels,
 )
+from movebench.datasets.types import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
 from movebench.features.points import (

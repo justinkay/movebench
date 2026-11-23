@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 
 from movebench.bench import run
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.models import baselines, deepssf, moveformer, ssf
 
 

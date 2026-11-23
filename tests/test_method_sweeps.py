@@ -12,7 +12,7 @@ import movebench.bench.config as bench_config
 import movebench.models.moveformer as moveformer_model
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
-from movebench.datasets import DataSplit
+from movebench.datasets.types import DataSplit
 from movebench.models.moveformer import build_moveformer_selection_model
 
 

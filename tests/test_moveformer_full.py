@@ -15,8 +15,8 @@ import movebench.bench.moveformer_taxa as moveformer_taxa
 import movebench.bench.artifacts as bench_artifacts
 import movebench.bench.planning as bench_planning
 import movebench.datasets.moveformer as moveformer_data
-from movebench.datasets import DataSplit, SharedTrainingData, StudyTrainingData
 from movebench.datasets.moveformer import MoveFormerPointStoreDataset, _StepRecord
+from movebench.datasets.types import DataSplit, SharedTrainingData, StudyTrainingData
 from movebench.lib.moveformer.geo_transformers.trajectory import (
     SimpleTrajectoryProcessor,
 )
