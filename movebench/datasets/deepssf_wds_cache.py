@@ -37,9 +37,8 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 import movebench.paths as paths
-from movebench.features.points import resolve_sampler_hash
+from movebench.datasets.deepssf import DeepSSFDataset
 from movebench.geometry import LOCAL_GEOMETRY
-from movebench.layers.plan import LayerPlan
 from movebench.trajectories import canonicalize_split_key
 
 Compression = Literal["none", "gz"]
@@ -186,7 +185,7 @@ def read_deepssf_wds_manifest_if_complete(
 
 
 def build_deepssf_wds_cache(
-    dataset: Any,
+    dataset: DeepSSFDataset,
     out_dir: str | Path,
     *,
     samples_per_shard: int = 256,
@@ -199,7 +198,7 @@ def build_deepssf_wds_cache(
     resume: bool = False,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """Build a WebDataset cache from a DeepSSFDataset-like dataset."""
+    """Pack deepSSF samples into resumable WebDataset shards."""
     out_dir = Path(out_dir)
     shards_dir = out_dir / "shards"
     manifest_path = out_dir / "manifest.json"
@@ -220,43 +219,16 @@ def build_deepssf_wds_cache(
     out_dir.mkdir(parents=True, exist_ok=True)
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    if not hasattr(dataset, "chips"):
-        raise TypeError(
-            "dataset must have a .chips attribute (expected DeepSSFDataset)"
-        )
     chips = dataset.chips
-    plan = getattr(chips, "plan", None)
-
-    if not isinstance(plan, LayerPlan):
-        raise TypeError("dataset.chips.plan must be a LayerPlan")
-
-    split = str(getattr(chips, "split", ""))
-    if not split:
-        raise ValueError("Could not determine dataset split from dataset.chips.split")
-
-    ohw = getattr(chips, "output_hw", None)
-    if not (isinstance(ohw, (list, tuple)) and len(ohw) == 2):
-        raise TypeError("dataset.chips.output_hw must be a (H,W) tuple")
-    output_hw = (int(ohw[0]), int(ohw[1]))
-
-    pixel_size_m = float(getattr(chips, "pixel_size_m"))
-    if pixel_size_m <= 0:
-        raise ValueError(f"Invalid pixel_size_m={pixel_size_m}")
-    steps = getattr(chips, "step_starts_df", None)
-    if steps is None or "point_id_start" not in steps.columns:
-        raise ValueError(
-            "DeepSSF cache build requires chips.step_starts_df with point_id_start"
-        )
-
-    n = int(len(dataset))
-    if n <= 0:
-        raise ValueError(f"Dataset is empty (len={n}); nothing to cache")
-    point_ids = steps["point_id_start"].to_numpy(dtype="int64", copy=False)
-    if int(len(point_ids)) != n:
-        raise RuntimeError(
-            "Internal error: DeepSSF cache point_id_start length does not match dataset length"
-        )
-    band_ids = list(plan.band_ids_in_order())
+    plan = chips.plan
+    split = chips.split
+    output_hw = chips.output_hw
+    pixel_size_m = chips.pixel_size_m
+    n = len(dataset)
+    point_ids = chips.step_starts_df["point_id_start"].to_numpy(
+        dtype="int64", copy=False
+    )
+    band_ids = plan.band_ids_in_order()
 
     if int(samples_per_shard) <= 0:
         raise ValueError(f"samples_per_shard must be > 0; got {samples_per_shard}")
@@ -268,6 +240,24 @@ def build_deepssf_wds_cache(
         target_torch_dtype = torch.float16
     else:
         target_torch_dtype = torch.float32
+
+    env_channels = int(plan.num_channels())
+    H, W = output_hw
+    manifest: dict[str, Any] = {
+        "schema_version": _MANIFEST_SCHEMA_VERSION,
+        "payload_format": _PAYLOAD_FORMAT,
+        "geometry": LOCAL_GEOMETRY,
+        "cache_hash": str(out_dir.name),
+        "rasters_hash": str(plan.rasters_hash),
+        "band_ids": list(band_ids),
+        "output_hw": [int(H), int(W)],
+        "pixel_size_m": float(pixel_size_m),
+        "env_channels": int(env_channels),
+        "num_samples": int(n),
+        "sanitized_inf_pixels": 0,
+        "sanitized_inf_pixels_by_band": {},
+        "sample_identity": "point_id_start",
+    }
 
     def _resume_offset() -> int:
         if not shards_dir.exists():
@@ -318,31 +308,12 @@ def build_deepssf_wds_cache(
     start_idx = 0
     if resuming:
         start_idx = _resume_offset()
-        if start_idx < 0:
-            start_idx = 0
         if start_idx > n:
             raise RuntimeError(
                 f"Cache already has {start_idx} samples but dataset has len={n}; rebuild with overwrite=True."
             )
         if start_idx == n:
             # Shards already contain the full dataset; just write the manifest.
-            env_channels = int(plan.num_channels())
-            H, W = output_hw
-            manifest: dict[str, Any] = {
-                "schema_version": _MANIFEST_SCHEMA_VERSION,
-                "payload_format": _PAYLOAD_FORMAT,
-                "geometry": LOCAL_GEOMETRY,
-                "cache_hash": str(out_dir.name),
-                "rasters_hash": str(plan.rasters_hash),
-                "band_ids": list(band_ids),
-                "output_hw": [int(H), int(W)],
-                "pixel_size_m": float(pixel_size_m),
-                "env_channels": int(env_channels),
-                "num_samples": int(n),
-                "sanitized_inf_pixels": 0,
-                "sanitized_inf_pixels_by_band": {},
-                "sample_identity": "point_id_start",
-            }
             write_deepssf_wds_manifest(manifest_path, manifest)
             return dict(manifest)
 
@@ -440,23 +411,10 @@ def build_deepssf_wds_cache(
     if num_shards <= 0:
         raise RuntimeError(f"No shards were written under: {shards_dir}")
 
-    env_channels = int(plan.num_channels())
-    H, W = output_hw
-    manifest: dict[str, Any] = {
-        "schema_version": _MANIFEST_SCHEMA_VERSION,
-        "payload_format": _PAYLOAD_FORMAT,
-        "geometry": LOCAL_GEOMETRY,
-        "cache_hash": str(out_dir.name),
-        "rasters_hash": str(plan.rasters_hash),
-        "band_ids": list(band_ids),
-        "output_hw": [int(H), int(W)],
-        "pixel_size_m": float(pixel_size_m),
-        "env_channels": int(env_channels),
-        "num_samples": int(n),
-        "sanitized_inf_pixels": int(sanitized_inf_pixels),
-        "sanitized_inf_pixels_by_band": dict(sorted(sanitized_inf_pixels_by_band.items())),
-        "sample_identity": "point_id_start",
-    }
+    manifest["sanitized_inf_pixels"] = sanitized_inf_pixels
+    manifest["sanitized_inf_pixels_by_band"] = dict(
+        sorted(sanitized_inf_pixels_by_band.items())
+    )
     write_deepssf_wds_manifest(manifest_path, manifest)
     return dict(manifest)
 
@@ -550,204 +508,3 @@ def steps_per_epoch_from_manifest(manifest: dict[str, Any], *, batch_size: int) 
     if b <= 0:
         raise ValueError(f"batch_size must be > 0; got {batch_size}")
     return int(math.ceil(float(int(manifest["num_samples"])) / float(b)))
-
-
-def ensure_deepssf_wds_cache_split(
-    *,
-    study: Any,
-    split: str,
-    layers_config: str,
-    ds_kwargs: dict[str, Any],
-    samples_per_shard: int,
-    spatial_dtype: SpatialDType,
-    target_dtype: TargetDType,
-    compression: Compression,
-    seed: int,
-    build_workers: int,
-    build_if_missing: bool,
-    overwrite: bool = False,
-    resume: bool = False,
-) -> tuple[Path, dict[str, Any]]:
-    """Ensure a deepSSF WebDataset cache exists for a study+split and return (cache_dir, manifest)."""
-    split = canonicalize_split_key(split)
-    layers_config = str(layers_config)
-    plan = study.layer_plan(layers_config)
-
-    ds_kwargs = dict(ds_kwargs)
-    ds_kwargs["split"] = split
-    ds_kwargs["layers_config"] = layers_config
-
-    output_hw = ds_kwargs.get("output_hw", (101, 101))
-    if not (isinstance(output_hw, (list, tuple)) and len(output_hw) == 2):
-        raise ValueError(
-            "datasets.deepssf.output_hw must be a 2-item sequence like [101,101]."
-        )
-    output_hw = (int(output_hw[0]), int(output_hw[1]))
-
-    normalize = bool(ds_kwargs.get("normalize", True))
-    sampler_config = ds_kwargs.get("sampler_config")
-    norm_hash = (
-        resolve_sampler_hash(sampler_config)
-        if (normalize and sampler_config is not None)
-        else None
-    )
-
-    cache_hash = deepssf_wds_cache_hash(
-        rasters_hash=str(plan.rasters_hash),
-        band_ids=plan.band_ids_in_order(),
-        split=split,
-        output_hw=output_hw,
-        normalize=normalize,
-        normalization_sampler_hash=norm_hash,
-        samples_per_shard=int(samples_per_shard),
-        spatial_dtype=spatial_dtype,
-        target_dtype=target_dtype,
-        compression=compression,
-    )
-
-    cache_dir = cache_dir_for_study(
-        study_dir=study.study_dir,
-        split=split,
-        cache_hash=str(cache_hash),
-    )
-    manifest_path = cache_dir / "manifest.json"
-    manifest = read_deepssf_wds_manifest_if_complete(cache_dir)
-
-    if bool(overwrite) and cache_dir.exists():
-        ds = study.deepssf_dataset(**ds_kwargs)
-        build_deepssf_wds_cache(
-            ds,
-            cache_dir,
-            samples_per_shard=int(samples_per_shard),
-            spatial_dtype=spatial_dtype,
-            target_dtype=target_dtype,
-            compression=compression,
-            seed=int(seed),
-            num_workers=int(build_workers),
-            overwrite=True,
-            resume=bool(resume),
-            progress=True,
-        )
-    elif manifest is None:
-        if not build_if_missing:
-            raise FileNotFoundError(
-                f"deepSSF cache missing: {manifest_path} (set datasets.deepssf.cache.build_if_missing=true)"
-            )
-        ds = study.deepssf_dataset(**ds_kwargs)
-        rebuild_stale_cache = manifest_path.exists()
-        build_deepssf_wds_cache(
-            ds,
-            cache_dir,
-            samples_per_shard=int(samples_per_shard),
-            spatial_dtype=spatial_dtype,
-            target_dtype=target_dtype,
-            compression=compression,
-            seed=int(seed),
-            num_workers=int(build_workers),
-            overwrite=bool(rebuild_stale_cache),
-            resume=bool(resume) and not bool(rebuild_stale_cache),
-            progress=True,
-        )
-        manifest = None
-    if manifest is None:
-        manifest = read_deepssf_wds_manifest(manifest_path)
-    return cache_dir, manifest
-
-
-def make_deepssf_wds_train_test_loaders(
-    *,
-    study: Any,
-    layers_config: str,
-    ds_kwargs_train: dict[str, Any],
-    ds_kwargs_test: dict[str, Any],
-    cache_cfg: dict[str, Any],
-    batch_size: int,
-    num_workers: int,
-    runtime_seed: int,
-) -> tuple[
-    Any,  # train_loader
-    Any,  # test_loader
-    dict[str, Any],  # train_manifest
-    dict[str, Any],  # test_manifest
-    int,  # steps_per_epoch
-]:
-    """Build/load deepSSF WebDataset caches and return train/test loaders + manifests.
-
-    This helper centralizes defaults and build-if-missing behavior so call sites
-    (e.g., benchmark.py) stay minimal.
-    """
-    if not isinstance(cache_cfg, dict):
-        raise ValueError("cache_cfg must be a mapping/dict")
-
-    bs = int(batch_size) if batch_size is not None else 1
-    nw = int(num_workers or 0)
-    eval_split = str(ds_kwargs_test.get("split", "test"))
-
-    samples_per_shard = int(cache_cfg.get("samples_per_shard", 256))
-    spatial_dtype = str(cache_cfg.get("spatial_dtype", "float16"))
-    target_dtype = str(cache_cfg.get("target_dtype", "uint8"))
-    compression = str(cache_cfg.get("compression", "none"))
-    build_workers = int(cache_cfg.get("build_workers", 0))
-    shardshuffle = int(cache_cfg.get("shardshuffle", 100))
-    shuffle_buffer = int(cache_cfg.get("shuffle_buffer", 0))
-    seed = int(cache_cfg.get("seed", int(runtime_seed)))
-    build_if_missing = bool(cache_cfg.get("build_if_missing", True))
-    resume = bool(cache_cfg.get("resume", False))
-    overwrite = bool(cache_cfg.get("overwrite", False))
-
-    cache_dir_train, m_train = ensure_deepssf_wds_cache_split(
-        study=study,
-        split="train",
-        layers_config=str(layers_config),
-        ds_kwargs=dict(ds_kwargs_train),
-        samples_per_shard=int(samples_per_shard),
-        spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-        target_dtype=target_dtype,  # type: ignore[arg-type]
-        compression=compression,  # type: ignore[arg-type]
-        seed=int(seed),
-        build_workers=int(build_workers),
-        build_if_missing=bool(build_if_missing),
-        overwrite=bool(overwrite),
-        resume=bool(resume),
-    )
-    cache_dir_test, m_test = ensure_deepssf_wds_cache_split(
-        study=study,
-        split=eval_split,
-        layers_config=str(layers_config),
-        ds_kwargs=dict(ds_kwargs_test),
-        samples_per_shard=int(samples_per_shard),
-        spatial_dtype=spatial_dtype,  # type: ignore[arg-type]
-        target_dtype=target_dtype,  # type: ignore[arg-type]
-        compression=compression,  # type: ignore[arg-type]
-        seed=int(seed),
-        build_workers=int(build_workers),
-        build_if_missing=bool(build_if_missing),
-        overwrite=bool(overwrite),
-        resume=bool(resume),
-    )
-
-    train_loader = make_deepssf_wds_loader(
-        cache_dir_train,
-        batch_size=int(bs),
-        num_workers=int(nw),
-        shardshuffle=int(shardshuffle),
-        shuffle_buffer=int(shuffle_buffer),
-        seed=int(seed),
-        pin_memory=False,
-        persistent_workers=False,
-        prefetch_factor=None,
-    )
-    test_loader = make_deepssf_wds_loader(
-        cache_dir_test,
-        batch_size=int(bs),
-        num_workers=int(nw),
-        shardshuffle=0,
-        shuffle_buffer=0,
-        seed=int(seed),
-        pin_memory=False,
-        persistent_workers=False,
-        prefetch_factor=None,
-    )
-
-    steps_per_epoch = steps_per_epoch_from_manifest(m_train, batch_size=int(bs))
-    return train_loader, test_loader, m_train, m_test, int(steps_per_epoch)

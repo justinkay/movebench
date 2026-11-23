@@ -7,9 +7,9 @@ from typing import Any
 from movebench import Study
 from movebench.bench.config import resolve_timescale
 from movebench.datasets.deepssf_wds_cache import (
+    build_deepssf_wds_cache,
     cache_dir_for_study,
     deepssf_wds_cache_hash,
-    ensure_deepssf_wds_cache_split,
     read_deepssf_wds_manifest_if_complete,
 )
 from movebench.features.points import load_point_store_manifest, point_store_train_stats_path
@@ -25,37 +25,7 @@ class PackJob:
     timescale_key: str
     timescale: dict[str, object]
     split_keys: tuple[str, ...]
-    options: dict[str, object] | None = None
-
-
-def _build_options(
-    *,
-    samples_per_shard: int | None,
-    spatial_dtype: str | None,
-    target_dtype: str | None,
-    compression: str | None,
-    build_workers: int,
-    overwrite: bool,
-    resume: bool,
-    seed: int,
-) -> dict[str, object]:
-    return {
-        "samples_per_shard": samples_per_shard,
-        "spatial_dtype": spatial_dtype,
-        "target_dtype": target_dtype,
-        "compression": compression,
-        "build_workers": int(build_workers),
-        "overwrite": bool(overwrite),
-        "resume": bool(resume),
-        "seed": int(seed),
-    }
-
-
-def _job_option(job: PackJob, key: str, fallback: object) -> object:
-    if not job.options:
-        return fallback
-    value = job.options.get(key)
-    return fallback if value is None else value
+    options: dict[str, object]
 
 
 def _expected_cache_hash(
@@ -64,10 +34,6 @@ def _expected_cache_hash(
     split: str,
     options: dict[str, object],
 ) -> str:
-    samples_per_shard = options.get("samples_per_shard")
-    spatial_dtype = options.get("spatial_dtype")
-    target_dtype = options.get("target_dtype")
-    compression = options.get("compression")
     return deepssf_wds_cache_hash(
         rasters_hash=str(timescale["rasters_hash"]),
         band_ids=list(timescale["all_band_ids"]),
@@ -77,15 +43,11 @@ def _expected_cache_hash(
         normalization_sampler_hash=(
             str(timescale["sampler_hash"]) if bool(timescale["normalize"]) else None
         ),
-        samples_per_shard=int(samples_per_shard or int(timescale["samples_per_shard"])),
-        spatial_dtype=str(spatial_dtype or str(timescale["spatial_dtype"])),
-        target_dtype=str(target_dtype or str(timescale["target_dtype"])),
-        compression=str(compression or str(timescale["compression"])),
+        samples_per_shard=int(options["samples_per_shard"]),
+        spatial_dtype=str(options["spatial_dtype"]),
+        target_dtype=str(options["target_dtype"]),
+        compression=str(options["compression"]),
     )
-
-
-def _cache_split_complete(cache_dir: Path) -> bool:
-    return read_deepssf_wds_manifest_if_complete(cache_dir) is not None
 
 
 def _resolve_pack_timescale(
@@ -123,16 +85,12 @@ def resolve_pack_jobs(
     normalized_splits = (
         None if splits is None else normalize_split_keys(selection_tokens(splits))
     )
-    options = _build_options(
-        samples_per_shard=samples_per_shard,
-        spatial_dtype=spatial_dtype,
-        target_dtype=target_dtype,
-        compression=compression,
-        build_workers=build_workers,
-        overwrite=overwrite,
-        resume=resume,
-        seed=seed,
-    )
+    cache_options = {
+        "samples_per_shard": samples_per_shard,
+        "spatial_dtype": spatial_dtype,
+        "target_dtype": target_dtype,
+        "compression": compression,
+    }
     jobs: list[PackJob] = []
 
     for study_id in resolve_study_selection(studies):
@@ -148,6 +106,16 @@ def resolve_pack_jobs(
                 study_id=str(study_id),
                 layers_config=layers_config,
             )
+            options = {
+                key: timescale[key] if value is None else value
+                for key, value in cache_options.items()
+            }
+            options.update(
+                build_workers=int(build_workers),
+                overwrite=bool(overwrite),
+                resume=bool(resume),
+                seed=int(seed),
+            )
             pending_splits: list[str] = []
             for split in study_splits:
                 cache_hash = _expected_cache_hash(
@@ -160,7 +128,10 @@ def resolve_pack_jobs(
                     split=str(split),
                     cache_hash=cache_hash,
                 )
-                if bool(overwrite) or not _cache_split_complete(Path(cache_dir)):
+                if (
+                    overwrite
+                    or read_deepssf_wds_manifest_if_complete(cache_dir) is None
+                ):
                     pending_splits.append(str(split))
             if pending_splits:
                 jobs.append(
@@ -196,8 +167,21 @@ def execute_pack_job(job: PackJob) -> list[tuple[Path, dict[str, Any]]]:
     _require_pack_inputs(job)
     layers_config = str(job.timescale["layers_config"])
     normalize = bool(job.timescale["normalize"])
+    options = job.options
     results: list[tuple[Path, dict[str, Any]]] = []
     for split in job.split_keys:
+        cache_dir = cache_dir_for_study(
+            study_dir=job.study.study_dir,
+            split=split,
+            cache_hash=_expected_cache_hash(
+                timescale=job.timescale, split=split, options=options
+            ),
+        )
+        manifest = read_deepssf_wds_manifest_if_complete(cache_dir)
+        if manifest is not None and not options["overwrite"]:
+            results.append((cache_dir, manifest))
+            continue
+        overwrite = bool(options["overwrite"]) or (cache_dir / "manifest.json").exists()
         ds_kwargs = {
             "split": str(split),
             "layers_config": layers_config,
@@ -220,30 +204,19 @@ def execute_pack_job(job: PackJob) -> list[tuple[Path, dict[str, Any]]]:
                 ds_kwargs["selected_splits"] = [
                     str(split_key) for split_key in selected_splits
                 ]
-        result = ensure_deepssf_wds_cache_split(
-            study=job.study,
-            split=str(split),
-            layers_config=layers_config,
-            ds_kwargs=ds_kwargs,
-            samples_per_shard=int(
-                _job_option(job, "samples_per_shard", int(job.timescale["samples_per_shard"]))
-            ),
-            spatial_dtype=str(
-                _job_option(job, "spatial_dtype", str(job.timescale["spatial_dtype"]))
-            ),
-            target_dtype=str(
-                _job_option(job, "target_dtype", str(job.timescale["target_dtype"]))
-            ),
-            compression=str(
-                _job_option(job, "compression", str(job.timescale["compression"]))
-            ),
-            seed=int(_job_option(job, "seed", 0)),
-            build_workers=int(_job_option(job, "build_workers", 16)),
-            build_if_missing=True,
-            overwrite=bool(_job_option(job, "overwrite", False)),
-            resume=bool(_job_option(job, "resume", True)),
+        manifest = build_deepssf_wds_cache(
+            job.study.deepssf_dataset(**ds_kwargs),
+            cache_dir,
+            samples_per_shard=int(options["samples_per_shard"]),
+            spatial_dtype=str(options["spatial_dtype"]),
+            target_dtype=str(options["target_dtype"]),
+            compression=str(options["compression"]),
+            seed=int(options["seed"]),
+            num_workers=int(options["build_workers"]),
+            overwrite=overwrite,
+            resume=bool(options["resume"]) and not overwrite,
         )
-        results.append(result)
+        results.append((cache_dir, manifest))
     return results
 
 
