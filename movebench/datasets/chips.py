@@ -20,7 +20,6 @@ from rasterio.transform import array_bounds, from_bounds, rowcol
 from rasterio.warp import calculate_default_transform
 from torch.utils.data import DataLoader, Dataset
 
-import movebench.layers.derived as derived
 from movebench.datasets.types import DataSplit
 from movebench.features.config import SamplerConfig
 from movebench.features.normalization import load_points_normalization_mean_std
@@ -245,7 +244,6 @@ class ChipDataset(Dataset):
             ]
 
         self._ref_layer = self._select_reference_layer()
-        self._chip_group_layer_slices = self._build_chip_group_layer_slices()
 
     @property
     def step_starts_df(self) -> pd.DataFrame:
@@ -333,19 +331,6 @@ class ChipDataset(Dataset):
         raise FileNotFoundError(
             f"No downloaded tile for layer={layer!r} contains lon/lat=({lon},{lat})"
         )
-
-    def _build_chip_group_layer_slices(self) -> dict[str, dict[str, tuple[int, int]]]:
-        out: dict[str, dict[str, tuple[int, int]]] = {}
-        for group_name, g in self.plan.chip_groups.items():
-            offset = 0
-            layer_slices: dict[str, tuple[int, int]] = {}
-            for layer in g["layers"]:
-                spec = self.registry.get(layer)
-                n = len(spec.bands)
-                layer_slices[layer] = (offset, offset + n)
-                offset += n
-            out[group_name] = layer_slices
-        return out
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -449,108 +434,17 @@ class ChipDataset(Dataset):
 
         assert bounds_parts is not None
         assert support_bounds_m is not None
-        metric_cache: dict[str, Raster] = {}
-
-        def get_raster_parts(layer: str) -> list[Raster]:
-            cached = source_cache.get(layer)
-            if cached is not None:
-                return cached
-
-            spec = self.registry.get(layer)
-            if spec.metric_grid_derived:
-                if layer not in metric_cache:
-                    requested = {
-                        name
-                        for name in self.plan.layers_in_order
-                        if self.registry.get(name).metric_grid_derived
-                    }
-                    era5_parts = (
-                        get_raster_parts("era5_land_hourly")
-                        if "orographic_uplift_hourly" in requested
-                        else None
-                    )
-                    metric_cache.update(
-                        derived.derive_metric_terrain_layers(
-                            dem_parts=get_raster_parts("dem"),
-                            dst_crs=target_crs,
-                            support_bounds_m=support_bounds_m,
-                            requested_layers=requested,
-                            era5_land_hourly=era5_parts[0] if era5_parts else None,
-                        )
-                    )
-                return [metric_cache[layer]]
-
-            if spec.source == "gee_chip":
-                group = self.plan.chip_group_for_layer(layer)
-                if group is None:
-                    raise ValueError(
-                        f"gee_chip layer {layer!r} is not listed in any chip group"
-                    )
-                group_raster = chip_groups.get(group)
-                if group_raster is None:
-                    group_raster = self.io.load_chip_group(group, point_id=point_id)
-                    chip_groups[group] = group_raster
-                start, end = self._chip_group_layer_slices[group][layer]
-                rasters = [
-                    Raster(
-                        array=group_raster.array[start:end],
-                        transform=group_raster.transform,
-                        crs=group_raster.crs,
-                        nodata=group_raster.nodata,
-                        bounds=group_raster.bounds,
-                        band_ids=[f"{layer}.{band}" for band in spec.bands],
-                    )
-                ]
-            elif spec.source == "derived":
-                if not spec.derived_from:
-                    raise ValueError(
-                        f"Derived layer {layer!r} must define derived_from"
-                    )
-                parent_parts = {
-                    parent: get_raster_parts(parent)
-                    for parent in spec.derived_from
-                }
-                part_count = max(len(parts) for parts in parent_parts.values())
-                rasters = []
-                for part_index in range(part_count):
-                    parents = {
-                        parent: parts[part_index] if len(parts) > 1 else parts[0]
-                        for parent, parts in parent_parts.items()
-                    }
-                    fn = getattr(derived, f"compute_{layer}", None)
-                    if fn is None:
-                        raise ValueError(
-                            f"Missing derived compute function compute_{layer}"
-                        )
-                    base = parents[spec.derived_from[0]]
-                    rasters.append(
-                        Raster(
-                            array=fn(**parents),
-                            transform=base.transform,
-                            crs=base.crs,
-                            nodata=np.nan,
-                            bounds=base.bounds,
-                            band_ids=[
-                                f"{layer}.{band}" for band in spec.bands
-                            ],
-                        )
-                    )
-            else:
-                rasters = [
-                    self.io.load_layer(
-                        layer,
-                        bounds_latlon=bounds,
-                        timestamp=timestamp,
-                    )
-                    for bounds in bounds_parts
-                ]
-
-            source_cache[layer] = rasters
-            return rasters
-
-        layer_parts = [
-            get_raster_parts(layer) for layer in self.plan.layers_in_order
-        ]
+        layer_parts = list(
+            self.io.iter_layers(
+                point_id=point_id,
+                timestamp=timestamp,
+                bounds_parts=bounds_parts,
+                dst_crs=target_crs,
+                support_bounds_m=support_bounds_m,
+                source_cache=source_cache,
+                chip_groups=chip_groups,
+            )
+        )
         methods = []
         for layer, parts in zip(self.plan.layers_in_order, layer_parts):
             spec = self.registry.get(layer)

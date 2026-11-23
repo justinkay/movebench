@@ -58,13 +58,6 @@ def _extraction_runtime():
     return LayerIO, Raster, Transformer
 
 
-@lru_cache(maxsize=1)
-def _derived_module():
-    import movebench.layers.derived as derived
-
-    return derived
-
-
 def _stable_payload(d: dict[str, Any]) -> bytes:
     return json.dumps(
         d, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -776,95 +769,29 @@ def _extract_one_step(
 
     env = torch.zeros((n_channels, points_per_step), dtype=torch.float32)
     valid = torch.zeros((n_channels, points_per_step), dtype=torch.bool)
-    _LayerIO, Raster, _Transformer = _extraction_runtime()
-    cache: dict[str, list[Raster]] = {}
-    metric_cache: dict[str, Raster] = {}
-
-    def get_raster_parts(layer: str) -> list[Raster]:
-        cached = cache.get(layer)
-        if cached is not None:
-            return cached
-
-        spec = REGISTRY.get(layer)
-        if spec.metric_grid_derived:
-            if layer not in metric_cache:
-                requested = {
-                    name
-                    for name in plan.layers_in_order
-                    if REGISTRY.get(name).metric_grid_derived
-                }
-                era5_parts = (
-                    get_raster_parts("era5_land_hourly")
-                    if "orographic_uplift_hourly" in requested
-                    else None
-                )
-                metric_cache.update(
-                    _derived_module().derive_metric_terrain_layers(
-                        dem_parts=get_raster_parts("dem"),
-                        dst_crs=local_aeqd_crs(req.start_lon, req.start_lat),
-                        support_bounds_m=(
-                            float(np.min(cand.x_m)),
-                            float(np.min(cand.y_m)),
-                            float(np.max(cand.x_m)),
-                            float(np.max(cand.y_m)),
-                        ),
-                        requested_layers=requested,
-                        era5_land_hourly=era5_parts[0] if era5_parts else None,
-                    )
-                )
-            return [metric_cache[layer]]
-
-        if spec.source == "derived":
-            if not spec.derived_from:
-                raise ValueError(f"Derived layer {layer!r} must define derived_from")
-            parent_parts = {
-                parent: get_raster_parts(parent) for parent in spec.derived_from
-            }
-            part_count = max(len(parts) for parts in parent_parts.values())
-            rasters = []
-            for part_index in range(part_count):
-                parents = {
-                    parent: parts[part_index] if len(parts) > 1 else parts[0]
-                    for parent, parts in parent_parts.items()
-                }
-                fn = getattr(_derived_module(), f"compute_{layer}", None)
-                if fn is None:
-                    raise ValueError(
-                        f"Missing derived compute function compute_{layer} in movebench.layers.derived"
-                    )
-                base = parents[spec.derived_from[0]]
-                rasters.append(
-                    Raster(
-                        array=fn(**parents),
-                        transform=base.transform,
-                        crs=base.crs,
-                        nodata=float("nan"),
-                        bounds=base.bounds,
-                        band_ids=[f"{layer}.{band}" for band in spec.bands],
-                    )
-                )
-        else:
-            bounds_parts = (
-                (None,) if spec.source == "gee_chip" else cand.bounds_4326_parts
-            )
-            rasters = [
-                io.load_layer(
-                    layer,
-                    point_id=req.point_id_start,
-                    bounds_latlon=bounds,
-                    timestamp=req.timestamp,
-                )
-                for bounds in bounds_parts
-            ]
-
-        cache[layer] = rasters
-        return rasters
-
-    for layer in plan.layers_in_order:
+    target_crs = None
+    support_bounds_m = None
+    if any(
+        REGISTRY.get(layer).metric_grid_derived for layer in plan.layers_in_order
+    ):
+        target_crs = local_aeqd_crs(req.start_lon, req.start_lat)
+        support_bounds_m = (
+            float(np.min(cand.x_m)),
+            float(np.min(cand.y_m)),
+            float(np.max(cand.x_m)),
+            float(np.max(cand.y_m)),
+        )
+    layer_parts = io.iter_layers(
+        point_id=req.point_id_start,
+        timestamp=req.timestamp,
+        bounds_parts=cand.bounds_4326_parts,
+        dst_crs=target_crs,
+        support_bounds_m=support_bounds_m,
+    )
+    for layer, rasters in zip(plan.layers_in_order, layer_parts):
         start, end = layer_slices[layer]
         spec = REGISTRY.get(layer)
         bilinear = not spec.categorical
-        rasters = get_raster_parts(layer)
         if spec.metric_grid_derived:
             vals, vmask = _sample_from_raster(
                 rasters[0],

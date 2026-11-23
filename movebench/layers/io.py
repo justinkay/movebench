@@ -138,77 +138,99 @@ class LayerIO:
 
         raise ValueError(f"Unknown LayerSource for {layer!r}: {spec.source!r}")
 
-    def load_layer_cached(
+    def iter_layers(
         self,
-        layer: str,
         *,
-        cache: dict[str, Raster],
-        point_id: int | None = None,
-        bounds_latlon: tuple[float, float, float, float] | None = None,
-        timestamp: Any | None = None,
-    ) -> Raster:
-        """Load a layer using a caller-provided per-request cache.
+        point_id: int,
+        timestamp: Any,
+        bounds_parts: tuple[tuple[float, float, float, float], ...],
+        dst_crs=None,
+        support_bounds_m: tuple[float, float, float, float] | None = None,
+        source_cache: dict[str, list[Raster]] | None = None,
+        chip_groups: dict[str, Raster] | None = None,
+    ):
+        """Load the plan in order, sharing source reads and terrain work per request."""
+        source_cache = {} if source_cache is None else source_cache
+        chip_groups = {} if chip_groups is None else chip_groups
+        metric_cache: dict[str, Raster] = {}
 
-        The cache is keyed by layer name. Callers should only reuse a cache
-        within a single request context where (point_id, bounds_latlon,
-        timestamp) are consistent.
-        """
-        cached = cache.get(layer)
-        if cached is not None:
-            return cached
+        def load(layer: str) -> list[Raster]:
+            if layer in source_cache:
+                return source_cache[layer]
+            spec = self.registry.get(layer)
+            if spec.metric_grid_derived:
+                if layer not in metric_cache:
+                    requested = {
+                        name
+                        for name in self.plan.layers_in_order
+                        if self.registry.get(name).metric_grid_derived
+                    }
+                    wind = (
+                        load("era5_land_hourly")
+                        if "orographic_uplift_hourly" in requested
+                        else None
+                    )
+                    metric_cache.update(
+                        derived.derive_metric_terrain_layers(
+                            dem_parts=load("dem"),
+                            dst_crs=dst_crs,
+                            support_bounds_m=support_bounds_m,
+                            requested_layers=requested,
+                            era5_land_hourly=wind[0] if wind else None,
+                        )
+                    )
+                return [metric_cache[layer]]
 
-        spec = self.registry.get(layer)
-        if spec.metric_grid_derived:
-            raise ValueError(
-                f"{layer} must be derived after reprojection to a local metric grid"
-            )
-        if spec.source != "derived":
-            r = self.load_layer(
-                layer,
-                point_id=point_id,
-                bounds_latlon=bounds_latlon,
-                timestamp=timestamp,
-            )
-            cache[layer] = r
-            return r
+            if spec.source == "gee_chip":
+                group = self._chip_group_for_layer(layer)
+                if group not in chip_groups:
+                    chip_groups[group] = self.load_chip_group(group, point_id=point_id)
+                raster = chip_groups[group]
+                start, end = self._chip_group_layer_slices[group][layer]
+                parts = [
+                    Raster(
+                        array=raster.array[start:end],
+                        transform=raster.transform,
+                        crs=raster.crs,
+                        nodata=raster.nodata,
+                        bounds=raster.bounds,
+                        band_ids=[f"{layer}.{band}" for band in spec.bands],
+                    )
+                ]
+            elif spec.source == "derived":
+                if not spec.derived_from:
+                    raise ValueError(f"Derived layer {layer!r} must define derived_from")
+                parent_parts = {parent: load(parent) for parent in spec.derived_from}
+                compute = getattr(derived, f"compute_{layer}", None)
+                if compute is None:
+                    raise ValueError(f"Missing derived compute function compute_{layer}")
+                parts = []
+                for index in range(max(len(rasters) for rasters in parent_parts.values())):
+                    parents = {
+                        parent: rasters[index] if len(rasters) > 1 else rasters[0]
+                        for parent, rasters in parent_parts.items()
+                    }
+                    base = parents[spec.derived_from[0]]
+                    parts.append(
+                        Raster(
+                            array=compute(**parents),
+                            transform=base.transform,
+                            crs=base.crs,
+                            nodata=np.nan,
+                            bounds=base.bounds,
+                            band_ids=[f"{layer}.{band}" for band in spec.bands],
+                        )
+                    )
+            else:
+                parts = [
+                    self.load_layer(layer, bounds_latlon=bounds, timestamp=timestamp)
+                    for bounds in bounds_parts
+                ]
+            source_cache[layer] = parts
+            return parts
 
-        if not spec.derived_from:
-            raise ValueError(f"Derived layer {layer!r} must define derived_from")
-
-        parents: dict[str, Raster] = {}
-        for parent in spec.derived_from:
-            parents[parent] = self.load_layer_cached(
-                parent,
-                cache=cache,
-                point_id=point_id,
-                bounds_latlon=bounds_latlon,
-                timestamp=timestamp,
-            )
-
-        fn_name = f"compute_{layer}"
-        fn = getattr(derived, fn_name, None)
-        if fn is None:
-            raise ValueError(
-                f"Derived layer {layer!r} missing compute function {fn_name} in movebench.layers.derived"
-            )
-
-        arr = fn(**parents)
-        if arr.ndim != 3:
-            raise ValueError(
-                f"{fn_name} must return an array shaped (C,H,W); got shape={getattr(arr, 'shape', None)}"
-            )
-
-        base = parents[spec.derived_from[0]]
-        r = Raster(
-            array=arr,
-            transform=base.transform,
-            crs=base.crs,
-            nodata=float("nan"),
-            bounds=base.bounds,
-            band_ids=[f"{layer}.{b}" for b in spec.bands],
-        )
-        cache[layer] = r
-        return r
+        for layer in self.plan.layers_in_order:
+            yield load(layer)
 
     def load_chip_group(self, chip_group: str, *, point_id: int) -> Raster:
         """Load the full stacked GeoTIFF for a chip group (all layers/bands in that group)."""
