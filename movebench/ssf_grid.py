@@ -393,7 +393,6 @@ def build_ssf_grid_artifact(
                 step_length_m=step_length_m,
                 turn_angle_rad=turn_angle_rad,
                 timestamp_ns=batch["timestamp_ns"],
-                individual_ids=np.asarray(batch["individual_id"]),
             )
             logits = model(_move_batch_to_device(model_batch, device))
             scores_hw = log_q_hw + logits.detach().cpu().view(n_steps, height, width)

@@ -280,7 +280,6 @@ class iSSFDataset(Dataset):
         subset_band_ids: list[str] | None = None,
         normalize_movement: bool = True,
         include_time: bool = False,
-        include_individual_id: bool = False,
         movement_stats: dict[str, float] | None = None,
     ) -> None:
         del trajectories_path
@@ -309,7 +308,6 @@ class iSSFDataset(Dataset):
         self.normalize = bool(normalize)
         self.normalize_movement = bool(normalize_movement)
         self.include_time = bool(include_time)
-        self.include_individual_id = bool(include_individual_id)
         self.c_env = int(self.plan.num_channels())
         self._band_ids = self.plan.band_ids_in_order()
 
@@ -338,38 +336,6 @@ class iSSFDataset(Dataset):
                 )
         else:
             self._movement_stats = None
-
-        if self.include_individual_id:
-            train_store_dir, train_manifest = load_point_store_manifest(
-                study_dir=self.study_dir,
-                split="train",
-                rasters_hash=str(plan.rasters_hash),
-                sampler_hash=str(sampler_hash),
-            )
-            train_reader = PointStoreReader(
-                store_dir=train_store_dir,
-                manifest=train_manifest,
-            )
-            train_ids = train_reader.load_shared_rows(
-                keys=["individual_id"],
-                row_idxs=torch.arange(train_manifest.n_rows, dtype=torch.long),
-            )["individual_id"]
-            individuals = sorted({str(individual_id) for individual_id in train_ids.tolist()})
-            self._individual_to_idx = {
-                individual_id: idx for idx, individual_id in enumerate(individuals)
-            }
-            self._n_individuals = int(len(individuals))
-        else:
-            self._individual_to_idx = {}
-            self._n_individuals = 0
-
-    @property
-    def individual_mapping(self) -> dict[str, int]:
-        return dict(self._individual_to_idx)
-
-    @property
-    def n_individuals(self) -> int:
-        return int(self._n_individuals)
 
     def __len__(self) -> int:
         return int(self.manifest.n_rows)
@@ -420,17 +386,6 @@ class iSSFDataset(Dataset):
             dim=1,
         ).contiguous()
 
-    def _individual_idx_tensor(self, individual_ids: Any) -> torch.Tensor:
-        indices: list[int] = []
-        for individual_id in individual_ids.tolist():
-            key = str(individual_id)
-            if key not in self._individual_to_idx:
-                raise KeyError(
-                    f"individual_id={key!r} was not present in the training split mapping"
-                )
-            indices.append(int(self._individual_to_idx[key]))
-        return torch.tensor(indices, dtype=torch.long)
-
     def load_batch(
         self,
         indices: list[int] | torch.Tensor,
@@ -449,8 +404,6 @@ class iSSFDataset(Dataset):
         shared_keys = ["step_length_m", "turn_angle_rad"]
         if self.include_time:
             shared_keys.append("timestamp_ns")
-        if self.include_individual_id:
-            shared_keys.append("individual_id")
         shared = self.reader.load_shared_rows(keys=shared_keys, row_idxs=idxs)
         return self.make_model_batch(
             env=env,
@@ -458,7 +411,6 @@ class iSSFDataset(Dataset):
             step_length_m=shared["step_length_m"],
             turn_angle_rad=shared["turn_angle_rad"],
             timestamp_ns=shared.get("timestamp_ns"),
-            individual_ids=shared.get("individual_id"),
         )
 
     def make_model_batch(
@@ -469,14 +421,12 @@ class iSSFDataset(Dataset):
         step_length_m: torch.Tensor,
         turn_angle_rad: torch.Tensor,
         timestamp_ns: torch.Tensor | None = None,
-        individual_ids: Any = None,
     ) -> dict[str, torch.Tensor | None]:
         """Assemble CPU features without normalizing environmental values again.
 
         env/valid are prepared float32/bool [N,C,P]; distances/angles are [N,P].
-        Optional time and individual features use int64 timestamps [N] and a
-        one-dimensional ID array [N]. Returns env, valid, move [N,3,P], time
-        [N,4] or None, and training-mapped individual_idx [N] or None.
+        Optional time features use int64 timestamps [N]. Returns env, valid,
+        move [N,3,P], and time [N,4] or None.
         """
         batch: dict[str, torch.Tensor | None] = {
             "env": env,
@@ -486,12 +436,9 @@ class iSSFDataset(Dataset):
                 turn_angle_rad=turn_angle_rad,
             ),
             "time": None,
-            "individual_idx": None,
         }
         if self.include_time:
             batch["time"] = self._time_tensor(timestamp_ns)
-        if self.include_individual_id:
-            batch["individual_idx"] = self._individual_idx_tensor(individual_ids)
         return batch
 
     def __getitem__(self, idx: int) -> int:
@@ -502,7 +449,7 @@ class iSSFDataset(Dataset):
 
 
 def candidate_dataset(
-    data: DataSplit, *, include_time: bool = False, include_individual_id: bool = False
+    data: DataSplit, *, include_time: bool = False
 ) -> iSSFDataset:
     return iSSFDataset(
         study_dir=data.inputs["study_dir"],
@@ -512,7 +459,6 @@ def candidate_dataset(
         split=data.split_key,
         subset_band_ids=list(data.metadata["band_ids"]),
         include_time=include_time,
-        include_individual_id=include_individual_id,
     )
 
 

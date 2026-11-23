@@ -545,7 +545,6 @@ class Study:
         subset_band_ids: list[str] | None = None,
         normalize_movement: bool = True,
         include_time: bool = False,
-        include_individual_id: bool = False,
         movement_stats: dict[str, float] | None = None,
     ):
         from movebench.datasets.ssf import iSSFDataset
@@ -563,7 +562,6 @@ class Study:
             subset_band_ids=subset_band_ids,
             normalize_movement=normalize_movement,
             include_time=include_time,
-            include_individual_id=include_individual_id,
             movement_stats=movement_stats,
         )
 
