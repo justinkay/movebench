@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,7 @@ from movebench.datasets.deepssf_wds_cache import (
 from movebench.features.points import load_point_store_manifest, point_store_train_stats_path
 from movebench.layers import REGISTRY
 from movebench.layers.config import load_layers_config
-from movebench.study import normalize_split_keys, resolve_study_selection
+from movebench.study import normalize_split_keys, resolve_study_selection, selection_tokens
 
 
 @dataclass(frozen=True)
@@ -27,83 +26,6 @@ class PackJob:
     timescale: dict[str, object]
     split_keys: tuple[str, ...]
     options: dict[str, object] | None = None
-
-
-def _split_arg_values(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        for item in str(value).split(","):
-            text = item.strip()
-            if not text or text in seen:
-                continue
-            out.append(text)
-            seen.add(text)
-    return out
-
-
-def _normalize_split_values(values: list[str] | None) -> list[str] | None:
-    normalized = _split_arg_values(values)
-    if normalized is None:
-        return None
-    return normalize_split_keys(normalized)
-
-
-def register_pack_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--studies",
-        nargs="+",
-        required=True,
-        help="Study ids or named sets like 'mini'. Accepts repeated values or comma-separated lists.",
-    )
-    parser.add_argument(
-        "--timescales",
-        nargs="+",
-        required=True,
-        help="Timescale keys such as 1d. Accepts repeated values or comma-separated lists.",
-    )
-    parser.add_argument(
-        "--splits",
-        nargs="+",
-        default=None,
-        help="Optional split keys. Accepts repeated values or comma-separated lists.",
-    )
-    parser.add_argument("--layers-config", type=str, default=None)
-    parser.add_argument("--samples-per-shard", type=int, default=None)
-    parser.add_argument(
-        "--spatial-dtype",
-        type=str,
-        default=None,
-        choices=("float16", "float32"),
-    )
-    parser.add_argument(
-        "--target-dtype",
-        type=str,
-        default=None,
-        choices=("uint8", "float16", "float32"),
-    )
-    parser.add_argument("--compression", type=str, default=None, choices=("none", "gz"))
-    parser.add_argument("--build-workers", type=int, default=16)
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--resume",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--seed", type=int, default=0)
-
-
-def normalize_cli_values(args: argparse.Namespace) -> None:
-    args.studies = _split_arg_values(args.studies) or []
-    args.timescales = _split_arg_values(args.timescales) or []
-    args.splits = _normalize_split_values(args.splits)
-
-
-def _resolve_study_ids(studies: list[str]) -> list[str]:
-    return resolve_study_selection(_split_arg_values(studies))
 
 
 def _build_options(
@@ -198,7 +120,9 @@ def resolve_pack_jobs(
     resume: bool = True,
     seed: int = 0,
 ) -> list[PackJob]:
-    normalized_splits = _normalize_split_values(splits)
+    normalized_splits = (
+        None if splits is None else normalize_split_keys(selection_tokens(splits))
+    )
     options = _build_options(
         samples_per_shard=samples_per_shard,
         spatial_dtype=spatial_dtype,
@@ -211,14 +135,14 @@ def resolve_pack_jobs(
     )
     jobs: list[PackJob] = []
 
-    for study_id in _resolve_study_ids(studies):
+    for study_id in resolve_study_selection(studies):
         study = Study(str(study_id))
         study_splits = normalized_splits
         if study_splits is None:
-            study_splits = _normalize_split_values(
+            study_splits = normalize_split_keys(
                 [str(split) for split in study.split_inventory()["split_keys"]]
             ) or []
-        for timescale_key in _split_arg_values(timescales) or []:
+        for timescale_key in selection_tokens(timescales):
             timescale = _resolve_pack_timescale(
                 str(timescale_key),
                 study_id=str(study_id),
@@ -338,31 +262,20 @@ def run_local_pack(
     resume: bool = True,
     seed: int = 0,
 ) -> int:
-    normalized_splits = _normalize_split_values(splits)
-    resolve_kwargs: dict[str, object] = {
-        "studies": studies,
-        "timescales": timescales,
-        "splits": normalized_splits,
-    }
-    if layers_config is not None:
-        resolve_kwargs["layers_config"] = layers_config
-    if samples_per_shard is not None:
-        resolve_kwargs["samples_per_shard"] = samples_per_shard
-    if spatial_dtype is not None:
-        resolve_kwargs["spatial_dtype"] = spatial_dtype
-    if target_dtype is not None:
-        resolve_kwargs["target_dtype"] = target_dtype
-    if compression is not None:
-        resolve_kwargs["compression"] = compression
-    if int(build_workers) != 16:
-        resolve_kwargs["build_workers"] = build_workers
-    if overwrite:
-        resolve_kwargs["overwrite"] = overwrite
-    resolve_kwargs["resume"] = resume
-    if seed:
-        resolve_kwargs["seed"] = seed
-
-    jobs = resolve_pack_jobs(**resolve_kwargs)
+    jobs = resolve_pack_jobs(
+        studies=studies,
+        timescales=timescales,
+        splits=splits,
+        layers_config=layers_config,
+        samples_per_shard=samples_per_shard,
+        spatial_dtype=spatial_dtype,
+        target_dtype=target_dtype,
+        compression=compression,
+        build_workers=build_workers,
+        overwrite=overwrite,
+        resume=resume,
+        seed=seed,
+    )
     if not jobs:
         print("[pack] No pending study/timescale jobs.")
         return 0
@@ -375,21 +288,3 @@ def run_local_pack(
         )
         execute_pack_job(job)
     return 0
-
-
-def run_local_pack_from_args(args: argparse.Namespace) -> int:
-    normalize_cli_values(args)
-    return run_local_pack(
-        studies=list(args.studies),
-        timescales=list(args.timescales),
-        splits=args.splits,
-        layers_config=args.layers_config,
-        samples_per_shard=args.samples_per_shard,
-        spatial_dtype=args.spatial_dtype,
-        target_dtype=args.target_dtype,
-        compression=args.compression,
-        build_workers=int(args.build_workers),
-        overwrite=bool(args.overwrite),
-        resume=bool(args.resume),
-        seed=int(args.seed),
-    )

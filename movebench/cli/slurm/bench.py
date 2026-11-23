@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -8,11 +7,14 @@ import tempfile
 
 import movebench.bench.config as bench_config
 import movebench.bench.run as bench_run
+from movebench.cli.bench import add_run_arguments
+from movebench.cli.slurm.common import (
+    apply_slurm_config,
+    register_common_slurm_arguments,
+)
 from movebench.slurm.launcher import (
     ArrayRequest,
     SlurmResources,
-    apply_slurm_config,
-    register_common_slurm_arguments,
     run_sbatch_queue,
 )
 
@@ -194,18 +196,9 @@ def register(subparsers) -> None:
         help="Submit benchmark runs through Slurm.",
         description="Submit benchmark runs through Slurm.",
     )
-    run_parser.add_argument("experiment_module", nargs="?")
-    run_parser.add_argument(
-        "--studies",
-        nargs="+",
-        default=None,
-        help="Optional study ids or named sets like 'mini'. Default: use the experiment's studies value.",
-    )
-    run_parser.add_argument("--methods", nargs="+", default=None)
-    run_parser.add_argument("--max-runs", type=int, default=None)
+    add_run_arguments(run_parser, require_experiment=False)
     run_parser.add_argument("--max-cpu-jobs", type=int, default=None)
     run_parser.add_argument("--max-gpu-jobs", type=int, default=None)
-    run_parser.add_argument("--rerun", action="store_true")
     run_parser.add_argument("--manifest-path", type=Path, default=None, help=argparse.SUPPRESS)
     run_parser.add_argument("--run-key", default=None, help=argparse.SUPPRESS)
     register_common_slurm_arguments(run_parser)

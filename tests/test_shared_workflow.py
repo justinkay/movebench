@@ -11,7 +11,7 @@ import torch
 from movebench.bench import artifacts, config, planning, run, run_state
 from movebench.bench.evaluation import runner as evaluation
 from movebench.geometry import LOCAL_GEOMETRY
-from movebench.slurm import bench as slurm_bench
+from movebench.cli.slurm import bench as slurm_bench
 from movebench.training import read_checkpoint, save_checkpoint
 
 TRAINER = "moveformer_full_trainonly"

@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from movebench.slurm import bench, launcher
+from movebench.cli.slurm import bench, common
+from movebench.slurm import launcher
 
 
 class BenchConcurrencyTest(unittest.TestCase):
@@ -145,7 +146,7 @@ class BenchConcurrencyTest(unittest.TestCase):
             max_cpu_jobs=None,
             max_gpu_jobs=7,
         )
-        launcher.apply_slurm_config(
+        common.apply_slurm_config(
             args,
             command_name="bench",
             defaults=bench._SLURM_DEFAULTS,

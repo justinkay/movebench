@@ -19,7 +19,7 @@ from movebench.features.points import (
 )
 from movebench.layers.config import load_layers_config
 from movebench.layers.registry import REGISTRY
-from movebench.study import Study, normalize_split_keys, resolve_study_selection
+from movebench.study import Study, normalize_split_keys
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_LAYERS_CONFIG = _REPO_ROOT / "configs" / "layers" / "all.yaml"
@@ -35,38 +35,6 @@ class ExtractionRun:
     combo_stem: str
     combo_label: str
     log_dir_name: str
-
-
-def parse_multi_path_arg(value: str, *, flag_name: str) -> list[str]:
-    out = [part.strip() for part in str(value).split(",") if part.strip()]
-    if not out:
-        raise ValueError(
-            f"{flag_name} must include at least one path or a comma-separated list of paths."
-        )
-    return out
-
-
-def split_cli_values(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        for item in str(value).split(","):
-            text = item.strip()
-            if not text or text in seen:
-                continue
-            out.append(text)
-            seen.add(text)
-    return out
-
-
-def normalize_split_values(values: list[str] | None) -> list[str] | None:
-    resolved = split_cli_values(values)
-    if resolved is None:
-        return None
-    return normalize_split_keys(resolved)
 
 
 def build_extraction_runs(
@@ -88,10 +56,6 @@ def build_extraction_runs(
             for sampler_config_path in normalized_samplers
         ]
     )
-
-def resolve_requested_studies(studies_arg: str | None) -> list[str]:
-    return resolve_study_selection(studies_arg)
-
 
 def default_splits(study: Study) -> list[str]:
     split_keys = [str(split) for split in study.split_inventory()["split_keys"]]
@@ -169,6 +133,44 @@ def describe_known_download_failure(status: dict[str, object] | None) -> str:
     return " ".join(parts)
 
 
+def check_extraction_inputs(
+    *,
+    study: Study,
+    run: ExtractionRun,
+    splits: list[str],
+    skip_existing: bool,
+    allow_known_download_failures: bool,
+) -> tuple[bool, str, dict[str, object] | None]:
+    """Return completeness, sampler hash and download status; reject blocked inputs."""
+    sampler_hash = resolve_sampler_hash(run.sampler)
+    if skip_existing:
+        complete, sampler_hash = is_extract_complete(
+            study_dir=Path(study.study_dir), run=run, splits=splits
+        )
+        if complete:
+            return True, sampler_hash, None
+
+    request_status = None
+    if uses_gee_layers(run.plan):
+        rasters_root = rasters_root_for(run.plan, study_dir=Path(study.study_dir))
+        if not rasters_root.exists():
+            raise ValueError(f"missing raster cache root: {rasters_root}")
+        if uses_chip_downloads(run.plan):
+            request_status = load_chip_request_status_for_extract(
+                study=study, plan=run.plan, splits=splits
+            )
+        if request_status is not None and request_status.get("status") == "failed":
+            reason = (
+                f"known download failures for study={study.study_id} "
+                f"layers={run.layers_config_path} sampler={run.sampler_config_path} "
+                f"{describe_known_download_failure(request_status)}"
+            )
+            if not allow_known_download_failures:
+                raise ValueError(reason)
+            print(f"[extract] WARNING: proceeding despite {reason}", file=sys.stderr)
+    return False, sampler_hash, request_status
+
+
 def run_extract_job(
     *,
     study_id: str,
@@ -182,17 +184,18 @@ def run_extract_job(
     resolved_splits = (
         default_splits(study) if splits is None else normalize_split_keys(list(splits))
     )
-    sampler_hash = resolve_sampler_hash(run.sampler)
-    done = False
-
-    if skip_existing:
-        done, sampler_hash = is_extract_complete(
-            study_dir=Path(study.study_dir),
+    try:
+        done, sampler_hash, request_status = check_extraction_inputs(
+            study=study,
             run=run,
             splits=resolved_splits,
+            skip_existing=skip_existing,
+            allow_known_download_failures=allow_known_download_failures,
         )
+    except ValueError as exc:
+        print(f"[extract] ERROR: study={study_id}: {exc}", file=sys.stderr)
+        return 2
 
-    request_status = None
     if done:
         print(
             f"[extract] study={study_id} layers={run.layers_config_path} "
@@ -200,49 +203,6 @@ def run_extract_job(
             f"(sampler_hash={sampler_hash})"
         )
     else:
-        if uses_gee_layers(run.plan):
-            rasters_root = rasters_root_for(run.plan, study_dir=Path(study.study_dir))
-            if not rasters_root.exists():
-                print(
-                    f"[extract] ERROR: missing raster cache root for study={study_id}: {rasters_root}",
-                    file=sys.stderr,
-                )
-                return 2
-            request_status = (
-                load_chip_request_status_for_extract(
-                    study=study,
-                    plan=run.plan,
-                    splits=resolved_splits,
-                )
-                if uses_chip_downloads(run.plan)
-                else None
-            )
-            if (
-                isinstance(request_status, dict)
-                and str(request_status.get("status")) == "failed"
-                and not allow_known_download_failures
-            ):
-                print(
-                    "[extract] ERROR: known download failures for "
-                    f"study={study_id} layers={run.layers_config_path} "
-                    f"sampler={run.sampler_config_path} "
-                    f"{describe_known_download_failure(request_status)}",
-                    file=sys.stderr,
-                )
-                return 2
-            if (
-                isinstance(request_status, dict)
-                and str(request_status.get("status")) == "failed"
-                and allow_known_download_failures
-            ):
-                print(
-                    "[extract] WARNING: proceeding despite known download failures for "
-                    f"study={study_id} layers={run.layers_config_path} "
-                    f"sampler={run.sampler_config_path} "
-                    f"{describe_known_download_failure(request_status)}",
-                    file=sys.stderr,
-                )
-
         try:
             result = study.extract_point_features(
                 layers_config=str(run.layers_config_path),

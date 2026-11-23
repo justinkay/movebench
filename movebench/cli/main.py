@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
-from movebench.bench import run as bench_run
-from movebench.cli import download, extract, ingest, pack, slurm
+from movebench.cli import bench, download, extract, ingest, pack, slurm
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,16 +14,14 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.register(subparsers)
     pack.register(subparsers)
     slurm.register(subparsers)
-    bench_run.register(subparsers)
+    bench.register(subparsers)
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv
     parser = build_parser()
-    args = parser.parse_args(argv[1:])
+    args = parser.parse_args(argv)
     return int(args.func(args))
 
 

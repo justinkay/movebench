@@ -142,7 +142,7 @@ def _list_available_studies() -> list[str]:
     return sorted([p.name for p in root.iterdir() if p.is_dir()])
 
 
-def _selection_tokens(selection: str | list[str] | None) -> list[str]:
+def selection_tokens(selection: str | list[str] | None) -> list[str]:
     if selection is None:
         return []
     values = [selection] if isinstance(selection, str) else list(selection)
@@ -152,7 +152,7 @@ def _selection_tokens(selection: str | list[str] | None) -> list[str]:
             text = part.strip()
             if text:
                 out.append(text)
-    return out
+    return list(dict.fromkeys(out))
 
 
 def is_named_study_set(name: str) -> bool:
@@ -162,7 +162,7 @@ def is_named_study_set(name: str) -> bool:
 def resolve_study_selection(selection: str | list[str] | None) -> list[str]:
     available = _list_available_studies()
     available_set = set(available)
-    tokens = _selection_tokens(selection)
+    tokens = selection_tokens(selection)
     if not tokens:
         studies = list(available)
     else:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from movebench.slurm import bench, extract, pack
+from movebench.cli.slurm import bench, extract, pack
 
 
 def register(subparsers) -> None:

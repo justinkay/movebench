@@ -1,0 +1,461 @@
+"""Ingest Movebank-formatted CSVs into movebench as new studies."""
+
+from __future__ import annotations
+from collections import Counter
+import json
+import os
+from pathlib import Path
+import random
+import shutil
+import uuid
+
+import pandas as pd
+
+from movebench import paths
+from movebench.features.manifest import utc_now_iso
+from movebench.trajectories import (
+    INDIVIDUAL_COL,
+    LAT_COL,
+    LON_COL,
+    TIME_COL,
+    canonicalize_split_key,
+)
+from movebench.trajectories import POINT_ID_COL
+from movebench.trajectories import SET_COL
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Movebank often uses hyphenated column names; allow underscore variants.
+    return df.rename(columns=lambda c: c.replace("_", "-"))
+
+
+def _ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
+
+    df = df.copy()
+
+    # Fill individual-local-identifier from individual-id if needed.
+    if INDIVIDUAL_COL not in df.columns or df[INDIVIDUAL_COL].isna().all():
+        if "individual-id" in df.columns:
+            df[INDIVIDUAL_COL] = df["individual-id"]
+        else:
+            raise ValueError(
+                "Missing required individual column. Expected either "
+                f"{INDIVIDUAL_COL!r} or 'individual-id'."
+            )
+
+    required = [TIME_COL, LAT_COL, LON_COL, INDIVIDUAL_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV missing required column(s): {missing}")
+
+    return df
+
+
+def _parse_and_filter(df: pd.DataFrame) -> pd.DataFrame:
+
+    df = df.copy()
+    df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
+    df = df.dropna(subset=[TIME_COL, LAT_COL, LON_COL])
+    return df
+
+
+def _ordered_split_keys(split_values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for split in split_values:
+        if split in seen or split == "unused":
+            continue
+        ordered.append(split)
+        seen.add(split)
+    if "train" in seen:
+        return ["train"] + [split for split in ordered if split != "train"]
+    return ordered
+
+
+def _split_counts(df: pd.DataFrame) -> Counter[str]:
+    if SET_COL not in df.columns:
+        return Counter()
+    return Counter(
+        split
+        for split in (
+            canonicalize_split_key(raw)
+            for raw in df[SET_COL].dropna().astype(str).tolist()
+        )
+        if split
+    )
+
+
+def _subsample_individuals(
+    df: pd.DataFrame,
+    *,
+    max_individuals: int,
+    max_points: int,
+    random_seed: int,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+
+    if max_individuals <= 0:
+        raise ValueError(f"max_individuals must be > 0, got {max_individuals}")
+    if max_points <= 0:
+        raise ValueError(f"max_points must be > 0, got {max_points}")
+
+    df = df.copy()
+    df = df.dropna(subset=[INDIVIDUAL_COL])
+
+    n_points_before = int(len(df))
+    n_individuals_before = int(df[INDIVIDUAL_COL].nunique())
+    if n_points_before == 0 or n_individuals_before == 0:
+        raise ValueError(
+            "No valid rows/individuals remaining after filtering timestamps/lat/lon/individual ids."
+        )
+
+    counts = df.groupby(INDIVIDUAL_COL).size()
+    individual_ids = sorted(counts.index.tolist(), key=lambda x: str(x))
+    random.Random(int(random_seed)).shuffle(individual_ids)
+
+    selected: list[object] = []
+    cumulative_points = 0
+    stop_reason = "all_individuals"
+
+    for indiv in individual_ids:
+        selected.append(indiv)
+        cumulative_points += int(counts.loc[indiv])
+        if len(selected) == int(max_individuals):
+            stop_reason = "max_individuals"
+            break
+        if cumulative_points > int(max_points):
+            stop_reason = "max_points"
+            break
+
+    df = df[df[INDIVIDUAL_COL].isin(selected)].copy()
+
+    info: dict[str, object] = {
+        "max_individuals": int(max_individuals),
+        "max_points": int(max_points),
+        "random_seed": int(random_seed),
+        "stop_reason": str(stop_reason),
+        "selected_individuals": [str(x) for x in selected],
+        "n_points_before": int(n_points_before),
+        "n_individuals_before": int(n_individuals_before),
+        "n_points_after": int(len(df)),
+        "n_individuals_after": int(df[INDIVIDUAL_COL].nunique()),
+    }
+    return df, info
+
+
+def _ensure_set_split(df: pd.DataFrame) -> pd.DataFrame:
+
+    df = df.copy()
+
+    if SET_COL in df.columns:
+        split_mask = df[SET_COL].notna()
+        if bool(split_mask.any()):
+            df.loc[split_mask, SET_COL] = df.loc[split_mask, SET_COL].map(
+                canonicalize_split_key
+            )
+            empty_mask = df[SET_COL].astype(str).str.len() == 0
+            if bool(empty_mask.any()):
+                df.loc[empty_mask, SET_COL] = pd.NA
+        if bool(df[SET_COL].notna().any()):
+            return df
+
+    # Compute per-individual midpoint split.
+    spans = df.groupby(INDIVIDUAL_COL)[TIME_COL].agg(start="min", end="max")
+    split_times = spans["start"] + (spans["end"] - spans["start"]) / 2
+    df["split_time"] = df[INDIVIDUAL_COL].map(split_times)
+    df[SET_COL] = (df[TIME_COL] <= df["split_time"]).map(
+        {True: "train", False: "test_temporal"}
+    )
+    return df
+
+
+def _sort_and_assign_point_id(df: pd.DataFrame) -> pd.DataFrame:
+
+    df = df.sort_values([INDIVIDUAL_COL, TIME_COL]).reset_index(drop=True)
+    df[POINT_ID_COL] = df.index.astype(int)
+    return df
+
+
+def _write_manifest(
+    *,
+    study_dir: Path,
+    study_id: str,
+    source_csv: str,
+    df: pd.DataFrame,
+    subsample: dict[str, object] | None = None,
+) -> None:
+
+    n_points = int(len(df))
+    n_individuals = int(df[INDIVIDUAL_COL].nunique())
+    split_counts = _split_counts(df)
+    split_keys = _ordered_split_keys(list(split_counts.keys()))
+
+    manifest = {
+        "schema_version": "1",
+        "created_at": utc_now_iso(),
+        "study_id": str(study_id),
+        "source_csv": str(source_csv),
+        "trajectories": {
+            "file": "trajectories.csv",
+            "n_points": n_points,
+            "n_individuals": n_individuals,
+            "split_keys": split_keys,
+            "split_counts": {
+                split: int(split_counts[split])
+                for split in split_keys
+                if int(split_counts[split]) > 0
+            },
+        },
+    }
+    for split, count in split_counts.items():
+        if int(count) <= 0:
+            continue
+        manifest["trajectories"][f"n_{split}"] = int(count)
+    if subsample is not None:
+        manifest["subsample"] = dict(subsample)
+    (study_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _commit_staged_study_dir(*, staged_dir: Path, final_dir: Path, force: bool) -> None:
+    if not staged_dir.exists():
+        raise FileNotFoundError(f"Staged study directory missing: {staged_dir}")
+
+    if final_dir.exists():
+        if not force:
+            raise FileExistsError(
+                f"Study directory already exists: {final_dir} (use --force to overwrite)"
+            )
+        backup = final_dir.with_name(
+            f"{final_dir.name}.bak_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        )
+        final_dir.rename(backup)
+        try:
+            staged_dir.rename(final_dir)
+        except Exception:
+            if not final_dir.exists() and backup.exists():
+                backup.rename(final_dir)
+            raise
+        else:
+            shutil.rmtree(backup)
+        return
+
+    staged_dir.rename(final_dir)
+
+
+def _ingest_one_csv(
+    *,
+    csv_path: Path,
+    study_id: str,
+    study_dir: Path,
+    max_individuals: int,
+    max_points: int,
+    random_seed: int,
+    dry_run: bool,
+    force: bool,
+    compact_logs: bool = False,
+    log_prefix: str = "",
+) -> None:
+
+    df = pd.read_csv(csv_path, low_memory=False)
+    df = _normalize_columns(df)
+    df = _ensure_required_columns(df)
+    df = _parse_and_filter(df)
+    df, subsample_info = _subsample_individuals(
+        df,
+        max_individuals=max_individuals,
+        max_points=max_points,
+        random_seed=random_seed,
+    )
+
+    if len(df) == 0:
+        raise ValueError("No valid rows remaining after filtering/subsampling.")
+
+    df = _ensure_set_split(df)
+    df = _sort_and_assign_point_id(df)
+
+    split_counts = _split_counts(df)
+    split_keys = _ordered_split_keys(list(split_counts.keys()))
+    n_train = int(split_counts.get("train", 0))
+    n_held_out = int(
+        sum(
+            count
+            for split, count in split_counts.items()
+            if split not in {"train", "unused"}
+        )
+    )
+    if n_train == 0:
+        raise ValueError("No train rows found after split assignment; cannot proceed.")
+
+    n_points = int(len(df))
+    n_individuals = int(df[INDIVIDUAL_COL].nunique())
+    split_summary = " ".join(
+        f"{split}={int(split_counts[split])}" for split in split_keys
+    )
+
+    if compact_logs:
+        before_p = int(subsample_info["n_points_before"])
+        before_i = int(subsample_info["n_individuals_before"])
+        reason = str(subsample_info["stop_reason"])
+        print(
+            f"{log_prefix}{csv_path.name} -> {study_id} "
+            f"points={n_points}/{before_p} individuals={n_individuals}/{before_i} stop={reason} "
+            f"split={split_summary}"
+        )
+    else:
+        print(f"{log_prefix}csv_path:   {csv_path}")
+        print(f"{log_prefix}study_id:   {study_id}")
+        print(f"{log_prefix}study_dir:  {study_dir}")
+        print(
+            f"{log_prefix}subsample:  "
+            f"max_individuals={int(max_individuals)} max_points={int(max_points)} random_seed={int(random_seed)} "
+            f"stop={subsample_info['stop_reason']}"
+        )
+        print(
+            f"{log_prefix}n_points:   {n_points} (from {int(subsample_info['n_points_before'])})"
+        )
+        print(
+            f"{log_prefix}individuals:{n_individuals} (from {int(subsample_info['n_individuals_before'])})"
+        )
+        print(f"{log_prefix}split:      {split_summary}")
+
+    if n_held_out == 0:
+        print(
+            f"{log_prefix}WARNING: no held-out rows found after split assignment (all points are train/unused)."
+        )
+
+    if dry_run:
+        return
+
+    if study_dir.exists():
+        if not force:
+            raise FileExistsError(
+                f"Study directory already exists: {study_dir} (use --force to overwrite)"
+            )
+        shutil.rmtree(study_dir)
+
+    study_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(study_dir / "trajectories.csv", index=False)
+    _write_manifest(
+        study_dir=study_dir,
+        study_id=study_id,
+        source_csv=str(csv_path),
+        df=df,
+        subsample=subsample_info,
+    )
+
+
+def ingest(
+    source_path: Path,
+    *,
+    study_id: str | None = None,
+    max_individuals: int = 1000,
+    max_points: int = 100_000_000,
+    random_seed: int = 0,
+    dry_run: bool = False,
+    force: bool = False,
+) -> int:
+    source_path = source_path.expanduser().resolve()
+    if not source_path.exists():
+        raise ValueError(f"Path not found: {source_path}")
+
+    if source_path.is_dir():
+        if study_id is not None:
+            raise ValueError(
+                "--study-id cannot be used when source_path is a directory (one study per CSV)."
+            )
+
+        csv_paths = sorted(source_path.glob("*.csv"))
+        if not csv_paths:
+            raise ValueError(f"No CSV files found in directory: {source_path}")
+
+        stem_counts = Counter([p.stem for p in csv_paths])
+        dupes = sorted([s for s, c in stem_counts.items() if c > 1])
+        if dupes:
+            raise ValueError(
+                f"Duplicate CSV stems (study_id collisions) found in directory: {dupes}"
+            )
+
+        print(f"dir_path:   {source_path}")
+        print(f"csvs:       {len(csv_paths)}")
+
+        jobs: list[tuple[Path, str, Path]] = []
+        for p in csv_paths:
+            sid = p.stem
+            sdir = paths.study_dir(sid)
+            jobs.append((p, sid, sdir))
+
+        if not dry_run:
+            existing = [sdir for _, _, sdir in jobs if sdir.exists()]
+            if existing and not force:
+                raise FileExistsError(
+                    "Study directory already exists (use --force to overwrite): "
+                    + ", ".join([str(p) for p in existing])
+                )
+
+        total = len(jobs)
+        if dry_run:
+            for i, (csv_path, study_id, study_dir) in enumerate(jobs, start=1):
+                _ingest_one_csv(
+                    csv_path=csv_path,
+                    study_id=study_id,
+                    study_dir=study_dir,
+                    max_individuals=int(max_individuals),
+                    max_points=int(max_points),
+                    random_seed=int(random_seed),
+                    dry_run=True,
+                    force=bool(force),
+                    compact_logs=True,
+                    log_prefix=f"[{i}/{total}] ",
+                )
+            return 0
+
+        tmp_root = (
+            paths.studies_root() / f".tmp_ingest_{os.getpid()}_{uuid.uuid4().hex}"
+        )
+        tmp_root.mkdir(parents=True, exist_ok=False)
+        try:
+            for i, (csv_path, study_id, _) in enumerate(jobs, start=1):
+                staged_dir = tmp_root / study_id
+                _ingest_one_csv(
+                    csv_path=csv_path,
+                    study_id=study_id,
+                    study_dir=staged_dir,
+                    max_individuals=int(max_individuals),
+                    max_points=int(max_points),
+                    random_seed=int(random_seed),
+                    dry_run=False,
+                    force=True,
+                    compact_logs=True,
+                    log_prefix=f"[{i}/{total}] ",
+                )
+
+            for _, study_id, final_dir in jobs:
+                staged_dir = tmp_root / study_id
+                _commit_staged_study_dir(
+                    staged_dir=staged_dir, final_dir=final_dir, force=bool(force)
+                )
+        except Exception:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        return 0
+
+    # ---- single file mode ----
+    csv_path = source_path
+    study_id = str(study_id) if study_id else csv_path.stem
+    study_dir = paths.study_dir(study_id)
+    _ingest_one_csv(
+        csv_path=csv_path,
+        study_id=study_id,
+        study_dir=study_dir,
+        max_individuals=int(max_individuals),
+        max_points=int(max_points),
+        random_seed=int(random_seed),
+        dry_run=bool(dry_run),
+        force=bool(force),
+        compact_logs=False,
+        log_prefix="",
+    )
+    return 0

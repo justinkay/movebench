@@ -15,7 +15,7 @@ from movebench.bench import artifacts, config, planning, report, results, run, r
 from movebench.bench.evaluation import runner as evaluation
 from movebench.datasets.types import DataSplit
 from movebench.geometry import LOCAL_GEOMETRY
-from movebench.slurm import bench as slurm_bench
+from movebench.cli.slurm import bench as slurm_bench
 
 
 class OriginMethod:
