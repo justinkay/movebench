@@ -29,7 +29,7 @@ import shutil
 import tarfile
 import warnings
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 import torch
 import webdataset as wds
@@ -37,9 +37,11 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 import movebench.paths as paths
-from movebench.datasets.deepssf import DeepSSFDataset
 from movebench.geometry import LOCAL_GEOMETRY
 from movebench.trajectories import canonicalize_split_key
+
+if TYPE_CHECKING:
+    from movebench.datasets.deepssf import DeepSSFDataset
 
 Compression = Literal["none", "gz"]
 SpatialDType = Literal["float16", "float32"]
