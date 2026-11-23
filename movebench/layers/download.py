@@ -1272,48 +1272,28 @@ def _download_chip_worker(args: tuple[ChipRequest, dict[str, Any]]) -> dict[str,
     min_pixels = int(ctx["min_pixels"])
     max_pixels = int(ctx["max_pixels"])
     group_current: dict[str, bool] = ctx["group_current"]
-    force_redownload = {
-        str(group_name): {int(point_id) for point_id in point_ids}
-        for group_name, point_ids in (ctx.get("force_redownload") or {}).items()
-        if isinstance(point_ids, (list, tuple, set))
-    }
-
+    force_redownload = ctx.get("force_redownload", {})
     results: dict[str, Any] = {"point_id": int(req.point_id), "files": {}}
-    all_exist = bool(skip_existing) and all(
-        bool(group_current.get(group_name, False))
-        and int(req.point_id) not in force_redownload.get(str(group_name), set())
-        and _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id).exists()
-        for group_name in plan.chip_groups.keys()
-    )
-
-    if all_exist:
-        results["files"] = {
-            group_name: {
-                "path": str(
-                    _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
-                ),
-                "status": "existing",
-            }
-            for group_name in plan.chip_groups.keys()
-        }
-        return results
-
-    ensure_ee_initialized()
-
-    region = square_region_for_point(req.lon, req.lat, extent_buffer_m)
-
+    pending = []
     for group_name, group in plan.chip_groups.items():
         out_path = _chip_path(study_dir, plan.rasters_hash, group_name, req.point_id)
-        expected = _expected_band_count_for_chip_group(plan, group_name, registry)
         if (
             skip_existing
-            and bool(group_current.get(group_name, False))
-            and int(req.point_id) not in force_redownload.get(str(group_name), set())
+            and group_current[group_name]
+            and req.point_id not in force_redownload.get(group_name, ())
             and out_path.exists()
         ):
             results["files"][group_name] = {"path": str(out_path), "status": "existing"}
-            continue
+        else:
+            pending.append((group_name, group, out_path))
 
+    if not pending:
+        return results
+
+    ensure_ee_initialized()
+    region = square_region_for_point(req.lon, req.lat, extent_buffer_m)
+    for group_name, group, out_path in pending:
+        expected = _expected_band_count_for_chip_group(plan, group_name, registry)
         scale = compute_group_scale(
             resolution_buffer_m,
             float(group["target_scale_m"]),
@@ -1652,185 +1632,67 @@ def download_chips(
         "group_current": group_current,
     }
 
-    if skip_existing and all(bool(group_current.get(group_name, False)) for group_name in group_names):
-        request_status = meta.get("request_status")
-        status_entry = (
-            request_status.get(str(request_hash))
-            if isinstance(request_status, dict)
-            else None
-        )
-        report = None
-        if (
-            isinstance(status_entry, dict)
-            and str(status_entry.get("status")) == "failed"
-            and status_entry.get("report_path")
-        ):
-            report_path = Path(str(status_entry["report_path"]))
-            if report_path.exists():
-                try:
-                    report = json.loads(report_path.read_text(encoding="utf-8"))
-                except Exception:
-                    report = None
-        chip_groups_report = report.get("chip_groups") if isinstance(report, dict) else None
+    run_reqs = reqs
+    repair_failures = None
+    if skip_existing and all(group_current.values()):
+        chip_groups_report = {}
+        try:
+            status = meta.get("request_status", {}).get(request_hash, {})
+            if status.get("status") == "failed":
+                report_path = Path(status["report_path"])
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                chip_groups_report = report.get("chip_groups", {})
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            # Without a usable report, reuse files with existence checks only.
+            pass
+
+        reported_failures = {}
         if isinstance(chip_groups_report, dict):
-            has_reported_failures = False
             for group_name in group_names:
                 group_stats = chip_groups_report.get(group_name)
                 if not isinstance(group_stats, dict):
                     continue
-                if isinstance(group_stats.get("failures"), list) and group_stats["failures"]:
-                    has_reported_failures = True
-                    break
-            if has_reported_failures:
-                expected_band_counts = {
-                    group_name: _expected_band_count_for_chip_group(
-                        plan, group_name, registry
-                    )
-                    for group_name in group_names
-                }
-                invalid_failures = {group_name: [] for group_name in group_names}
-                force_redownload = {group_name: [] for group_name in group_names}
-                repair_point_ids: set[int] = set()
-                seen_reported_failures: set[tuple[str, int]] = set()
-                for group_name in group_names:
-                    group_stats = chip_groups_report.get(group_name)
-                    failures = (
-                        group_stats.get("failures")
-                        if isinstance(group_stats, dict)
-                        else None
-                    )
-                    if not isinstance(failures, list):
-                        continue
-                    for failure in failures:
-                        if not isinstance(failure, dict):
-                            continue
+                failures = group_stats.get("failures")
+                if not isinstance(failures, list) or not failures:
+                    continue
+                reported_failures[group_name] = set()
+                for failure in failures:
+                    if isinstance(failure, dict):
                         try:
                             point_id = int(failure.get("point_id"))
+                            reported_failures[group_name].add(point_id)
                         except (TypeError, ValueError):
                             continue
-                        key = (str(group_name), point_id)
-                        if key in seen_reported_failures:
-                            continue
-                        seen_reported_failures.add(key)
-                        path = _chip_path(
-                            study_dir, plan.rasters_hash, group_name, point_id
-                        )
-                        if _chip_file_is_valid(
-                            path,
-                            expected_band_count=expected_band_counts[group_name],
-                        ):
-                            continue
-                        invalid_failures[group_name].append(
-                            {
-                                "point_id": point_id,
-                                "error": str(failure.get("error", "unknown")),
-                            }
-                        )
-                        repair_point_ids.add(point_id)
-                        if path.exists():
-                            force_redownload[group_name].append(point_id)
 
-                if not repair_point_ids:
-                    group_downloaded_counts = {
-                        group_name: 0 for group_name in group_names
-                    }
-                    group_existing_counts = {
-                        group_name: len(reqs) for group_name in group_names
-                    }
-                    group_failures = {group_name: [] for group_name in group_names}
-                    return _finalize_chip_request(
-                        meta=meta,
-                        meta_path=meta_path,
-                        study_dir=study_dir,
-                        plan=plan,
-                        chip_group_completions=chip_group_completions,
-                        request_hash=request_hash,
-                        requested_splits=requested_splits,
-                        requested_point_count=len(reqs),
-                        started_at=started_at,
-                        group_downloaded_counts=group_downloaded_counts,
-                        group_existing_counts=group_existing_counts,
-                        group_failures=group_failures,
+        if reported_failures:
+            expected_band_counts = {
+                name: _expected_band_count_for_chip_group(plan, name, registry)
+                for name in group_names
+            }
+            repair_failures = {name: set() for name in group_names}
+            force_redownload = {name: set() for name in group_names}
+            for group_name, point_ids in reported_failures.items():
+                for point_id in point_ids:
+                    path = _chip_path(
+                        study_dir, plan.rasters_hash, group_name, point_id
                     )
-
-                repair_reqs = [
-                    reqs_by_point_id[point_id]
-                    for point_id in sorted(repair_point_ids)
-                    if point_id in reqs_by_point_id
-                ]
-                repair_ctx = {
-                    **ctx,
-                    "force_redownload": force_redownload,
-                }
-                repair_results = _run_chip_workers(
-                    repair_reqs,
-                    repair_ctx,
-                    study_dir=study_dir,
-                    n_workers=n_workers,
-                )
-                repair_downloaded_counts, _, repair_group_failures = (
-                    _summarize_chip_worker_results(
-                        repair_results,
-                        group_names=group_names,
-                    )
-                )
-                remaining_failures = {
-                    group_name: list(repair_group_failures[group_name])
-                    for group_name in group_names
-                }
-                seen_remaining = {
-                    (str(group_name), int(item["point_id"]))
-                    for group_name in group_names
-                    for item in remaining_failures[group_name]
-                }
-                for group_name in group_names:
-                    for failure in invalid_failures[group_name]:
-                        point_id = int(failure["point_id"])
-                        path = _chip_path(
-                            study_dir, plan.rasters_hash, group_name, point_id
-                        )
-                        if _chip_file_is_valid(
-                            path,
-                            expected_band_count=expected_band_counts[group_name],
-                        ):
-                            continue
-                        key = (str(group_name), point_id)
-                        if key in seen_remaining:
-                            continue
-                        remaining_failures[group_name].append(
-                            {
-                                "point_id": point_id,
-                                "error": "missing_or_invalid_after_repair",
-                            }
-                        )
-                        seen_remaining.add(key)
-
-                group_existing_counts = {
-                    group_name: max(
-                        len(reqs)
-                        - repair_downloaded_counts.get(group_name, 0)
-                        - len(remaining_failures[group_name]),
-                        0,
-                    )
-                    for group_name in group_names
-                }
-                return _finalize_chip_request(
-                    meta=meta,
-                    meta_path=meta_path,
-                    study_dir=study_dir,
-                    plan=plan,
-                    chip_group_completions=chip_group_completions,
-                    request_hash=request_hash,
-                    requested_splits=requested_splits,
-                    requested_point_count=len(reqs),
-                    started_at=started_at,
-                    group_downloaded_counts=repair_downloaded_counts,
-                    group_existing_counts=group_existing_counts,
-                    group_failures=remaining_failures,
-                )
+                    if _chip_file_is_valid(
+                        path, expected_band_count=expected_band_counts[group_name]
+                    ):
+                        continue
+                    repair_failures[group_name].add(point_id)
+                    if path.exists():
+                        force_redownload[group_name].add(point_id)
+            repair_point_ids = set().union(*repair_failures.values())
+            run_reqs = [
+                reqs_by_point_id[point_id]
+                for point_id in sorted(repair_point_ids)
+                if point_id in reqs_by_point_id
+            ]
+            ctx["force_redownload"] = force_redownload
 
     results = _run_chip_workers(
-        reqs,
+        run_reqs,
         ctx,
         study_dir=study_dir,
         n_workers=n_workers,
@@ -1838,6 +1700,26 @@ def download_chips(
     group_downloaded_counts, group_existing_counts, group_failures = (
         _summarize_chip_worker_results(results, group_names=group_names)
     )
+    if repair_failures is not None:
+        for group_name, point_ids in repair_failures.items():
+            failed_ids = {item["point_id"] for item in group_failures[group_name]}
+            for point_id in point_ids:
+                path = _chip_path(study_dir, plan.rasters_hash, group_name, point_id)
+                if not _chip_file_is_valid(
+                    path, expected_band_count=expected_band_counts[group_name]
+                ) and point_id not in failed_ids:
+                    group_failures[group_name].append(
+                        {
+                            "point_id": point_id,
+                            "error": "missing_or_invalid_after_repair",
+                        }
+                    )
+            group_existing_counts[group_name] = max(
+                len(reqs)
+                - group_downloaded_counts[group_name]
+                - len(group_failures[group_name]),
+                0,
+            )
     return _finalize_chip_request(
         meta=meta,
         meta_path=meta_path,
