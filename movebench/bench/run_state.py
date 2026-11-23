@@ -118,17 +118,6 @@ def metric_repair_eligible(
     )
 
 
-def _json_text(value: object) -> str:
-    if isinstance(value, (str, int, float, bool)):
-        return str(value)
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-
-
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -162,18 +151,13 @@ def _load_active_run_state(run_dir: str | Path) -> dict[str, object] | None:
         return None
 
 
-def write_active_run(
-    run_dir: Path,
-    *,
-    mlflow_run_id: str | None = None,
-) -> None:
+def write_active_run(run_dir: Path) -> None:
     _write_json(
         _active_run_path(run_dir),
         {
             "pid": int(os.getpid()),
             "hostname": socket.gethostname(),
             "slurm_job_id": str(os.environ.get("SLURM_JOB_ID", "")).strip(),
-            "mlflow_run_id": str(mlflow_run_id or "").strip(),
         },
     )
 
@@ -262,152 +246,12 @@ def _flatten_final_metrics(run_dir: Path, split_keys: list[str]) -> dict[str, fl
     return metrics
 
 
-def _payload_params(run_payload: dict[str, object]) -> dict[str, str]:
-    params: dict[str, str] = {}
-    if "step_time_s" in run_payload:
-        params["step_time_s"] = _json_text(run_payload["step_time_s"])
-    if "seed" in run_payload:
-        params["seed"] = _json_text(run_payload["seed"])
-    for key, value in dict(run_payload.get("method_hparams", {}) or {}).items():
-        params[str(key)] = _json_text(value)
-    for key, value in dict(run_payload.get("method_model", {}) or {}).items():
-        params[f"model.{key}"] = _json_text(value)
-    return params
-
-
-def _payload_tags(run_key: str, run_payload: dict[str, object]) -> dict[str, str]:
-    tags = {
-        "run_key": str(run_key),
-        "study_id": str(run_payload.get("study_id", "")),
-        "timescale": str(run_payload.get("timescale", "")),
-        "covariate_set": str(run_payload.get("covariate_set", "")),
-        "method": str(run_payload.get("method", "")),
-        "early_stop_split": str(run_payload.get("early_stop_split_key", "")),
-        "method_variant": str(run_payload.get("method_variant", "")),
-    }
-    return {key: value for key, value in tags.items() if value}
-
-
-def _record_times(run_dir: Path, files: list[Path]) -> tuple[int, int]:
-    timestamps_ns = [run_dir.stat().st_mtime_ns]
-    for path in files:
-        if path.exists():
-            timestamps_ns.append(path.stat().st_mtime_ns)
-    start_ns = min(timestamps_ns)
-    end_ns = max(timestamps_ns)
-    return int(start_ns // 1_000_000), int(end_ns // 1_000_000)
-
-
 def _incomplete_reason(run_dir: Path) -> str | None:
     if _load_active_run_state(run_dir) is not None:
         return "stale interrupted run"
     if (run_dir / "resolved_run.json").exists():
         return "incomplete run missing training_summary"
     return None
-
-
-def _terminal_record(
-    run_key: str,
-    *,
-    run_dir: Path,
-    run_payload: dict[str, object],
-    training_summary: dict[str, object],
-) -> dict[str, object]:
-    tags = _payload_tags(run_key, run_payload)
-    raw_status = str(training_summary.get("status", "")).strip()
-    reason = (
-        completion_error(run_dir, run_payload, training_summary)
-        if raw_status == "completed"
-        else None
-    )
-    if reason or raw_status in {"", "running"}:
-        return _synthetic_record(
-            run_key,
-            run_dir=run_dir,
-            run_payload=run_payload,
-            status="failed",
-            failure_reason=reason or (
-                "stale interrupted run"
-                if raw_status == "running"
-                else "invalid training_summary.json"
-            ),
-            interrupted=raw_status == "running",
-        )
-    record_status = raw_status
-    if raw_status == "interrupted":
-        record_status = "failed"
-        tags["interrupted"] = "true"
-    if raw_status == "failed" or raw_status == "interrupted":
-        reason = str(training_summary.get("reason", "")).strip()
-        if reason:
-            tags["failure_reason"] = reason
-    if raw_status == "blocked":
-        reason = str(training_summary.get("reason", "")).strip()
-        if reason:
-            tags["blocked_reason"] = reason
-    tags["status"] = raw_status
-    metrics = _flatten_final_metrics(
-        run_dir,
-        [
-            str(split_key)
-            for split_key in list(run_payload.get("evaluation_split_keys", []) or [])
-        ],
-    )
-    start_time, end_time = _record_times(
-        run_dir,
-        [
-            run_dir / "resolved_run.json",
-            run_dir / "training_summary.json",
-        ],
-    )
-    return {
-        "run_id": str(run_key),
-        "start_time": start_time,
-        "end_time": end_time,
-        "status": record_status,
-        "tags": tags,
-        "params": _payload_params(run_payload),
-        "metrics": metrics,
-    }
-
-
-def _synthetic_record(
-    run_key: str,
-    *,
-    run_dir: Path,
-    run_payload: dict[str, object],
-    status: str,
-    failure_reason: str | None = None,
-    interrupted: bool = False,
-) -> dict[str, object]:
-    tags = _payload_tags(run_key, run_payload)
-    tags["status"] = str(status)
-    if failure_reason:
-        tags["failure_reason"] = str(failure_reason)
-    if interrupted:
-        tags["interrupted"] = "true"
-    start_time, end_time = _record_times(
-        run_dir,
-        [
-            run_dir / "resolved_run.json",
-            _active_run_path(run_dir),
-        ],
-    )
-    return {
-        "run_id": str(run_key),
-        "start_time": start_time,
-        "end_time": end_time,
-        "status": str(status),
-        "tags": tags,
-        "params": _payload_params(run_payload),
-        "metrics": _flatten_final_metrics(
-            run_dir,
-            [
-                str(split_key)
-                for split_key in list(run_payload.get("evaluation_split_keys", []) or [])
-            ],
-        ),
-    }
 
 
 def _load_run_record(run_key: str) -> dict[str, object] | None:
@@ -419,36 +263,47 @@ def _load_run_record(run_key: str) -> dict[str, object] | None:
         run_payload = _load_json(resolved_path)
     except Exception:
         return None
+
+    failure_reason = None
     if active_run_is_live(current_run_dir):
-        return _synthetic_record(
-            run_key,
-            run_dir=current_run_dir,
-            run_payload=run_payload,
-            status="running",
-        )
-    summary_path = current_run_dir / "training_summary.json"
-    if summary_path.exists():
+        status = "running"
+    elif (current_run_dir / "training_summary.json").exists():
         try:
-            training_summary = _load_json(summary_path)
+            training_summary = _load_json(current_run_dir / "training_summary.json")
         except Exception:
-            training_summary = {"status": "", "reason": "invalid training_summary.json"}
-        return _terminal_record(
-            run_key,
-            run_dir=current_run_dir,
-            run_payload=run_payload,
-            training_summary=training_summary,
-        )
-    incomplete_reason = _incomplete_reason(current_run_dir)
-    if incomplete_reason is not None:
-        return _synthetic_record(
-            run_key,
-            run_dir=current_run_dir,
-            run_payload=run_payload,
-            status="failed",
-            failure_reason=incomplete_reason,
-            interrupted=incomplete_reason == "stale interrupted run",
-        )
-    return None
+            training_summary = {}
+        status = str(training_summary.get("status", "")).strip()
+        if status == "completed":
+            failure_reason = completion_error(current_run_dir, run_payload, training_summary)
+            if failure_reason:
+                status = "failed"
+        elif status in {"", "running"}:
+            failure_reason = (
+                "stale interrupted run" if status == "running"
+                else "invalid training_summary.json"
+            )
+            status = "failed"
+        elif status in {"failed", "interrupted"}:
+            failure_reason = str(training_summary.get("reason", "")).strip()
+            status = "failed"
+    else:
+        failure_reason = _incomplete_reason(current_run_dir)
+        if failure_reason is None:
+            return None
+        status = "failed"
+
+    return {
+        "run_id": str(run_key),
+        "status": status,
+        "tags": {"failure_reason": failure_reason} if failure_reason else {},
+        "metrics": _flatten_final_metrics(
+            current_run_dir,
+            [
+                str(split_key)
+                for split_key in list(run_payload.get("evaluation_split_keys", []) or [])
+            ],
+        ),
+    }
 
 
 def search_latest_run_records_by_key(
