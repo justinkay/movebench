@@ -39,7 +39,7 @@ class ContributedMethodsTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
+        self.enterContext(patch("movebench.paths.repo_root", return_value=self.root))
         self.enterContext(patch("movebench.study._list_available_studies", return_value=["study"]))
         self.enterContext(patch.dict(config.METHODS))
         # Loading this local example registers methods after the runner is imported.

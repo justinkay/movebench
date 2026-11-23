@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import shutil
@@ -13,7 +12,6 @@ import movebench.bench.config as bench_config
 import movebench.bench.evaluation.runner as evaluation_runner
 import movebench.bench.planning as bench_planning
 import movebench.bench.run_state as bench_run_state
-import movebench.paths as paths
 from movebench.training import RestorationReference, seed_everything
 
 
@@ -93,45 +91,6 @@ def _interrupted_summary(
         "train_steps": _history_steps_completed(run_dir),
         "early_stop_split_key": str(run_payload["early_stop_split_key"]),
     }
-
-
-def _manifest_slug(name: str) -> str:
-    slug = "".join(
-        ch if ch.isalnum() or ch in {"-", "_", "."} else "_"
-        for ch in str(name).strip()
-    ).strip("_")
-    return slug or "experiment"
-
-
-def _resolved_manifest_payload(
-    *,
-    experiment: dict[str, object],
-    planned_runs: list[dict[str, object]],
-    pending_runs: list[dict[str, object]],
-) -> dict[str, object]:
-    return {
-        "experiment": dict(experiment),
-        "planned_runs": [dict(run_payload) for run_payload in planned_runs],
-        "planner_blocked_runs": [dict(run) for run in experiment.get("blocked", [])],
-        "pending_run_keys": [str(run["run_key"]) for run in pending_runs],
-    }
-
-
-def _resolved_manifest_path(
-    *,
-    experiment: dict[str, object],
-    manifest_payload: dict[str, object],
-) -> Path:
-    payload_hash = hashlib.sha256(
-        bench_config.stable_payload(manifest_payload).encode("utf-8")
-    ).hexdigest()[:16]
-    return (
-        paths.repo_root()
-        / "results"
-        / "bench"
-        / "manifests"
-        / f"{_manifest_slug(str(experiment['name']))}__{payload_hash}.json"
-    )
 
 
 def _clear_prediction_outputs(run_dir: Path) -> None:
@@ -382,24 +341,12 @@ def resolve_pending_runs(
     if max_runs is not None:
         pending_runs = pending_runs[: int(max_runs)]
 
-    manifest_payload = _resolved_manifest_payload(
-        experiment=experiment,
-        planned_runs=planned_runs,
-        pending_runs=pending_runs,
-    )
-    manifest_path = _resolved_manifest_path(
-        experiment=experiment,
-        manifest_payload=manifest_payload,
-    )
-
     return {
         "experiment": experiment,
         "planned_runs": [dict(run_payload) for run_payload in planned_runs],
         "pending_runs": pending_runs,
         "planner_blocked_runs": planner_blocked_runs,
         "latest_runs": latest_runs,
-        "manifest_payload": manifest_payload,
-        "manifest_path": manifest_path,
         "counts": {
             "planned_runs": len(planned_runs) + len(planner_blocked_runs),
             "pending_runs": len(pending_runs),
@@ -407,14 +354,6 @@ def resolve_pending_runs(
             "blocked_runs": len(planner_blocked_runs),
         },
     }
-
-
-def load_resolved_run(manifest_path: str | Path, run_key: str) -> dict[str, object]:
-    manifest = _load_json(manifest_path)
-    for run_payload in manifest.get("planned_runs", []):
-        if str(run_payload.get("run_key")) == str(run_key):
-            return dict(run_payload)
-    raise KeyError(f"Run key {run_key!r} not found in manifest {manifest_path}")
 
 
 def run_experiment(

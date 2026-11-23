@@ -59,8 +59,6 @@ class BenchConcurrencyTest(unittest.TestCase):
                 "blocked_runs": 0,
             },
             "pending_runs": pending_runs,
-            "manifest_path": Path("manifest.json"),
-            "manifest_payload": {},
         }
         bench_run = SimpleNamespace(
             resolve_pending_runs=lambda *_args, **_kwargs: resolved
@@ -92,7 +90,7 @@ class BenchConcurrencyTest(unittest.TestCase):
                 (
                     request.resources.gpus_per_node,
                     request.array_concurrency,
-                    len(request.worker_args_list),
+                    len(request.tasks),
                 )
                 for request in requests
             ],

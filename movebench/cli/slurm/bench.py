@@ -1,9 +1,6 @@
 from __future__ import annotations
 import argparse
-import json
-import os
 from pathlib import Path
-import tempfile
 
 import movebench.bench.config as bench_config
 import movebench.bench.run as bench_run
@@ -50,49 +47,6 @@ def _resources_for_run(
     )
 
 
-def _worker_args(
-    manifest_path: Path,
-    run_key: str,
-    *,
-    rerun: bool,
-) -> list[str]:
-    worker_args = [
-        "slurm",
-        "bench",
-        "run",
-        "--manifest-path",
-        str(manifest_path),
-        "--run-key",
-        str(run_key),
-    ]
-    if bool(rerun):
-        worker_args.append("--rerun")
-    return worker_args
-
-
-def _write_manifest(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True)
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            tmp_path = Path(handle.name)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink()
-
-
 def _bucket_pending_runs(
     args: argparse.Namespace,
     pending_runs: list[dict[str, object]],
@@ -104,20 +58,8 @@ def _bucket_pending_runs(
     return list(buckets.items())
 
 
-def _run_worker(args: argparse.Namespace) -> int:
-    if not args.manifest_path or not args.run_key:
-        raise ValueError("Worker mode requires --manifest-path and --run-key")
-    run_payload = bench_run.load_resolved_run(Path(args.manifest_path), str(args.run_key))
-    summary = bench_run.execute_run_payload(
-        run_payload,
-        resume=not bool(args.rerun),
-    )
-    return 0 if str(summary.get("status", "completed")) == "completed" else 2
-
-
 def _run_launcher(args: argparse.Namespace) -> int:
-    if not args.experiment_module:
-        raise ValueError("Launcher mode requires an experiment module")
+    apply_slurm_config(args, command_name="bench", defaults=_SLURM_DEFAULTS)
     for name in ("max_cpu_jobs", "max_gpu_jobs"):
         if int(getattr(args, name)) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be > 0")
@@ -131,7 +73,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
     )
     counts = dict(resolved["counts"])
     pending_runs = list(resolved["pending_runs"])
-    manifest_path = Path(resolved["manifest_path"])
 
     print(
         f"[bench] planned={counts['planned_runs']} pending={counts['pending_runs']} "
@@ -140,9 +81,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
     if not pending_runs:
         print("[bench] No pending runs.")
         return 0
-
-    if not args.dry_run:
-        _write_manifest(manifest_path, dict(resolved["manifest_payload"]))
 
     buckets = _bucket_pending_runs(args, pending_runs)
     requests: list[ArrayRequest] = []
@@ -153,14 +91,8 @@ def _run_launcher(args: argparse.Namespace) -> int:
                 resources=resources,
                 array_concurrency=min(len(bucket_runs), int(max_jobs)),
                 log_path=Path(args.log_dir) / f"bucket-{bucket_index}.%A_%a.log",
-                worker_args_list=tuple(
-                    tuple(
-                        _worker_args(
-                            manifest_path,
-                            str(run_payload["run_key"]),
-                            rerun=bool(args.rerun),
-                        )
-                    )
+                tasks=tuple(
+                    {"run_payload": run_payload, "resume": not bool(args.rerun)}
                     for run_payload in bucket_runs
                 ),
                 manifest_dir=Path(args.log_dir) / "manifests",
@@ -177,13 +109,6 @@ def _run_launcher(args: argparse.Namespace) -> int:
     )
 
 
-def _run(args: argparse.Namespace) -> int:
-    apply_slurm_config(args, command_name="bench", defaults=_SLURM_DEFAULTS)
-    if args.manifest_path or args.run_key:
-        return _run_worker(args)
-    return _run_launcher(args)
-
-
 def register(subparsers) -> None:
     parser = subparsers.add_parser(
         "bench",
@@ -196,12 +121,10 @@ def register(subparsers) -> None:
         help="Submit benchmark runs through Slurm.",
         description="Submit benchmark runs through Slurm.",
     )
-    add_run_arguments(run_parser, require_experiment=False)
+    add_run_arguments(run_parser)
     run_parser.add_argument("--max-cpu-jobs", type=int, default=None)
     run_parser.add_argument("--max-gpu-jobs", type=int, default=None)
-    run_parser.add_argument("--manifest-path", type=Path, default=None, help=argparse.SUPPRESS)
-    run_parser.add_argument("--run-key", default=None, help=argparse.SUPPRESS)
     register_common_slurm_arguments(run_parser)
     run_parser.set_defaults(
-        func=_run,
+        func=_run_launcher,
     )

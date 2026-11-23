@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +30,7 @@ class ArrayRequest:
     resources: SlurmResources
     array_concurrency: int
     log_path: Path
-    worker_args_list: tuple[tuple[str, ...], ...]
+    tasks: tuple[dict[str, object], ...]
     manifest_dir: Path
     manifest_stem: str
     name: str | None = None
@@ -81,12 +83,7 @@ def _worker_command(worker_args: Sequence[str]) -> list[str]:
 
 
 def _array_manifest_payload(request: ArrayRequest) -> dict[str, object]:
-    return {
-        "tasks": [
-            {"worker_args": list(worker_args)}
-            for worker_args in request.worker_args_list
-        ]
-    }
+    return {"tasks": list(request.tasks)}
 
 
 def _array_manifest_path(request: ArrayRequest) -> Path:
@@ -101,14 +98,21 @@ def _array_manifest_path(request: ArrayRequest) -> Path:
 
 def _write_array_manifest(*, request: ArrayRequest, manifest_path: Path) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(_array_manifest_payload(request), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    text = json.dumps(_array_manifest_payload(request), indent=2, sort_keys=True)
+    if "run_payload" not in request.tasks[0]:
+        manifest_path.write_text(text, encoding="utf-8")
+        return
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=manifest_path.parent, delete=False
+    ) as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    Path(handle.name).replace(manifest_path)
 
 
 def build_sbatch_command(*, request: ArrayRequest, manifest_path: Path) -> list[str]:
-    task_count = len(request.worker_args_list)
+    task_count = len(request.tasks)
     if task_count <= 0:
         raise ValueError("Array requests must contain at least one task")
     if int(request.array_concurrency) <= 0:
@@ -207,7 +211,7 @@ def run_sbatch_queue(
             request_name = _request_name(request, index)
             print(
                 f"[{label}] ARRAY {request_name} "
-                f"tasks={len(request.worker_args_list)} "
+                f"tasks={len(request.tasks)} "
                 f"concurrency={int(request.array_concurrency)}"
             )
             manifest_path = _array_manifest_path(request)
@@ -215,11 +219,13 @@ def run_sbatch_queue(
                 f"[{label}] "
                 f"{shlex.join(build_sbatch_command(request=request, manifest_path=manifest_path))}"
             )
-            for task_index, worker_args in enumerate(request.worker_args_list):
-                print(
-                    f"[{label}] task[{task_index}] "
-                    f"{shlex.join(_worker_command(worker_args))}"
+            for task_index, task in enumerate(request.tasks):
+                description = (
+                    f"bench run {task['run_payload']['run_key']} resume={task['resume']}"
+                    if "run_payload" in task
+                    else shlex.join(_worker_command(task["worker_args"]))
                 )
+                print(f"[{label}] task[{task_index}] {description}")
         return 0
 
     if not request_list:
@@ -237,7 +243,7 @@ def run_sbatch_queue(
             command = build_sbatch_command(request=request, manifest_path=manifest_path)
             print(
                 f"[{label}] ARRAY {request_name} "
-                f"tasks={len(request.worker_args_list)} "
+                f"tasks={len(request.tasks)} "
                 f"concurrency={int(request.array_concurrency)}"
             )
             print(f"[{label}] {shlex.join(command)}")
@@ -255,7 +261,7 @@ def run_sbatch_queue(
                 _ActiveArray(
                     request_name=request_name,
                     process=process,
-                    task_count=len(request.worker_args_list),
+                    task_count=len(request.tasks),
                     job_id=job_id,
                 )
             )

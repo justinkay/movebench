@@ -190,8 +190,8 @@ def register(subparsers) -> None:
     run_parser.set_defaults(func=_command_run)
 
 
-def add_run_arguments(parser, *, require_experiment: bool = True) -> None:
-    parser.add_argument("experiment_module", nargs=None if require_experiment else "?")
+def add_run_arguments(parser) -> None:
+    parser.add_argument("experiment_module")
     parser.add_argument(
         "--studies",
         nargs="+",

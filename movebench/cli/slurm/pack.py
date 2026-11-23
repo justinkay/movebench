@@ -56,8 +56,8 @@ def run(args: argparse.Namespace) -> int:
                 resources=resources,
                 array_concurrency=int(args.max_concurrent_jobs),
                 log_path=Path(args.log_dir) / "pack.%A_%a.log",
-                worker_args_list=tuple(
-                    tuple(_worker_args_for_job(args, job.study_id, job.timescale_key))
+                tasks=tuple(
+                    {"worker_args": _worker_args_for_job(args, job.study_id, job.timescale_key)}
                     for job in jobs
                 ),
                 manifest_dir=Path(args.log_dir) / "manifests",

@@ -41,7 +41,7 @@ class BenchExecutionTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
+        self.enterContext(patch("movebench.paths.repo_root", return_value=self.root))
         self.entry = {
             "implementation": f"{__name__}:OriginMethod",
             "artifact_requirement": "points", "requires_normalization_stats": False,
@@ -121,9 +121,6 @@ class BenchExecutionTest(unittest.TestCase):
         self.assertEqual(slurm_bench._resources_for_run(args, run_payload=payload).gpus_per_node, 0)
         self.entry.pop("gpus")
         self.assertEqual(slurm_bench._default_gpus_for_method("origin"), 0)
-        manifest = self.root / "manifest.json"
-        manifest.write_text(json.dumps({"planned_runs": planned}))
-        self.assertEqual(run.load_resolved_run(manifest, payload["run_key"]), payload)
 
     def test_saved_predictions_score_once_without_predicting(self):
         self.execute()

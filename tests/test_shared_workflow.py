@@ -1,4 +1,4 @@
-import argparse
+import os
 import json
 import tempfile
 import unittest
@@ -11,7 +11,8 @@ import torch
 from movebench.bench import artifacts, config, planning, run, run_state
 from movebench.bench.evaluation import runner as evaluation
 from movebench.geometry import LOCAL_GEOMETRY
-from movebench.cli.slurm import bench as slurm_bench
+from movebench.cli.slurm import bench as slurm_bench, worker
+from movebench.slurm.launcher import _write_array_manifest
 from movebench.training import read_checkpoint, save_checkpoint
 
 TRAINER = "moveformer_full_trainonly"
@@ -23,7 +24,7 @@ class SharedWorkflowTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
+        self.enterContext(patch("movebench.paths.repo_root", return_value=self.root))
         self.enterContext(patch("movebench.study._list_available_studies", return_value=["a", "b"]))
         self.enterContext(patch.object(config, "resolve_covariate_band_ids", return_value=["band"]))
         self.enterContext(patch.object(config, "resolve_timescale", return_value={
@@ -136,16 +137,15 @@ class SharedWorkflowTest(unittest.TestCase):
         def queue(**kwargs):
             self.assertEqual(set(kwargs), {"label", "requests", "polling_interval", "dry_run"})
             requests.extend(kwargs["requests"])
-            parser = argparse.ArgumentParser()
-            slurm_bench.register(parser.add_subparsers())
-            for request in requests:
-                for worker_args in request.worker_args_list:
-                    worker = parser.parse_args(worker_args[1:])
-                    self.assertEqual(worker.rerun, args.rerun)
-                    payload = run.load_resolved_run(worker.manifest_path, worker.run_key)
-                    self.assertIn(payload["method"], args.methods or [method])
+            for bucket, request in enumerate(requests):
+                manifest = self.root / f"array-{bucket}.json"
+                _write_array_manifest(request=request, manifest_path=manifest)
+                for task_id, task in enumerate(request.tasks):
+                    self.assertEqual(task["resume"], not args.rerun)
+                    self.assertIn(task["run_payload"]["method"], args.methods or [method])
                     if workers:
-                        self.assertEqual(slurm_bench._run_worker(worker), 0)
+                        with patch.dict(os.environ, SLURM_ARRAY_TASK_ID=str(task_id)):
+                            self.assertEqual(worker.main(["--array-manifest", str(manifest)]), 0)
             return 0
 
         with patch.object(slurm_bench, "run_sbatch_queue", side_effect=queue):
@@ -194,7 +194,8 @@ class SharedWorkflowTest(unittest.TestCase):
         trainer = self.train()
         resolved = self.resolve(SCORER, ["a"])
         scorer, = resolved["pending_runs"]
-        slurm_bench._write_manifest(resolved["manifest_path"], resolved["manifest_payload"])
+        manifest = self.root / "array.json"
+        manifest.write_text(json.dumps({"tasks": [{"run_payload": scorer, "resume": True}]}))
         checkpoint = trainer / "checkpoint_best.pt"
         summary = trainer / "training_summary.json"
         original_summary, original_checkpoint = summary.read_bytes(), checkpoint.read_bytes()
@@ -223,9 +224,8 @@ class SharedWorkflowTest(unittest.TestCase):
                     blocked = self.resolve(SCORER, ["a"])
                     self.assertEqual(blocked["pending_runs"], [])
                     self.assertEqual(blocked["counts"]["blocked_runs"], 1)
-                    self.assertEqual(slurm_bench._run_worker(SimpleNamespace(
-                        manifest_path=resolved["manifest_path"], run_key=scorer["run_key"], rerun=False,
-                    )), 2)
+                    with patch.dict(os.environ, SLURM_ARRAY_TASK_ID="0"):
+                        self.assertEqual(worker.main(["--array-manifest", str(manifest)]), 2)
                     construct.assert_not_called()
                 self.assertEqual(self.snapshot(trainer), before)
                 self.assertEqual(run_state.load_training_summary(run_state.run_dir(scorer["run_key"]))["status"], "blocked")
@@ -296,24 +296,24 @@ class SharedWorkflowTest(unittest.TestCase):
     def test_saved_worker_arrays_keep_resources_and_command_rerun(self):
         training_requests = self.launch(TRAINER, ["a", "b"], workers=True)
         self.assertEqual(len(training_requests), 1)
-        self.assertEqual(len(training_requests[0].worker_args_list), 1)
+        self.assertEqual(len(training_requests[0].tasks), 1)
         trainer = run_state.run_dir(self.resolve(TRAINER)["planned_runs"][0]["run_key"])
         trainer_before = self.snapshot(trainer)
         requests = self.launch(SCORER, ["a", "b"], workers=True)
         request, = requests
-        self.assertEqual((len(request.worker_args_list), request.array_concurrency), (2, 1))
+        self.assertEqual((len(request.tasks), request.array_concurrency), (2, 1))
         self.assertEqual((request.resources.gpus_per_node, request.resources.cpus_per_task), (1, 2))
         self.assertEqual((request.resources.time, request.resources.mem), ("00:17:00", "8G"))
         self.assertEqual(self.launch(SCORER, ["a", "b"]), [])
         requests = self.launch(SCORER, ["a", "b"], workers=True, rerun=True, max_runs=1, gpus_per_node=0)
-        self.assertEqual(len(requests[0].worker_args_list), 1)
+        self.assertEqual(len(requests[0].tasks), 1)
         self.assertEqual(requests[0].resources.gpus_per_node, 0)
         self.assertEqual(self.snapshot(trainer), trainer_before)
         requests = self.launch(
             SCORER, ["a", "b"], methods=["baseline_nomove", SCORER], rerun=True,
         )
         self.assertEqual([
-            (r.resources.gpus_per_node, r.array_concurrency, len(r.worker_args_list))
+            (r.resources.gpus_per_node, r.array_concurrency, len(r.tasks))
             for r in requests
         ], [(0, 2, 2), (1, 1, 2)])
         self.assertTrue(all(r.resources.time == "00:17:00" for r in requests))

@@ -101,7 +101,9 @@ def run(args: argparse.Namespace) -> int:
                 resources=resources,
                 array_concurrency=int(args.max_concurrent_jobs),
                 log_path=Path(args.log_dir) / "extract.%A_%a.log",
-                worker_args_list=tuple(queued_worker_args),
+                tasks=tuple(
+                    {"worker_args": list(args)} for args in queued_worker_args
+                ),
                 manifest_dir=Path(args.log_dir) / "manifests",
                 manifest_stem="extract",
             )

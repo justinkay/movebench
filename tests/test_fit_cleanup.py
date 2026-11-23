@@ -19,7 +19,7 @@ class FitCleanupTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.enterContext(patch.object(run.paths, "repo_root", return_value=self.root))
+        self.enterContext(patch("movebench.paths.repo_root", return_value=self.root))
         self.enterContext(patch.object(artifacts, "_resolve_artifacts_for_run", return_value={"status": "resolved", "train": object(), "splits": {"train": DataSplit("train", {}, {})}}))
         self.model = torch.nn.Linear(1, 1)
         self.fit = {

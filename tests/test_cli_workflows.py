@@ -88,7 +88,7 @@ class CliWorkflowTest(unittest.TestCase):
             launch_options = resolve.call_args.kwargs.copy()
             self.assertEqual(launch_options["layers_config"], "custom.yaml")
             request = queue.call_args.kwargs["requests"][0]
-            worker_args = list(request.worker_args_list[0])
+            worker_args = request.tasks[0]["worker_args"]
             self.assertEqual(worker_args[0], "pack")
             self.assertEqual(main(worker_args), 0)
             self.assertEqual(resolve.call_args.kwargs, launch_options)
@@ -111,7 +111,7 @@ class CliWorkflowTest(unittest.TestCase):
             patch.object(extraction, "check_extraction_inputs", side_effect=ValueError("rasters removed")),
         ):
             self.assertEqual(main(["slurm", "extract", *flags]), 0)
-            worker_args = list(queue.call_args.kwargs["requests"][0].worker_args_list[0])
+            worker_args = queue.call_args.kwargs["requests"][0].tasks[0]["worker_args"]
             self.assertEqual(worker_args[0], "extract")
             self.assertEqual(main(worker_args), 2)
 
@@ -181,6 +181,29 @@ class CliWorkflowTest(unittest.TestCase):
                 self.assertEqual(worker.main(["--array-manifest", str(manifest)]), 2)
                 dispatch.assert_called_once_with(argv)
 
+    def test_array_worker_uses_selected_saved_run_and_resume_flag(self):
+        tasks = [
+            {"run_payload": {"run_key": "a", "method_params": {"values": [1, None]}}, "resume": True},
+            {"run_payload": {"run_key": "b", "method_params": {"name": "quoted \"value\""}}, "resume": False},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "array.json"
+            manifest.write_text(json.dumps({"tasks": tasks}))
+            for task_id, status, code in ((0, "completed", 0), (1, "failed", 2)):
+                with (
+                    self.subTest(task_id=task_id),
+                    patch.dict(os.environ, SLURM_ARRAY_TASK_ID=str(task_id)),
+                    patch.object(worker.time, "sleep"),
+                    patch.object(worker, "cli_main") as dispatch,
+                    patch.object(worker.bench_run, "execute_run_payload", return_value={"status": status}) as execute,
+                ):
+                    self.assertEqual(worker.main(["--array-manifest", str(manifest)]), code)
+                    execute.assert_called_once_with(
+                        tasks[task_id]["run_payload"], resume=tasks[task_id]["resume"]
+                    )
+                    dispatch.assert_not_called()
+
 
 if __name__ == "__main__":
+
     unittest.main()
