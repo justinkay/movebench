@@ -216,7 +216,6 @@ class MoveFormerPointStoreDataset(Dataset):
         require_normalization_stats: bool = False,
         subset_band_ids: list[str] | None = None,
         candidate_subset_size: int | None = None,
-        allow_prediction_only_segments: bool = False,
         taxon_embedding: np.ndarray | torch.Tensor | list[float] | None = None,
         lazy_rows: bool = False,
     ) -> None:
@@ -245,7 +244,6 @@ class MoveFormerPointStoreDataset(Dataset):
         self.candidate_subset_size = (
             None if candidate_subset_size is None else int(candidate_subset_size)
         )
-        self.allow_prediction_only_segments = bool(allow_prediction_only_segments)
         self.lazy_rows = bool(lazy_rows)
         self._taxon_embedding = np.asarray(
             np.zeros(100, dtype=np.float32)
@@ -722,7 +720,6 @@ def sequence_dataset(
     candidate_subset_size: int | None = None,
     taxon_embedding: np.ndarray | torch.Tensor | list[float] | None = None,
     lazy_rows: bool = False,
-    allow_prediction_only_segments: bool = False,
 ) -> MoveFormerPointStoreDataset:
     return MoveFormerPointStoreDataset(
         study_dir=data.inputs["study_dir"],
@@ -739,7 +736,6 @@ def sequence_dataset(
         candidate_subset_size=candidate_subset_size,
         taxon_embedding=taxon_embedding,
         lazy_rows=bool(lazy_rows),
-        allow_prediction_only_segments=allow_prediction_only_segments,
     )
 
 

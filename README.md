@@ -384,13 +384,13 @@ for study in train.studies:
 
 Here, `moveformer_taxon_for_study` supplies the study's species information. `context_splits` lets each validation sequence include earlier observations from the training split, and `lazy_rows=True` reads features as they are needed. Some studies have no validation data, or too few observations to form a usable sequence; your method needs to account for that while keeping their training data.
 
-When predicting for a split, include its earlier observations as well. `allow_prediction_only_segments=True` includes sequences needed for prediction even when they cannot be used to calculate a training loss:
+When predicting for a split, include its earlier observations as well. With `min_len=1`, prediction sequences can include a single observation even when there is no preceding observation for calculating a training loss:
 
 ```python
 prediction_sequences = sequence_dataset(
     data, max_len=16, min_len=1,
     context_splits=["train", data.split_key],
-    taxon_embedding=taxon, allow_prediction_only_segments=True, lazy_rows=False,
+    taxon_embedding=taxon, lazy_rows=False,
 )
 ```
 

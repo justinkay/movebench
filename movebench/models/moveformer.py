@@ -787,7 +787,6 @@ class MoveFormerMethod:
             min_len=1,
             context_splits=["train", split_key],
             taxon_embedding=self.taxon_,
-            allow_prediction_only_segments=True,
             lazy_rows=False,
         )
         grid = grid_dataset(data, plan=prediction_dataset.plan, include_env=True)
