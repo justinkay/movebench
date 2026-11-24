@@ -172,13 +172,13 @@ movebench pack --studies mini --timescales 1h 12h 1d 7d
 movebench bench run experiments/main_results.py --studies mini
 ```
 
-Other provided experiment definitions include `experiments/baselines.py`, `experiments/covariate_comparison.py`, and `experiments/moveformer_perstudy.py`.
+Other provided experiment definitions include `experiments/baselines.py` and `experiments/covariate_comparison.py`.
 
 Shared MoveFormer uses one model trained on several studies. Train that model first, then use the second command to make predictions and calculate benchmark scores:
 
 ```bash
 movebench bench run experiments/moveformer_full_trainonly.py --studies mini
-movebench bench run experiments/moveformer_full_predictonly.py --studies mini
+movebench bench run experiments/main_results.py --studies mini --methods moveformer_full_predictonly
 ```
 
 Wait for training to finish before running prediction. The prediction command only loads an already trained model; it cannot start training for you. The shared MoveFormer results in `main_results.py` also need this training step.
@@ -195,8 +195,6 @@ To repeat work, add `--rerun` to the command you want to repeat:
 - On the training command, it trains a new shared model and deletes the study results made with the old model. Run prediction again afterward. MoveBench will refuse to replace a model while a prediction job is using it.
 
 If training stopped after saving the model but before writing its summary, repeat the training command without `--rerun`. It will load the saved model and finish the summary, keeping existing predictions. If the saved model is missing, it must train again and clear the old predictions.
-
-To train a separate model for each study instead, use `experiments/moveformer_perstudy.py`. Those results appear in the `ablation` group, with both the full set of environmental variables (`all`) and AlphaEarth alone (`alphaearth_only`).
 
 **Inspect benchmark state (Optional):**
 
@@ -248,7 +246,7 @@ movebench slurm bench run experiments/moveformer_full_trainonly.py \
 Wait for the training job to finish, then submit prediction:
 
 ```bash
-movebench slurm bench run experiments/moveformer_full_predictonly.py \
+movebench slurm bench run experiments/main_results.py --methods moveformer_full_predictonly \
   --studies mini \
   --slurm-config path/to/slurm.yaml
 ```
@@ -318,9 +316,9 @@ Each object tells you which split it describes (`split_key`), the study and envi
 | Prepared images for deepSSF | `rasters.PreparedRasters(train, ...)` |
 | Sequences of observations for MoveFormer | `moveformer.sequence_dataset(data, ...)` and `sequence_loader(...)` |
 
-The candidate example shows how to use these helpers together. During training, the candidate loader reads and normalizes environmental features, then calls `make_model_batch` to assemble the model's inputs. For each observation, the observed next location is the last candidate. During prediction, `build_ssf_grid_artifact` uses the same `make_model_batch` function for the grid cells. This keeps the movement, time, and individual features consistent between training and prediction.
+The candidate example shows how to use these helpers together. During training, the candidate loader reads and normalizes environmental features, then calls `make_model_batch` to assemble the model's inputs. For each observation, the observed next location is the last candidate. During prediction, `build_ssf_grid_artifact` uses the same `make_model_batch` function for the grid cells. This keeps the environmental, movement, and optional time features consistent between training and prediction.
 
-If you call `make_model_batch` directly, pass environmental features that have already been normalized. For a batch with `N` observations, `C` environmental variables, and `P` possible locations, `env` and its validity mask have shape `[N, C, P]`; distances and angles have shape `[N, P]`. The function assembles the features without normalizing them again. See [ssf.py](movebench/datasets/ssf.py) for the optional timestamp and individual-ID arguments.
+If you call `make_model_batch` directly, pass environmental features that have already been normalized. For a batch with `N` observations, `C` environmental variables, and `P` possible locations, `env` and its validity mask have shape `[N, C, P]`; distances and angles have shape `[N, P]`. The function assembles the features without normalizing them again. See [ssf.py](movebench/datasets/ssf.py) for the `timestamp_ns` argument used when `include_time=True`.
 
 ### Return predictions
 

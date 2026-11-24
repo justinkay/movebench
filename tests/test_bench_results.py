@@ -84,8 +84,8 @@ class BenchResultsTest(unittest.TestCase):
                 "runs": [main_run],
             },
             {
-                "module_path": "/repo/experiments/moveformer_perstudy.py",
-                "experiment": {"name": "ablation"},
+                "module_path": "/repo/experiments/covariate_comparison.py",
+                "experiment": {"name": "covariate_comparison"},
                 "runs": [moveformer_run],
             },
         ]

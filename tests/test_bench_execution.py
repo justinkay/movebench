@@ -390,20 +390,21 @@ class BenchRegistrationTest(unittest.TestCase):
             self.assertTrue(callable(run._load_implementation(entry["implementation"])))
             self.assertEqual(entry["gpus"], int(key == "deepssf" or key.startswith("moveformer")))
         self.assertEqual(summary.normalize_experiment_selection(["ablation"]), ["ablation"])
-        perstudy = planning.load_experiment("experiments/moveformer_perstudy.py")
-        self.assertEqual(perstudy["name"], "ablation")
-        self.assertEqual(perstudy["covariate_sets"], ["all", "alphaearth_only"])
-        self.assertEqual(perstudy["methods"], ["moveformer_perstudy"])
-        for name in ("main_results", "moveformer_full_trainonly", "moveformer_full_predictonly"):
+        for name in ("main_results", "moveformer_full_trainonly"):
             experiment = planning.load_experiment(f"experiments/{name}.py")
             self.assertEqual(experiment["name"], "main_results")
             self.assertNotIn("moveformer_perstudy", experiment["methods"])
 
-    def test_main_shared_and_repair_runs_resolve_the_same_full_cohort(self):
-        names = ("main_results", "moveformer_full_trainonly", "moveformer_full_predictonly",
-                 "main_results_valid_1d_repairs", "main_results_valid_7d_repairs")
+    def test_main_shared_and_subset_runs_resolve_the_same_full_cohort(self):
+        names = ("main_results", "moveformer_full_trainonly")
         experiments = {name: planning.load_experiment(f"experiments/{name}.py") for name in names}
-        cohort = ["other", *experiments[names[-2]]["studies"], *experiments[names[-1]]["studies"]]
+        experiments["prediction"] = {
+            **experiments["main_results"], "methods": ["moveformer_full_predictonly"],
+        }
+        experiments["subset"] = {
+            **experiments["prediction"], "studies": ["study-a"], "trained_on_studies": "all",
+        }
+        cohort = ["study-a", "study-b"]
         with (
             patch.object(planning, "resolve_study_selection", side_effect=lambda value: cohort if value == "all" else list(value)),
             patch.object(artifacts, "_study_timescale_readiness", return_value={
@@ -415,8 +416,8 @@ class BenchRegistrationTest(unittest.TestCase):
             expanded = {name: planning.expand_experiment(experiment) for name, experiment in experiments.items()}
         trainers = {payload["timescale"]: payload for payload in expanded["moveformer_full_trainonly"]}
         main = [payload for payload in expanded["main_results"] if payload["method"] == "moveformer_full_predictonly"]
-        self.assertEqual([payload["run_key"] for payload in main], [payload["run_key"] for payload in expanded["moveformer_full_predictonly"]])
-        for name in ("main_results", "moveformer_full_predictonly", *names[-2:]):
+        self.assertEqual([payload["run_key"] for payload in main], [payload["run_key"] for payload in expanded["prediction"]])
+        for name in ("main_results", "prediction", "subset"):
             for payload in expanded[name]:
                 if payload["method"] != "moveformer_full_predictonly":
                     continue
@@ -424,7 +425,7 @@ class BenchRegistrationTest(unittest.TestCase):
                 self.assertEqual(payload["shared_checkpoint_run_key"], trainer["run_key"])
                 self.assertEqual(set(payload["shared_training_study_ids"]), set(cohort))
         planned = results.planned_run_index([
-            {"experiment": experiments[name], "runs": expanded[name]} for name in names[:3]
+            {"experiment": experiments[name], "runs": expanded[name]} for name in experiments
         ])
         self.assertEqual(sum(payload["method"] == "moveformer_full_predictonly" for payload in planned.values()), len(main))
 
