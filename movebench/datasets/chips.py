@@ -160,9 +160,7 @@ class ChipDataset(Dataset):
             raise ValueError(f"trajectories.csv missing required column: {TIME_COL!r}")
 
         self._step_starts_df: pd.DataFrame | None = None
-        self._warned_oob = False
         self._step_buffer_m: float | None = None
-        self._warned_fixed_grid_coverage = False
 
         if self.mode == "steps":
             if self.output_hw[0] != self.output_hw[1]:
@@ -483,16 +481,6 @@ class ChipDataset(Dataset):
             for layer, parts in zip(self.plan.layers_in_order, layer_parts)
         }
 
-        if not self._warned_fixed_grid_coverage:
-            first_layer = self.plan.layers_in_order[0]
-            ref_arr = aligned_layers[first_layer]
-            ref_valid = _compute_valid_mask(
-                torch.from_numpy(ref_arr.astype(np.float32, copy=False)),
-                nodata_by_layer[first_layer],
-            )
-            if not bool(ref_valid.all()):
-                self._warned_fixed_grid_coverage = True
-
         H, W = aligned_arrays[0].shape[1:]
         C_total = int(self.plan.num_channels())
         env = torch.zeros((C_total, H, W), dtype=torch.float32)
@@ -555,8 +543,6 @@ class ChipDataset(Dataset):
             y = torch.zeros((int(H), int(W)), dtype=torch.float32)
             if 0 <= int(rr) < int(H) and 0 <= int(cc) < int(W):
                 y[int(rr), int(cc)] = 1.0
-            elif not self._warned_oob:
-                self._warned_oob = True
             return env, valid, y, final_transform, str(final_crs)
 
         return env, valid, final_transform, str(final_crs)
