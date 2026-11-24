@@ -26,12 +26,12 @@ EXPERIMENT_DEFAULTS: dict[str, object] = {
 }
 
 TIMESCALES: dict[str, dict[str, object]] = {
-    "1h": {
-        "key": "1h",
-        "step_time_s": 3600,
-        "layers_config": "configs/layers/all_ae_1h_1h.yaml",
-        "alphaearth_layers_config": "configs/layers/alphaearth_only_1h_1h.yaml",
-        "marine_layers_config": "configs/layers/all_ae_plus_marine_1h_1h.yaml",
+    key: {
+        "key": key,
+        "step_time_s": step_time_s,
+        "layers_config": f"configs/layers/all_ae_{key}_{key}.yaml",
+        "alphaearth_layers_config": f"configs/layers/alphaearth_only_{key}_{key}.yaml",
+        "marine_layers_config": f"configs/layers/all_ae_plus_marine_{key}_{key}.yaml",
         "sampler_config": "configs/samplers/issf_defaults.yaml",
         "output_hw": (101, 101),
         "normalize": True,
@@ -39,49 +39,13 @@ TIMESCALES: dict[str, dict[str, object]] = {
         "spatial_dtype": "float16",
         "target_dtype": "uint8",
         "compression": "none",
-    },
-    "12h": {
-        "key": "12h",
-        "step_time_s": 43200,
-        "layers_config": "configs/layers/all_ae_12h_12h.yaml",
-        "alphaearth_layers_config": "configs/layers/alphaearth_only_12h_12h.yaml",
-        "marine_layers_config": "configs/layers/all_ae_plus_marine_12h_12h.yaml",
-        "sampler_config": "configs/samplers/issf_defaults.yaml",
-        "output_hw": (101, 101),
-        "normalize": True,
-        "samples_per_shard": 256,
-        "spatial_dtype": "float16",
-        "target_dtype": "uint8",
-        "compression": "none",
-    },
-    "1d": {
-        "key": "1d",
-        "step_time_s": 86400,
-        "layers_config": "configs/layers/all_ae_1d_1d.yaml",
-        "alphaearth_layers_config": "configs/layers/alphaearth_only_1d_1d.yaml",
-        "marine_layers_config": "configs/layers/all_ae_plus_marine_1d_1d.yaml",
-        "sampler_config": "configs/samplers/issf_defaults.yaml",
-        "output_hw": (101, 101),
-        "normalize": True,
-        "samples_per_shard": 256,
-        "spatial_dtype": "float16",
-        "target_dtype": "uint8",
-        "compression": "none",
-    },
-    "7d": {
-        "key": "7d",
-        "step_time_s": 604800,
-        "layers_config": "configs/layers/all_ae_7d_7d.yaml",
-        "alphaearth_layers_config": "configs/layers/alphaearth_only_7d_7d.yaml",
-        "marine_layers_config": "configs/layers/all_ae_plus_marine_7d_7d.yaml",
-        "sampler_config": "configs/samplers/issf_defaults.yaml",
-        "output_hw": (101, 101),
-        "normalize": True,
-        "samples_per_shard": 256,
-        "spatial_dtype": "float16",
-        "target_dtype": "uint8",
-        "compression": "none",
-    },
+    }
+    for key, step_time_s in (
+        ("1h", 3600),
+        ("12h", 43200),
+        ("1d", 86400),
+        ("7d", 604800),
+    )
 }
 
 COVARIATE_SETS: dict[str, dict[str, object]] = {
