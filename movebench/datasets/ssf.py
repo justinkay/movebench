@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import torch
@@ -18,7 +17,6 @@ from movebench.features.points import (
     load_point_store_manifest,
     resolve_sampler_hash,
 )
-from movebench.geometry import local_aeqd_proj4
 from movebench.layers.plan import Channel, LayerPlan
 
 
@@ -165,103 +163,6 @@ def _subset_plan_env_channels(
             if layer in required_layers
         },
     )
-
-
-class SSFDataset(Dataset):
-    """Empirical SSF dataset (env + valid mask) loaded from a point feature store."""
-
-    def __init__(
-        self,
-        *,
-        study_dir: str | Path,
-        plan: LayerPlan,
-        sampler_config: SamplerConfig,
-        split: str,
-        normalize: bool = True,
-        subset_env_layers: list[str] | None = None,
-        subset_band_ids: list[str] | None = None,
-    ) -> None:
-        if str(sampler_config.type) != "empirical":
-            raise ValueError(
-                f"SSFDataset requires an empirical sampler_config, got {sampler_config.type!r}"
-            )
-        self.study_dir = Path(study_dir)
-        self.split = str(split)
-        _indices, self.plan = _subset_plan_env_channels(
-            plan,
-            subset_env_layers=subset_env_layers,
-            subset_band_ids=subset_band_ids,
-        )
-        sampler_hash = resolve_sampler_hash(sampler_config)
-        store_dir, manifest = load_point_store_manifest(
-            study_dir=self.study_dir,
-            split=self.split,
-            rasters_hash=str(plan.rasters_hash),
-            sampler_hash=str(sampler_hash),
-        )
-        self.store_dir = store_dir
-        self.manifest = manifest
-        self.sampler_hash = str(manifest.sampler_hash)
-        self.normalize = bool(normalize)
-        self.reader = PointStoreReader(store_dir=store_dir, manifest=manifest)
-        self.c_env = int(self.plan.num_channels())
-
-        all_rows = torch.arange(int(manifest.n_rows), dtype=torch.long)
-        self.env, self.valid = self.reader.load_env_valid_rows(
-            band_ids=self.plan.band_ids_in_order(),
-            row_idxs=all_rows,
-        )
-        shared = self.reader.load_shared_rows(
-            keys=[
-                "step_length_m",
-                "turn_angle_rad",
-                "point_id_start",
-                "timestamp_ns",
-                "start_lon",
-                "start_lat",
-            ],
-            row_idxs=all_rows,
-        )
-        self.step_length_m = shared["step_length_m"]
-        self.turn_angle_rad = shared["turn_angle_rad"]
-        self.point_id_start = shared["point_id_start"]
-        self.timestamp_ns = shared["timestamp_ns"]
-        self.start_lon = shared["start_lon"]
-        self.start_lat = shared["start_lat"]
-
-        if self.normalize:
-            self._mean, self._std = load_points_normalization_mean_std(
-                study_dir=self.study_dir,
-                plan=self.plan,
-                sampler_config=sampler_config,
-            )
-        else:
-            self._mean = None
-            self._std = None
-
-    def __len__(self) -> int:
-        return int(self.manifest.n_rows)
-
-    def _get_env_valid(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        env = self.env[int(idx)]
-        valid = self.valid[int(idx)]
-        if not self.normalize:
-            return env, valid
-        assert self._mean is not None
-        assert self._std is not None
-        env = (env - self._mean.view(-1, 1)) / self._std.view(-1, 1)
-        env = torch.where(valid, env, torch.zeros_like(env))
-        return env, valid
-
-    def __getitem__(
-        self, idx: int
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], str]:
-        env, valid = self._get_env_valid(idx)
-        crs = local_aeqd_proj4(
-            float(self.start_lon[int(idx)].item()),
-            float(self.start_lat[int(idx)].item()),
-        )
-        return env, valid, {}, crs
 
 
 class iSSFDataset(Dataset):

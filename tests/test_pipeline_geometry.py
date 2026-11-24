@@ -1,7 +1,6 @@
 import json
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +9,6 @@ import torch
 from movebench.bench.evaluation.runner import _grid_coordinates, _truth_xy_m_for_step
 from movebench.datasets.deepssf_wds_cache import read_deepssf_wds_manifest
 from movebench.datasets.moveformer import _set_local_movement_vectors
-from movebench.datasets.ssf import SSFDataset
 from movebench.geometry import (
     LOCAL_GEOMETRY,
     local_xy_m_from_lonlat,
@@ -88,22 +86,6 @@ class PipelineGeometryTest(unittest.TestCase):
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "geometry"):
                 read_deepssf_wds_manifest(path)
-
-    def test_ssf_metadata_does_not_construct_crs_objects(self):
-        dataset = SSFDataset.__new__(SSFDataset)
-        dataset.start_lon = torch.tensor([10.0])
-        dataset.start_lat = torch.tensor([75.0])
-        dataset._get_env_valid = lambda _idx: (
-            torch.zeros((1, 1)),
-            torch.ones((1, 1), dtype=torch.bool),
-        )
-        with patch(
-            "movebench.datasets.ssf.local_aeqd_proj4",
-            return_value="+proj=aeqd",
-        ) as proj4:
-            _env, _valid, _metadata, crs = dataset[0]
-        self.assertEqual(crs, "+proj=aeqd")
-        proj4.assert_called_once_with(10.0, 75.0)
 
 if __name__ == "__main__":
     unittest.main()

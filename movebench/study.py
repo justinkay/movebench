@@ -510,30 +510,6 @@ class Study:
             subset_band_ids=subset_band_ids,
         )
 
-    def ssf_dataset(
-        self,
-        *,
-        split: str = "train",
-        layers_config: str | Path = "configs/layers/all.yaml",
-        sampler_config: str | Path | SamplerConfig = "configs/samplers/issf_defaults.yaml",
-        normalize: bool = True,
-        subset_env_layers: list[str] | None = None,
-        subset_band_ids: list[str] | None = None,
-    ):
-        from movebench.datasets.ssf import SSFDataset
-
-        plan = self.layer_plan(layers_config)
-        sampler = _load_sampler(sampler_config)
-        return SSFDataset(
-            study_dir=self.study_dir,
-            plan=plan,
-            sampler_config=sampler,
-            split=split,
-            normalize=normalize,
-            subset_env_layers=subset_env_layers,
-            subset_band_ids=subset_band_ids,
-        )
-
     def issf_dataset(
         self,
         *,
