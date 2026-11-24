@@ -185,32 +185,15 @@ def _horizon_linked_chains(
         successor_idx[best_pred_idx] = int(idx)
 
     chains: list[list[_StepRecord]] = []
-    visited: set[int] = set()
     for root_idx, pred_idx in enumerate(predecessor_idx):
         if pred_idx != -1:
             continue
         chain: list[_StepRecord] = []
         current_idx = int(root_idx)
-        while current_idx != -1 and current_idx not in visited:
-            visited.add(current_idx)
+        while current_idx != -1:
             chain.append(ordered[current_idx])
             current_idx = successor_idx[current_idx]
-        if chain:
-            chains.append(chain)
-
-    for start_idx in range(len(ordered)):
-        if start_idx in visited:
-            continue
-        chain = []
-        current_idx = int(start_idx)
-        local_seen: set[int] = set()
-        while current_idx != -1 and current_idx not in local_seen:
-            local_seen.add(current_idx)
-            visited.add(current_idx)
-            chain.append(ordered[current_idx])
-            current_idx = successor_idx[current_idx]
-        if chain:
-            chains.append(chain)
+        chains.append(chain)
 
     return chains
 
