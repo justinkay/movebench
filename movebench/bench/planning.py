@@ -235,6 +235,17 @@ def _plan_shared_training_runs(
     )
 
 
+def _blocked_run(payload, reason, variant_key=None):
+    blocked = {
+        key: payload[key]
+        for key in ("study_id", "timescale", "covariate_set", "method")
+    }
+    blocked["reason"] = reason
+    if variant_key is not None:
+        blocked["method_variant"] = str(variant_key)
+    return blocked
+
+
 def expand_experiment(
     experiment: dict[str, object],
     studies_override: list[str] | None = None,
@@ -254,22 +265,19 @@ def expand_experiment(
     blocked_shared_groups: set[tuple[str, str]] = set()
     local_readiness_map: dict[str, dict[str, object]] = {}
     deepssf_data = str(experiment["deepssf_data"])
-    needs_points = True
 
     for study_id in studies:
         for timescale_key in experiment["timescales"]:
             readiness_key = f"{study_id}:{timescale_key}"
             if deepssf_data == "gpu":
-                readiness_key += ":gpu"
-                if needs_points:
-                    readiness_key += ":points"
+                readiness_key += ":gpu:points"
             readiness = None if readiness_map is None else readiness_map.get(readiness_key)
             if readiness is None:
                 readiness = bench_artifacts._study_timescale_readiness(
                     study_id,
                     str(timescale_key),
                     deepssf_data=deepssf_data,
-                    needs_points=needs_points,
+                    needs_points=True,
                 )
                 if readiness_map is not None:
                     readiness_map[readiness_key] = readiness
@@ -291,6 +299,13 @@ def expand_experiment(
                         str(method_key),
                         method,
                     )
+                    shared = str(method.get("run_scope", "study")) == "shared"
+                    identity = {
+                        "study_id": study_id,
+                        "timescale": str(timescale_key),
+                        "covariate_set": str(covariate_set_key),
+                        "method": str(method_key),
+                    }
                     requirement = str(method["artifact_requirement"])
                     if str(method_key) == "deepssf" and deepssf_data == "gpu":
                         requirement = "deepssf_gpu"
@@ -306,20 +321,14 @@ def expand_experiment(
                             if band_to_layer.get(band_id) != ALPHAEARTH_LAYER
                         ]
                         if incompatible:
-                            for variant in method_variants:
-                                blocked_run = {
-                                    "study_id": study_id,
-                                    "timescale": str(timescale_key),
-                                    "covariate_set": str(covariate_set_key),
-                                    "method": str(method_key),
-                                    "reason": (
-                                        "deepssf_data='gpu' only supports AlphaEarth "
-                                        "covariates"
-                                    ),
-                                }
-                                if variant["key"] is not None:
-                                    blocked_run["method_variant"] = str(variant["key"])
-                                blocked.append(blocked_run)
+                            blocked.extend(
+                                _blocked_run(
+                                    identity,
+                                    "deepssf_data='gpu' only supports AlphaEarth covariates",
+                                    variant["key"],
+                                )
+                                for variant in method_variants
+                            )
                             continue
 
                     if requirement in {"deepssf_cache", "deepssf_gpu"}:
@@ -331,7 +340,7 @@ def expand_experiment(
                     elif requirement == "points":
                         evaluation_splits = list(readiness["available_point_splits"])
                         early_stop_split_key = readiness["early_stop_point_split"]
-                        if str(method.get("run_scope", "study")) == "shared":
+                        if shared:
                             runnable = bool(
                                 readiness.get(
                                     "train_point_ready",
@@ -347,8 +356,7 @@ def expand_experiment(
                         )
 
                     base_run_payload = {
-                        "study_id": study_id,
-                        "timescale": str(timescale_key),
+                        **identity,
                         "step_time_s": int(timescale["step_time_s"]),
                         "layers_config": str(
                             timescale["alphaearth_layers_config"]
@@ -359,9 +367,7 @@ def expand_experiment(
                         "sampler_config": str(timescale["sampler_config"]),
                         "sampler_hash": str(timescale["sampler_hash"]),
                         "geometry": str(timescale["geometry"]),
-                        "covariate_set": str(covariate_set_key),
                         "band_ids": band_ids,
-                        "method": str(method_key),
                         "artifact_requirement": requirement,
                         "implementation": str(method["implementation"]),
                         "seed": int(experiment["seed"]),
@@ -381,43 +387,6 @@ def expand_experiment(
                             *evaluation_splits,
                         ]
 
-                    requires_study_eval = (
-                        str(method.get("run_scope", "study")) != "shared"
-                    )
-                    if not runnable or (
-                        requires_study_eval and early_stop_split_key is None
-                    ):
-                        for variant in method_variants:
-                            blocked_payload = {
-                                **base_run_payload,
-                                "method_model": dict(variant["model"]),
-                                "method_hparams": dict(variant["hparams"]),
-                            }
-                            if variant["key"] is not None:
-                                blocked_payload["method_variant"] = str(variant["key"])
-                            if str(method.get("run_scope", "study")) == "shared":
-                                blocked_shared_groups.add(
-                                    (
-                                        str(method_key),
-                                        _shared_group_signature(blocked_payload),
-                                    )
-                                )
-                            blocked_run = {
-                                "study_id": study_id,
-                                "timescale": str(timescale_key),
-                                "covariate_set": str(covariate_set_key),
-                                "method": str(method_key),
-                                "reason": bench_artifacts._blocked_reason(
-                                    readiness,
-                                    method_key=str(method_key),
-                                    artifact_requirement=requirement,
-                                ),
-                            }
-                            if variant["key"] is not None:
-                                blocked_run["method_variant"] = str(variant["key"])
-                            blocked.append(blocked_run)
-                        continue
-
                     for variant in method_variants:
                         run_payload = {
                             **base_run_payload,
@@ -427,10 +396,13 @@ def expand_experiment(
                         if variant["key"] is not None:
                             run_payload["method_variant"] = str(variant["key"])
 
-                        if (
-                            str(method.get("run_scope", "study")) == "shared"
-                            and readiness.get("train_steps_empty", False)
-                        ):
+                        if not runnable or (not shared and early_stop_split_key is None):
+                            reason = bench_artifacts._blocked_reason(
+                                readiness,
+                                method_key=str(method_key),
+                                artifact_requirement=requirement,
+                            )
+                        elif shared and readiness.get("train_steps_empty", False):
                             reason = bench_artifacts._blocked_reason(
                                 readiness,
                                 method_key=str(method_key),
@@ -439,41 +411,24 @@ def expand_experiment(
                             run_payload["shared_zero_train_steps"] = True
                             run_payload["shared_zero_train_steps_reason"] = reason
                             candidate_runs.append(run_payload)
-                            blocked_run = {
-                                "study_id": study_id,
-                                "timescale": str(timescale_key),
-                                "covariate_set": str(covariate_set_key),
-                                "method": str(method_key),
-                                "reason": reason,
-                            }
-                            if variant["key"] is not None:
-                                blocked_run["method_variant"] = str(variant["key"])
-                            blocked.append(blocked_run)
+                            blocked.append(
+                                _blocked_run(run_payload, reason, variant["key"])
+                            )
                             continue
+                        else:
+                            resolved = bench_artifacts._resolve_artifacts_for_run(
+                                run_payload
+                            )
+                            if resolved["status"] == "resolved":
+                                candidate_runs.append(run_payload)
+                                continue
+                            reason = str(resolved["reason"])
 
-                        resolved = bench_artifacts._resolve_artifacts_for_run(run_payload)
-                        if resolved["status"] != "resolved":
-                            if str(method.get("run_scope", "study")) == "shared":
-                                blocked_shared_groups.add(
-                                    (
-                                        str(method_key),
-                                        _shared_group_signature(run_payload),
-                                    )
-                                )
-                            blocked_run = {
-                                "study_id": study_id,
-                                "timescale": str(timescale_key),
-                                "covariate_set": str(covariate_set_key),
-                                "method": str(method_key),
-                                "reason": str(resolved["reason"]),
-                            }
-                            if "method_variant" in run_payload:
-                                blocked_run["method_variant"] = run_payload[
-                                    "method_variant"
-                                ]
-                            blocked.append(blocked_run)
-                            continue
-                        candidate_runs.append(run_payload)
+                        if shared:
+                            blocked_shared_groups.add(
+                                (str(method_key), _shared_group_signature(run_payload))
+                            )
+                        blocked.append(_blocked_run(run_payload, reason, variant["key"]))
 
     runs: list[dict[str, object]] = []
     shared_candidates: list[dict[str, object]] = []
@@ -528,13 +483,9 @@ def expand_experiment(
             )
             if training_run is None:
                 blocked.append(
-                    {
-                        "study_id": candidate["study_id"],
-                        "timescale": candidate["timescale"],
-                        "covariate_set": candidate["covariate_set"],
-                        "method": score_method,
-                        "reason": "no compatible shared training run for selected cohort",
-                    }
+                    _blocked_run(
+                        candidate, "no compatible shared training run for selected cohort"
+                    )
                 )
                 continue
             candidate.update(
@@ -548,15 +499,7 @@ def expand_experiment(
             )
             resolved = bench_artifacts._resolve_artifacts_for_run(candidate)
             if resolved["status"] != "resolved":
-                blocked.append(
-                    {
-                        "study_id": candidate["study_id"],
-                        "timescale": candidate["timescale"],
-                        "covariate_set": candidate["covariate_set"],
-                        "method": score_method,
-                        "reason": str(resolved["reason"]),
-                    }
-                )
+                blocked.append(_blocked_run(candidate, str(resolved["reason"])))
                 continue
             candidate["run_key"] = _run_key(candidate)
             runs.append(candidate)
