@@ -20,34 +20,6 @@ from movebench.features.points import (
 from movebench.layers.plan import Channel, LayerPlan
 
 
-def _compute_movement_stats(
-    step_length_m: torch.Tensor, turn_angle_rad: torch.Tensor
-) -> dict[str, float]:
-    sl = step_length_m[:, -1].to(dtype=torch.float64)
-    ta = turn_angle_rad[:, -1].to(dtype=torch.float64)
-    log_sl = torch.log(sl + 1e-8)
-    cos_ta = torch.cos(ta)
-
-    def _mean_std(x: torch.Tensor) -> tuple[float, float]:
-        mean = float(x.mean().item())
-        std = float(x.std(unbiased=False).item())
-        if not math.isfinite(std) or std < 1e-8:
-            std = 1.0
-        return mean, std
-
-    sl_mean, sl_std = _mean_std(sl)
-    log_sl_mean, log_sl_std = _mean_std(log_sl)
-    cos_ta_mean, cos_ta_std = _mean_std(cos_ta)
-    return {
-        "sl_mean": sl_mean,
-        "sl_std": sl_std,
-        "log_sl_mean": log_sl_mean,
-        "log_sl_std": log_sl_std,
-        "cos_ta_mean": cos_ta_mean,
-        "cos_ta_std": cos_ta_std,
-    }
-
-
 def _movement_stats_from_reader(reader: PointStoreReader) -> dict[str, float]:
     sl_sum = 0.0
     sl_sumsq = 0.0
