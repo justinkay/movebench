@@ -25,7 +25,6 @@ LayerSource = Literal["gee_chip", "gee_tile", "local_tiff", "derived"]
 class LayerSpec:
     """Specification for a single layer in the layer registry."""
 
-    name: str
     source: LayerSource
     bands: list[str]
     native_scale_m: float | None = None
@@ -54,7 +53,6 @@ LAYERS: dict[str, LayerSpec] = {
     # Low spatial resolution, high temporal resolution
     # Include hourly and daily layers
     "era5_land_hourly": LayerSpec(
-        name="era5_land_hourly",
         source="gee_chip",
         bands=[
             "temperature_2m",
@@ -76,7 +74,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="hourly",
     ),
     "era5_hourly": LayerSpec(
-        name="era5_hourly",
         source="gee_chip",
         bands=["boundary_layer_height", "total_cloud_cover", "mean_sea_level_pressure"],
         native_scale_m=27830.0,
@@ -84,7 +81,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="hourly",
     ),
     "era5_land_daily": LayerSpec(
-        name="era5_land_daily",
         source="gee_chip",
         bands=[
             "temperature_2m",
@@ -107,7 +103,6 @@ LAYERS: dict[str, LayerSpec] = {
     ),
     # MODIS
     "modis_lst": LayerSpec(  # replaced by landsat by default
-        name="modis_lst",
         source="gee_chip",
         bands=["LST_Day_1km", "LST_Night_1km"],
         native_scale_m=1000.0,
@@ -116,7 +111,6 @@ LAYERS: dict[str, LayerSpec] = {
         scale_factor=0.02,
     ),
     "modis_vi": LayerSpec(  # replaced by landsat by default
-        name="modis_vi",
         source="gee_chip",
         bands=["NDVI", "EVI"],
         native_scale_m=250.0,
@@ -125,7 +119,6 @@ LAYERS: dict[str, LayerSpec] = {
         scale_factor=0.0001,
     ),
     "modis_ndsi": LayerSpec(  # replaced by landsat by default
-        name="modis_ndsi",
         source="gee_chip",
         bands=["NDSI"],
         native_scale_m=500.0,
@@ -133,7 +126,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="daily",
     ),
     "modis_bai": LayerSpec(  # replaced by landsat by default
-        name="modis_bai",
         source="gee_chip",
         bands=["BAI"],
         native_scale_m=500.0,
@@ -141,7 +133,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="daily",
     ),
     "modis_lc": LayerSpec(
-        name="modis_lc",
         source="gee_tile",
         bands=["LC_Type1"],
         native_scale_m=500.0,
@@ -153,7 +144,6 @@ LAYERS: dict[str, LayerSpec] = {
         normalize=False,
     ),
     "modis_cvf_tree": LayerSpec(
-        name="modis_cvf_tree",
         source="gee_tile",
         bands=["Percent_Tree_Cover"],
         native_scale_m=250.0,
@@ -163,7 +153,6 @@ LAYERS: dict[str, LayerSpec] = {
         valid_range=(0.0, 100.0),
     ),
     "modis_cvf_nontree": LayerSpec(
-        name="modis_cvf_nontree",
         source="gee_tile",
         bands=["Percent_NonTree_Vegetation"],
         native_scale_m=250.0,
@@ -173,7 +162,6 @@ LAYERS: dict[str, LayerSpec] = {
         valid_range=(0.0, 100.0),
     ),
     "modis_cvf_nonveg": LayerSpec(
-        name="modis_cvf_nonveg",
         source="gee_tile",
         bands=["Percent_NonVegetated"],
         native_scale_m=250.0,
@@ -184,7 +172,6 @@ LAYERS: dict[str, LayerSpec] = {
     ),
     # Landsat and derivatives
     "landsat": LayerSpec(
-        name="landsat",
         source="gee_chip",
         bands=["blue", "green", "red", "nir", "swir1", "swir2", "thermal"],
         native_scale_m=30.0,
@@ -192,7 +179,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="8day",
     ),
     "landsat_ndwi": LayerSpec(
-        name="landsat_ndwi",
         source="derived",
         bands=["NDWI"],
         native_scale_m=30.0,
@@ -200,7 +186,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     "landsat_ndvi": LayerSpec(
-        name="landsat_ndvi",
         source="derived",
         bands=["NDVI"],
         native_scale_m=30.0,
@@ -208,7 +193,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     "landsat_evi": LayerSpec(
-        name="landsat_evi",
         source="derived",
         bands=["EVI"],
         native_scale_m=30.0,
@@ -216,7 +200,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     "landsat_ndsi": LayerSpec(
-        name="landsat_ndsi",
         source="derived",
         bands=["NDSI"],
         native_scale_m=30.0,
@@ -224,7 +207,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     "landsat_bai": LayerSpec(
-        name="landsat_bai",
         source="derived",
         bands=["BAI"],
         native_scale_m=30.0,
@@ -232,7 +214,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     "landsat_lst": LayerSpec(
-        name="landsat_lst",
         source="derived",
         bands=["thermal"],
         native_scale_m=30.0,
@@ -240,7 +221,6 @@ LAYERS: dict[str, LayerSpec] = {
         derived_from=["landsat"],
     ),
     # "landsat_ndwi": LayerSpec( # Compute ourselves from the bands instead
-    #     name="landsat_ndwi",
     #     source="gee_chip",
     #     bands=["NDWI"],
     #     native_scale_m=30.0,
@@ -249,7 +229,6 @@ LAYERS: dict[str, LayerSpec] = {
     # ),
     # Elevation and derivatives
     "dem": LayerSpec(
-        name="dem",
         source="gee_tile",
         bands=["elevation"],
         native_scale_m=30.0,
@@ -257,7 +236,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="static",
     ),
     "slope": LayerSpec(
-        name="slope",
         source="derived",
         bands=["slope"],
         native_scale_m=30.0,
@@ -266,7 +244,6 @@ LAYERS: dict[str, LayerSpec] = {
         metric_grid_derived=True
     ),
     "aspect": LayerSpec(
-        name="aspect",
         source="derived",
         bands=["aspect_sin", "aspect_cos"],
         native_scale_m=30.0,
@@ -275,7 +252,6 @@ LAYERS: dict[str, LayerSpec] = {
         metric_grid_derived=True
     ),
     "rugosity": LayerSpec(
-        name="rugosity",
         source="derived",
         bands=["tri"],
         native_scale_m=30.0,
@@ -284,7 +260,6 @@ LAYERS: dict[str, LayerSpec] = {
         metric_grid_derived=True
     ),
     "orographic_uplift_hourly": LayerSpec(
-        name="orographic_uplift_hourly",
         source="derived",
         bands=["orographic_uplift_hourly"],
         native_scale_m=30.0,
@@ -293,7 +268,6 @@ LAYERS: dict[str, LayerSpec] = {
         metric_grid_derived=True
     ),
     "thermal_uplift_hourly": LayerSpec(
-        name="thermal_uplift_hourly",
         source="derived",
         bands=["thermal_uplift_hourly"],
         native_scale_m=11132.0,
@@ -302,7 +276,6 @@ LAYERS: dict[str, LayerSpec] = {
     ),
     # Other GEE features
     "dist_water": LayerSpec(
-        name="dist_water",
         source="gee_tile",
         bands=["dist_water"],
         native_scale_m=30.0,
@@ -311,7 +284,6 @@ LAYERS: dict[str, LayerSpec] = {
         clip_max=30000.0,
     ),
     "bathymetry": LayerSpec(
-        name="bathymetry",
         source="gee_tile",
         bands=["deptho"],
         native_scale_m=9276.62,
@@ -319,7 +291,6 @@ LAYERS: dict[str, LayerSpec] = {
         temporal="static",
     ),
     "dist_shore": LayerSpec(
-        name="dist_shore",
         source="gee_tile",
         bands=["dist_shore"],
         native_scale_m=250.0,
@@ -328,7 +299,6 @@ LAYERS: dict[str, LayerSpec] = {
         clip_max=100000.0,
     ),
     "sst_30d": LayerSpec(
-        name="sst_30d",
         source="gee_chip",
         bands=["sst_mean", "sst_std"],
         native_scale_m=27830.0,
@@ -337,7 +307,6 @@ LAYERS: dict[str, LayerSpec] = {
         scale_factor=0.01,
     ),
     "chlorophyll_30d": LayerSpec(
-        name="chlorophyll_30d",
         source="gee_chip",
         bands=["chlor_a_mean"],
         native_scale_m=4000.0,
@@ -346,7 +315,6 @@ LAYERS: dict[str, LayerSpec] = {
         valid_range=(0.0, 99.9),
     ),
     "hycom_surface_current": LayerSpec(
-        name="hycom_surface_current",
         source="gee_chip",
         bands=["velocity_u_0", "velocity_v_0", "speed"],
         native_scale_m=8905.6,
@@ -355,7 +323,6 @@ LAYERS: dict[str, LayerSpec] = {
         scale_factor=0.001,
     ),
     "dynamic_world": LayerSpec(
-        name="dynamic_world",
         source="gee_chip",
         bands=[
             "water",
@@ -375,7 +342,6 @@ LAYERS: dict[str, LayerSpec] = {
         normalize=False,
     ),
     "alphaearth_embeddings": LayerSpec(
-        name="alphaearth_embeddings",
         source="gee_tile",
         bands=[f"A{i:02d}" for i in range(64)],
         native_scale_m=10.0,
@@ -385,7 +351,6 @@ LAYERS: dict[str, LayerSpec] = {
     ),
     # Other non-GEE features -- must download locally first
     "hii": LayerSpec(
-        name="hii",
         source="local_tiff",
         bands=["hii"],
         native_scale_m=1000.0,
@@ -394,7 +359,6 @@ LAYERS: dict[str, LayerSpec] = {
         year_bounds=(2015, 2020),
     ),
     "bioclim": LayerSpec(
-        name="bioclim",
         source="local_tiff",
         bands=[f"bio_{i}" for i in range(1, 20)],
         native_scale_m=1000.0,
