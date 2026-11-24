@@ -3,9 +3,8 @@
 All studies in this codebase are assumed to provide a `trajectories.csv` file
 with a consistent Movebank-style schema.
 
-`compute_movement_features(...)` is the single entrypoint to compute commonly
-used movement quantities (step lengths, bearings, turn angles) and to flag
-which rows can serve as the start of a step for stepwise algorithms (SSF/iSSF).
+Fixed-interval helpers select step starts and fit movement support from training
+trajectories.
 """
 
 from __future__ import annotations
@@ -383,111 +382,6 @@ def fit_interval_step_support(
         gap_cutoffs=gap_cutoffs,
         max_step_length_m=float(max_step_length_m),
     )
-
-
-def compute_movement_features(
-    df: pd.DataFrame,
-    *,
-    step_multiplier: float = 2.0,
-    step_q: float = 0.95,
-    max_step_q: float = 0.99,
-    gap_q: float = 0.999,
-) -> pd.DataFrame:
-    """Compute movement metrics + step-start flags for stepwise algorithms.
-
-    This ports legacy logic from `movebench.utils.setup_df_for_ssf` but uses the
-    more general name `can_be_step_start` instead of `can_be_ssf_start`.
-    """
-    df = df.copy()
-
-    df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
-    df = df.dropna(subset=[TIME_COL])
-
-    # Sort so diffs make sense; keep original index (point ids).
-    df = df.sort_values([INDIVIDUAL_COL, TIME_COL])
-
-    g = df.groupby(INDIVIDUAL_COL)
-
-    # ---- time gaps per individual ----
-    df["time_since_last"] = g[TIME_COL].diff()
-    per_indiv_cutoff = g["time_since_last"].transform(
-        lambda s: s.dropna().quantile(gap_q)
-    )
-    df["within_time"] = df["time_since_last"] <= per_indiv_cutoff
-
-    # ---- step length per individual ----
-    lat_prev_deg = g[LAT_COL].shift()
-    lon_prev_deg = g[LON_COL].shift()
-    df["step_length_m"] = geodesic_distance_m(
-        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
-        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
-    )
-
-    # Initial valid step mask (time + positive distance).
-    df["valid_step"] = (
-        df["within_time"] & df["step_length_m"].notna() & (df["step_length_m"] > 0)
-    )
-
-    # ---- step-length cutoff ----
-    max_step_len = compute_step_length_extent_m(
-        df.loc[df["valid_step"], "step_length_m"],
-        step_q=step_q,
-        max_step_q=max_step_q,
-        step_multiplier=step_multiplier,
-    )
-    df["max_step_len"] = max_step_len
-    df["valid_step"] &= df["step_length_m"] <= max_step_len
-
-    # ---- turn angles ----
-    df["bearing"] = bearing_rad(
-        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
-        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
-    )
-    df["arrival_bearing"] = arrival_bearing_rad(
-        lat_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        lon_prev_deg.to_numpy(dtype=np.float64, copy=False),
-        df[LAT_COL].to_numpy(dtype=np.float64, copy=False),
-        df[LON_COL].to_numpy(dtype=np.float64, copy=False),
-    )
-    df["bearing_prev"] = g["arrival_bearing"].shift()
-    df["valid_step_prev"] = g["valid_step"].shift()
-
-    turn = df["bearing"] - df["bearing_prev"]
-    turn = (turn + np.pi) % (2.0 * np.pi) - np.pi  # wrap
-
-    df["turn_angle_rad"] = np.where(
-        df["valid_step"] & df["valid_step_prev"], turn, np.nan
-    )
-
-    # ---- bursts ----
-    df["is_first_in_indiv"] = g.cumcount() == 0
-    df["burst_start"] = df["is_first_in_indiv"] | (~df["valid_step"])
-    df["burst_id"] = g["burst_start"].cumsum()
-
-    # ---- step sample starts ----
-    df["next_index"] = df.index.to_series().shift(-1).astype("Int64")
-
-    same_indiv_next = df[INDIVIDUAL_COL].eq(df[INDIVIDUAL_COL].shift(-1))
-    same_burst_next = df["burst_id"].eq(df["burst_id"].shift(-1))
-    valid_step_next = df["valid_step"].shift(-1).fillna(False).astype(bool)
-
-    df["can_be_step_start"] = (
-        (~df["is_first_in_indiv"]) & same_indiv_next & same_burst_next & valid_step_next
-    )
-
-    df = df.drop(
-        columns=[
-            "arrival_bearing",
-            "burst_start",
-            "is_first_in_indiv",
-        ]
-    )
-
-    return df
 
 
 def select_step_starts(
