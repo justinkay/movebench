@@ -431,7 +431,6 @@ def select_step_starts(
     grouped = d.groupby([INDIVIDUAL_COL, "burst_id"], sort=False)
     prev_lon = grouped[LON_COL].shift()
     prev_lat = grouped[LAT_COL].shift()
-    d = d.copy()
     d["start_bearing"] = arrival_bearing_rad(
         prev_lat.to_numpy(dtype=np.float64, copy=False),
         prev_lon.to_numpy(dtype=np.float64, copy=False),
@@ -439,20 +438,10 @@ def select_step_starts(
         d[LON_COL].to_numpy(dtype=np.float64, copy=False),
     )
 
-    starts = d[d["valid_step_start"]].copy()
+    starts = d[d["valid_step_start"]].reset_index(drop=True)
     if len(starts) == 0:
         return null_dict
-
-    end_idx = starts["step_end_index"]
-    starts = starts[end_idx.notna()].copy()
-    end_idx_int = end_idx[end_idx.notna()].astype(int).to_numpy()
-    ends = d.loc[end_idx_int].copy()
-    starts = starts.reset_index(drop=True)
-    ends = ends.reset_index(drop=True)
-    if len(starts) != len(ends):
-        raise RuntimeError(
-            f"Internal error: starts/ends length mismatch ({len(starts)} vs {len(ends)})"
-        )
+    ends = d.loc[starts["step_end_index"].astype(int)].reset_index(drop=True)
 
     observed_heading = bearing_rad(
         starts[LAT_COL].to_numpy(dtype=np.float64, copy=False),
@@ -487,19 +476,7 @@ def select_step_starts(
     )
 
     finite = np.isfinite(
-        out[
-            [
-                "start_lon",
-                "start_lat",
-                "end_lon",
-                "end_lat",
-                "start_bearing",
-                "step_length_m",
-                "turn_angle_rad",
-                "actual_step_time_s",
-                "step_time_error_s",
-            ]
-        ].to_numpy(dtype=np.float64, copy=False)
+        out.select_dtypes(include="floating").to_numpy(dtype=np.float64, copy=False)
     ).all(axis=1)
     return out.loc[finite].reset_index(drop=True)
 
